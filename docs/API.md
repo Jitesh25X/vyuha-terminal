@@ -24,9 +24,11 @@ Errors: 401 `AUTH_INVALID` (generic message), 423 `AUTH_LOCKED` (`locked_until`)
 
 ### `POST /auth/mfa` — mfa_token in body
 Req `{ "mfa_token": "…", "totp": "123456" }` → 200 `{ "access_token": "…", "expires_in": 900, "user": {id, username, display_name, role} }` + Set-Cookie refresh.
-### `POST /auth/mfa/enroll` (first login) → `{ "otpauth_url": "…", "qr_png_base64": "…" }`; `POST /auth/mfa/enroll/confirm {totp}`.
-### `POST /auth/refresh` — cookie → new access token, rotated cookie. Reuse detected → 401 + family revoked.
-### `POST /auth/logout` — revoke current refresh token.
+### `POST /auth/mfa/enroll` (first login) `{ mfa_token }` → `{ "otpauth_url": "…", "qr_png_base64": "…" }`; `POST /auth/mfa/enroll/confirm { mfa_token, totp }` → same response as `/auth/mfa` (session + cookie). 409 `AUTH_MFA_ALREADY_ENROLLED` / `AUTH_MFA_ENROLL_NOT_STARTED`; `/auth/mfa` for a not-enrolled user → 409 `AUTH_MFA_NOT_ENROLLED`.
+### `POST /auth/refresh` — cookie → new access token + `user`, rotated cookie. Reuse detected → 401 `AUTH_REFRESH_REUSED` + family revoked; invalid/expired → 401 `AUTH_REFRESH_INVALID`; both clear the cookie. Clients must serialise refresh calls (one in flight per browser), or the second call trips reuse detection.
+### `POST /auth/logout` — revoke the current session (refresh family) → 204, cookie cleared.
+- Lockout: 5 consecutive failures (wrong password **or** wrong/replayed TOTP, including on `/auth/reauth`) → 423 `AUTH_LOCKED` with `locked_until` for 15 min. The counter resets only after a full password + TOTP success. Each TOTP code is accepted once (replay → `AUTH_INVALID`).
+- Every non-public route requires `Authorization: Bearer`; otherwise 401 `AUTH_UNAUTHENTICATED`.
 ### `POST /auth/reauth` — `{ password, totp }` → `{ "reauth_token": "…", "expires_in": 300 }`. Required header `X-Reauth` for sensitive endpoints (marked 🔐).
 
 ## 2. Instruments & market data

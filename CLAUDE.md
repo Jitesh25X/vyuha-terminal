@@ -50,6 +50,8 @@ make clean-space    # prune build dirs, caches, dangling images; prints disk usa
 make proto          # buf lint + format check + generate Go/Python/TS for scaffolded services (C++ via CMake)
 make proto-breaking # buf breaking against main
 make migrate        # apply db/migrations, clickhouse, neo4j constraints
+make dev-secrets    # create JWT key + VYUHA_MASTER_KEY in .env (never printed / overwritten)
+make dev-gateway    # run the gateway with .env loaded
 make test           # all unit tests (engine, gateway, quant, intel, web)
 make test-engine    # ctest incl. sanitizers preset `asan`
 make bench          # Google Benchmark: risk gate, normalizer

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Env is the deployment environment.
@@ -30,6 +31,12 @@ type Config struct {
 	LogLevel           slog.Level
 	OTLPEndpoint       string // empty disables trace export
 	LiveTradingEnabled bool
+
+	// Auth. MasterKey is a secret: never log it (LogValue omits it).
+	MasterKey      string // VYUHA_MASTER_KEY, base64 32 bytes; required by the gateway, not by every vyuhactl command
+	JWTKeyPath     string
+	AccessTokenTTL time.Duration
+	RefreshTTL     time.Duration
 }
 
 // Load reads the configuration through getenv (os.Getenv in production, a map in tests).
@@ -63,6 +70,32 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 
+	cfg.MasterKey = getenv("VYUHA_MASTER_KEY")
+	cfg.JWTKeyPath = get("JWT_SIGNING_KEY_PATH", "")
+	if cfg.JWTKeyPath == "" {
+		if cfg.Env == EnvDev {
+			cfg.JWTKeyPath = "./deploy/secrets/jwt_ed25519.pem"
+		} else {
+			errs = append(errs, errors.New("JWT_SIGNING_KEY_PATH is required outside dev"))
+		}
+	}
+	for _, d := range []struct {
+		key string
+		def string
+		dst *time.Duration
+		max time.Duration
+	}{
+		{"ACCESS_TOKEN_TTL", "15m", &cfg.AccessTokenTTL, time.Hour},
+		{"REFRESH_TOKEN_TTL", "168h", &cfg.RefreshTTL, 30 * 24 * time.Hour},
+	} {
+		v, err := time.ParseDuration(get(d.key, d.def))
+		if err != nil || v <= 0 || v > d.max {
+			errs = append(errs, fmt.Errorf("%s must be a duration in (0, %s]", d.key, d.max))
+			continue
+		}
+		*d.dst = v
+	}
+
 	if err := cfg.LogLevel.UnmarshalText([]byte(get("LOG_LEVEL", "info"))); err != nil {
 		errs = append(errs, fmt.Errorf("LOG_LEVEL: %w", err))
 	}
@@ -92,6 +125,10 @@ func (c Config) LogValue() slog.Value {
 		slog.String("log_level", c.LogLevel.String()),
 		slog.Bool("otlp_export", c.OTLPEndpoint != ""),
 		slog.Bool("live_trading_enabled", c.LiveTradingEnabled),
+		slog.String("jwt_key_path", c.JWTKeyPath),
+		slog.Bool("master_key_set", c.MasterKey != ""),
+		slog.Duration("access_token_ttl", c.AccessTokenTTL),
+		slog.Duration("refresh_token_ttl", c.RefreshTTL),
 	)
 }
 

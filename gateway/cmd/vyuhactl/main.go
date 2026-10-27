@@ -1,16 +1,37 @@
-// Command vyuhactl is the admin CLI (migrations now; user create / audit verify / kill from later tasks).
+// Command vyuhactl is the admin CLI: migrations, users and dev secrets
+// (audit verify / kill / sessions arrive with their tasks).
 package main
 
 import (
+	"bufio"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
 
+	"github.com/jiteshraj/vyuha/gateway/internal/auth"
 	"github.com/jiteshraj/vyuha/gateway/internal/config"
 	"github.com/jiteshraj/vyuha/gateway/internal/store"
 )
 
-const usage = `usage: vyuhactl migrate up|version [-dir path]   (reads POSTGRES_URL; dev default from VYUHA_ENV=dev)`
+const usage = `usage:
+  vyuhactl migrate up|version [-dir ../db/migrations]
+  vyuhactl user create -username NAME -display-name "Full Name" -role admin|risk_manager|trader|analyst
+      (password is read from the terminal with echo off, or from stdin when piped; never from a flag)
+  vyuhactl secrets init [-env-file ../.env] [-env-example ../.env.example] [-jwt-key ../deploy/secrets/jwt_ed25519.pem]
+      (creates missing dev secrets; never prints them; never overwrites an existing key)
+Reads POSTGRES_URL etc. from the environment (VYUHA_ENV=dev defaults apply).`
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -20,34 +41,220 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) < 2 || args[0] != "migrate" {
-		return fmt.Errorf("%s", usage)
+	if len(args) < 2 {
+		return errors.New(usage)
 	}
+	switch args[0] + " " + args[1] {
+	case "migrate up", "migrate version":
+		return runMigrate(args[1], args[2:])
+	case "user create":
+		return runUserCreate(args[2:])
+	case "secrets init":
+		return runSecretsInit(args[2:])
+	}
+	return errors.New(usage)
+}
+
+func runMigrate(cmd string, args []string) error {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
 	dir := fs.String("dir", "../db/migrations", "directory holding NNNNNN_name.{up,down}.sql files")
-	if err := fs.Parse(args[2:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	cfg, err := config.Load(os.Getenv)
 	if err != nil {
 		return err
 	}
-
-	switch args[1] {
-	case "up":
+	if cmd == "up" {
 		v, err := store.MigrateUp(*dir, cfg.PostgresURL)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("✔ schema version %d\n", v)
-	case "version":
-		v, dirty, err := store.MigrationVersion(*dir, cfg.PostgresURL)
-		if err != nil {
+		return nil
+	}
+	v, dirty, err := store.MigrationVersion(*dir, cfg.PostgresURL)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("schema version %d (dirty=%t)\n", v, dirty)
+	return nil
+}
+
+func runUserCreate(args []string) error {
+	fs := flag.NewFlagSet("user create", flag.ContinueOnError)
+	username := fs.String("username", "", "lowercase login name, 3–32 of [a-z0-9_.]")
+	display := fs.String("display-name", "", "display name")
+	role := fs.String("role", "", "admin | risk_manager | trader | analyst")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *username == "" || *display == "" || *role == "" {
+		return errors.New("-username, -display-name and -role are required")
+	}
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		return err
+	}
+	password, err := readPassword()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := store.NewPool(ctx, cfg.PostgresURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	// CreateUser only hashes and inserts: no envelope or signer is needed here.
+	svc, err := auth.NewService(pool, nil, nil, auth.DefaultConfig(), time.Now)
+	if err != nil {
+		return err
+	}
+	id, err := svc.CreateUser(ctx, *username, *display, store.UserRole(*role), password)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("✔ created %s (%s) id=%s; TOTP is enrolled at first login\n", *username, *role, id)
+	return nil
+}
+
+// readPassword prompts twice with echo off on a terminal, or reads one line from piped stdin.
+func readPassword() (string, error) {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return "", err
+	}
+	if fi.Mode()&os.ModeCharDevice == 0 {
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		return strings.TrimRight(line, "\r\n"), nil
+	}
+	first, err := promptNoEcho(fmt.Sprintf("Password (%d–%d chars): ", auth.MinPasswordLen, auth.MaxPasswordLen))
+	if err != nil {
+		return "", err
+	}
+	second, err := promptNoEcho("Repeat password: ")
+	if err != nil {
+		return "", err
+	}
+	if first != second {
+		return "", errors.New("passwords do not match")
+	}
+	return first, nil
+}
+
+func promptNoEcho(prompt string) (string, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	if err := stty("-echo"); err != nil {
+		return "", fmt.Errorf("disable echo: %w", err)
+	}
+	defer func() { _ = stty("echo"); fmt.Fprintln(os.Stderr) }()
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
+func stty(arg string) error {
+	cmd := exec.Command("stty", arg)
+	cmd.Stdin = os.Stdin
+	return cmd.Run()
+}
+
+func runSecretsInit(args []string) error {
+	fs := flag.NewFlagSet("secrets init", flag.ContinueOnError)
+	envFile := fs.String("env-file", "../.env", "dotenv file to create or complete")
+	envExample := fs.String("env-example", "../.env.example", "template used when -env-file does not exist")
+	jwtKey := fs.String("jwt-key", "../deploy/secrets/jwt_ed25519.pem", "Ed25519 PKCS#8 PEM to create if missing")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := ensureJWTKey(*jwtKey); err != nil {
+		return err
+	}
+	return ensureMasterKey(*envFile, *envExample)
+}
+
+func ensureJWTKey(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		fmt.Printf("· %s exists; left unchanged\n", path)
+		return nil
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := pem.Encode(f, &pem.Block{Type: "PRIVATE KEY", Bytes: der}); err != nil {
+		return err
+	}
+	fmt.Printf("✔ wrote JWT signing key %s (0600)\n", path)
+	return nil
+}
+
+// ensureMasterKey creates envFile from the example if needed and fills an empty VYUHA_MASTER_KEY.
+// An existing non-empty key is never replaced: TOTP secrets are encrypted under it.
+func ensureMasterKey(envFile, example string) error {
+	content, err := os.ReadFile(envFile)
+	created := false
+	if errors.Is(err, os.ErrNotExist) {
+		if content, err = os.ReadFile(example); err != nil {
+			return fmt.Errorf("read %s: %w", example, err)
+		}
+		created = true
+	} else if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(content), "\n")
+	found, filled := false, false
+	for i, l := range lines {
+		rest, ok := strings.CutPrefix(l, "VYUHA_MASTER_KEY=")
+		if !ok {
+			continue
+		}
+		found = true
+		if strings.TrimSpace(strings.SplitN(rest, "#", 2)[0]) != "" {
+			break
+		}
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
 			return err
 		}
-		fmt.Printf("schema version %d (dirty=%t)\n", v, dirty)
-	default:
-		return fmt.Errorf("%s", usage)
+		lines[i] = "VYUHA_MASTER_KEY=" + base64.StdEncoding.EncodeToString(key)
+		filled = true
+		break
 	}
+	if !found {
+		return fmt.Errorf("%s has no VYUHA_MASTER_KEY= line", envFile)
+	}
+	if !created && !filled {
+		fmt.Printf("· %s already has VYUHA_MASTER_KEY; left unchanged\n", envFile)
+		return nil
+	}
+	if err := os.WriteFile(envFile, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(envFile, 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("✔ %s: VYUHA_MASTER_KEY generated (0600; back it up — TOTP secrets are encrypted with it)\n", envFile)
 	return nil
 }

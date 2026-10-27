@@ -8,6 +8,8 @@ VYUHA_TOOLS_DIR ?= $(HOME)/.local/share/vyuha-tools
 export VYUHA_TOOLS_DIR
 export PATH := $(VYUHA_TOOLS_DIR)/bin:$(PATH)
 export VCPKG_ROOT ?= $(VYUHA_TOOLS_DIR)/vcpkg
+# Use the pinned Go from VYUHA_TOOLS_DIR; never let `go` download another toolchain on its own.
+export GOTOOLCHAIN := local
 # clang-tidy 18 cannot parse the newer libc++ in current macOS SDKs: analyse against LLVM 18's own libc++ headers.
 ifeq ($(shell uname -s),Darwin)
   TIDY_EXTRA := -extra-arg=-nostdinc++ -extra-arg=-isystem$(shell brew --prefix llvm@18 2>/dev/null)/include/c++/v1
@@ -32,7 +34,7 @@ endef
 
 CLEAN_DIRS := engine/build gateway/bin web/dist web/test-results web/playwright-report
 
-.PHONY: clean-space bootstrap up down migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine test-gateway test-quant test-intel test-web bench e2e lint verify invariants
+.PHONY: clean-space bootstrap up down dev-secrets dev-gateway migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine test-gateway test-quant test-intel test-web bench e2e lint verify invariants
 
 # Installs ONE component, just-in-time: make bootstrap C=cpp   (core|proto|cpp|go|py|web)
 # Add CHECK=1 to only report what is present / would be installed.
@@ -65,6 +67,16 @@ proto: proto-lint
 proto-lint:
 	@command -v buf >/dev/null || { echo "✖ buf not found: make bootstrap C=proto"; exit 1; }
 	cd proto && buf lint && buf format -d --exit-code
+
+# Dev secrets: JWT signing key + VYUHA_MASTER_KEY in .env (created from .env.example). Never printed or overwritten.
+dev-secrets:
+	cd gateway && go run ./cmd/vyuhactl secrets init
+
+# Run the gateway from the repo root with .env loaded (paths in .env are repo-relative).
+dev-gateway:
+	@test -f .env || { echo "✖ no .env: make dev-secrets"; exit 1; }
+	cd gateway && go build -o bin/gateway ./cmd/gateway
+	set -a && . ./.env && set +a && exec gateway/bin/gateway
 
 # All codegen: protobuf (scaffolded services) + gateway OpenAPI server + sqlc queries.
 gen: proto

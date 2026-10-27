@@ -26,7 +26,7 @@ func (f fakeDB) DatabaseNow(context.Context) (pgtype.Timestamptz, error) {
 func newTestHandler(db DB) (http.Handler, *bytes.Buffer) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
-	return NewHandler(NewServer("0.0.1", config.EnvDev, db, logger), logger), &logs
+	return NewHandler(NewServer("0.0.1", config.EnvDev, db, nil, logger), logger), &logs
 }
 
 func TestHealth(t *testing.T) {
@@ -74,20 +74,30 @@ func TestHealth(t *testing.T) {
 	}
 }
 
-func TestUnknownRouteIsProblemJSON(t *testing.T) {
+// Non-public routes are default-deny: without a valid bearer token even unknown paths get 401.
+func TestUnauthenticatedRouteIsProblemJSON(t *testing.T) {
 	h, _ := newTestHandler(fakeDB{})
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/nope", nil))
-
-	if rec.Code != http.StatusNotFound || rec.Header().Get("Content-Type") != "application/problem+json" {
-		t.Fatalf("got %d %q", rec.Code, rec.Header().Get("Content-Type"))
-	}
-	var p Problem
-	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
-		t.Fatal(err)
-	}
-	if p.Status != http.StatusNotFound || p.Type != problemTypeBase+"not-found" || p.Code == nil || *p.Code != "not-found" {
-		t.Fatalf("unexpected problem: %+v", p)
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/api/v1/nope", nil),
+		httptest.NewRequest(http.MethodPost, "/api/v1/auth/reauth", strings.NewReader(`{}`)),
+		func() *http.Request {
+			r := httptest.NewRequest(http.MethodGet, "/api/v1/nope", nil)
+			r.Header.Set("Authorization", "Bearer forged.token.value")
+			return r
+		}(),
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized || rec.Header().Get("Content-Type") != "application/problem+json" {
+			t.Fatalf("%s %s: got %d %q", req.Method, req.URL.Path, rec.Code, rec.Header().Get("Content-Type"))
+		}
+		var p Problem
+		if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.Type != problemTypeBase+"auth-unauthenticated" || p.Code == nil || *p.Code != "AUTH_UNAUTHENTICATED" {
+			t.Fatalf("unexpected problem: %+v", p)
+		}
 	}
 }
 

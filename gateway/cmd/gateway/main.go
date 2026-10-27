@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/jiteshraj/vyuha/gateway/internal/api"
+	"github.com/jiteshraj/vyuha/gateway/internal/auth"
 	"github.com/jiteshraj/vyuha/gateway/internal/config"
+	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
 	"github.com/jiteshraj/vyuha/gateway/internal/store"
 	"github.com/jiteshraj/vyuha/gateway/internal/telemetry"
 )
@@ -49,9 +51,27 @@ func run() error {
 	}
 	defer pool.Close()
 
+	if cfg.MasterKey == "" {
+		return errors.New("VYUHA_MASTER_KEY is not set (dev: make dev-secrets)")
+	}
+	envelope, err := vcrypto.NewEnvelope(cfg.MasterKey)
+	if err != nil {
+		return err
+	}
+	signingKey, err := auth.LoadSigningKey(cfg.JWTKeyPath)
+	if err != nil {
+		return err
+	}
+	authCfg := auth.DefaultConfig()
+	authCfg.AccessTTL, authCfg.RefreshTTL = cfg.AccessTokenTTL, cfg.RefreshTTL
+	authSvc, err := auth.NewService(pool, envelope, auth.NewSigner(signingKey), authCfg, time.Now)
+	if err != nil {
+		return err
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           api.NewHandler(api.NewServer(version, cfg.Env, store.New(pool), logger), logger),
+		Handler:           api.NewHandler(api.NewServer(version, cfg.Env, store.New(pool), authSvc, logger), logger),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       120 * time.Second,

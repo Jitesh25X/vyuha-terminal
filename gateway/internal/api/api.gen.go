@@ -11,6 +11,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
+
+	"github.com/oapi-codegen/runtime"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
 // Defines values for CheckStatus.
@@ -70,6 +74,30 @@ func (e HealthStatus) Valid() bool {
 	}
 }
 
+// Defines values for UserRole.
+const (
+	UserRoleAdmin       UserRole = "admin"
+	UserRoleAnalyst     UserRole = "analyst"
+	UserRoleRiskManager UserRole = "risk_manager"
+	UserRoleTrader      UserRole = "trader"
+)
+
+// Valid indicates whether the value is a known member of the UserRole enum.
+func (e UserRole) Valid() bool {
+	switch e {
+	case UserRoleAdmin:
+		return true
+	case UserRoleAnalyst:
+		return true
+	case UserRoleRiskManager:
+		return true
+	case UserRoleTrader:
+		return true
+	default:
+		return false
+	}
+}
+
 // Check defines model for Check.
 type Check struct {
 	// Error Generic reason; never contains hosts, credentials or driver errors.
@@ -97,16 +125,50 @@ type HealthEnv string
 // HealthStatus defines model for Health.Status.
 type HealthStatus string
 
+// LoginRequest defines model for LoginRequest.
+type LoginRequest struct {
+	Password string `json:"password"`
+	Username string `json:"username"`
+}
+
+// LoginResponse defines model for LoginResponse.
+type LoginResponse struct {
+	MfaEnrolled bool `json:"mfa_enrolled"`
+
+	// MfaToken Valid for 5 minutes
+	MfaToken string `json:"mfa_token"`
+}
+
+// MfaEnrollResponse defines model for MfaEnrollResponse.
+type MfaEnrollResponse struct {
+	OtpauthUrl  string `json:"otpauth_url"`
+	QrPngBase64 string `json:"qr_png_base64"`
+}
+
+// MfaRequest defines model for MfaRequest.
+type MfaRequest struct {
+	MfaToken string `json:"mfa_token"`
+	Totp     string `json:"totp"`
+}
+
+// MfaTokenRequest defines model for MfaTokenRequest.
+type MfaTokenRequest struct {
+	MfaToken string `json:"mfa_token"`
+}
+
 // Problem RFC 9457 problem details.
 type Problem struct {
 	// Code Stable machine code, e.g. R-LOSS-DAILY
-	Code     *string          `json:"code,omitempty"`
-	Detail   *string          `json:"detail,omitempty"`
-	Instance *string          `json:"instance,omitempty"`
-	Reasons  *[]ProblemReason `json:"reasons,omitempty"`
-	Status   int              `json:"status"`
-	Title    string           `json:"title"`
-	Type     string           `json:"type"`
+	Code     *string `json:"code,omitempty"`
+	Detail   *string `json:"detail,omitempty"`
+	Instance *string `json:"instance,omitempty"`
+
+	// LockedUntil Set with AUTH_LOCKED
+	LockedUntil *time.Time       `json:"locked_until,omitempty"`
+	Reasons     *[]ProblemReason `json:"reasons,omitempty"`
+	Status      int              `json:"status"`
+	Title       string           `json:"title"`
+	Type        string           `json:"type"`
 }
 
 // ProblemReason defines model for ProblemReason.
@@ -116,8 +178,102 @@ type ProblemReason struct {
 	Limit   *string `json:"limit,omitempty"`
 }
 
+// ReauthRequest defines model for ReauthRequest.
+type ReauthRequest struct {
+	Password string `json:"password"`
+	Totp     string `json:"totp"`
+}
+
+// ReauthResponse defines model for ReauthResponse.
+type ReauthResponse struct {
+	// ExpiresIn Seconds
+	ExpiresIn   int    `json:"expires_in"`
+	ReauthToken string `json:"reauth_token"`
+}
+
+// SessionResponse defines model for SessionResponse.
+type SessionResponse struct {
+	AccessToken string `json:"access_token"`
+
+	// ExpiresIn Seconds
+	ExpiresIn int  `json:"expires_in"`
+	User      User `json:"user"`
+}
+
+// User defines model for User.
+type User struct {
+	DisplayName string             `json:"display_name"`
+	Id          openapi_types.UUID `json:"id"`
+	Role        UserRole           `json:"role"`
+	Username    string             `json:"username"`
+}
+
+// UserRole defines model for User.Role.
+type UserRole string
+
+// RefreshCookie defines model for RefreshCookie.
+type RefreshCookie = string
+
+// Conflict RFC 9457 problem details.
+type Conflict = Problem
+
+// Locked RFC 9457 problem details.
+type Locked = Problem
+
+// SessionStarted defines model for SessionStarted.
+type SessionStarted = SessionResponse
+
+// Unauthorized RFC 9457 problem details.
+type Unauthorized = Problem
+
+// LogoutParams defines parameters for Logout.
+type LogoutParams struct {
+	VyuhaRt *RefreshCookie `form:"vyuha_rt,omitempty" json:"vyuha_rt,omitempty"`
+}
+
+// RefreshSessionParams defines parameters for RefreshSession.
+type RefreshSessionParams struct {
+	VyuhaRt *RefreshCookie `form:"vyuha_rt,omitempty" json:"vyuha_rt,omitempty"`
+}
+
+// LoginJSONRequestBody defines body for Login for application/json ContentType.
+type LoginJSONRequestBody = LoginRequest
+
+// VerifyMfaJSONRequestBody defines body for VerifyMfa for application/json ContentType.
+type VerifyMfaJSONRequestBody = MfaRequest
+
+// BeginMfaEnrollJSONRequestBody defines body for BeginMfaEnroll for application/json ContentType.
+type BeginMfaEnrollJSONRequestBody = MfaTokenRequest
+
+// ConfirmMfaEnrollJSONRequestBody defines body for ConfirmMfaEnroll for application/json ContentType.
+type ConfirmMfaEnrollJSONRequestBody = MfaRequest
+
+// ReauthJSONRequestBody defines body for Reauth for application/json ContentType.
+type ReauthJSONRequestBody = ReauthRequest
+
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// Login Password step; returns an mfa_token for the TOTP step
+	// (POST /auth/login)
+	Login(w http.ResponseWriter, r *http.Request)
+	// Logout Revokes the current session and clears the refresh cookie
+	// (POST /auth/logout)
+	Logout(w http.ResponseWriter, r *http.Request, params LogoutParams)
+	// VerifyMfa TOTP step for an enrolled user; starts a session
+	// (POST /auth/mfa)
+	VerifyMfa(w http.ResponseWriter, r *http.Request)
+	// BeginMfaEnroll First login only; generates a TOTP secret to scan
+	// (POST /auth/mfa/enroll)
+	BeginMfaEnroll(w http.ResponseWriter, r *http.Request)
+	// ConfirmMfaEnroll Confirms enrollment with a first code and starts a session
+	// (POST /auth/mfa/enroll/confirm)
+	ConfirmMfaEnroll(w http.ResponseWriter, r *http.Request)
+	// Reauth Re-checks password + TOTP; returns a reauth_token for the X-Reauth header
+	// (POST /auth/reauth)
+	Reauth(w http.ResponseWriter, r *http.Request)
+	// RefreshSession Rotates the refresh cookie and returns a new access token
+	// (POST /auth/refresh)
+	RefreshSession(w http.ResponseWriter, r *http.Request, params RefreshSessionParams)
 	// GetHealth Gateway health with dependency checks
 	// (GET /health)
 	GetHealth(w http.ResponseWriter, r *http.Request)
@@ -131,6 +287,146 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// Login operation middleware
+func (siw *ServerInterfaceWrapper) Login(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.Login(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// Logout operation middleware
+func (siw *ServerInterfaceWrapper) Logout(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params LogoutParams
+
+	{
+		var cookie *http.Cookie
+
+		if cookie, err = r.Cookie("vyuha_rt"); err == nil {
+			var value RefreshCookie
+			err = runtime.BindStyledParameterWithOptions("simple", "vyuha_rt", cookie.Value, &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationCookie, Explode: true, Required: false, Type: "string", Format: ""})
+			if err != nil {
+				siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "vyuha_rt", Err: err})
+				return
+			}
+			params.VyuhaRt = &value
+
+		}
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.Logout(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// VerifyMfa operation middleware
+func (siw *ServerInterfaceWrapper) VerifyMfa(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.VerifyMfa(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// BeginMfaEnroll operation middleware
+func (siw *ServerInterfaceWrapper) BeginMfaEnroll(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.BeginMfaEnroll(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ConfirmMfaEnroll operation middleware
+func (siw *ServerInterfaceWrapper) ConfirmMfaEnroll(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ConfirmMfaEnroll(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// Reauth operation middleware
+func (siw *ServerInterfaceWrapper) Reauth(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.Reauth(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RefreshSession operation middleware
+func (siw *ServerInterfaceWrapper) RefreshSession(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params RefreshSessionParams
+
+	{
+		var cookie *http.Cookie
+
+		if cookie, err = r.Cookie("vyuha_rt"); err == nil {
+			var value RefreshCookie
+			err = runtime.BindStyledParameterWithOptions("simple", "vyuha_rt", cookie.Value, &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationCookie, Explode: true, Required: false, Type: "string", Format: ""})
+			if err != nil {
+				siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "vyuha_rt", Err: err})
+				return
+			}
+			params.VyuhaRt = &value
+
+		}
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RefreshSession(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // GetHealth operation middleware
 func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Request) {
@@ -267,8 +563,427 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	}
 
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/health", wrapper.GetHealth)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/login", wrapper.Login)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/mfa", wrapper.VerifyMfa)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/mfa/enroll", wrapper.BeginMfaEnroll)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/mfa/enroll/confirm", wrapper.ConfirmMfaEnroll)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/refresh", wrapper.RefreshSession)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/logout", wrapper.Logout)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/reauth", wrapper.Reauth)
 
 	return m
+}
+
+type ConflictApplicationProblemPlusJSONResponse Problem
+
+type LockedApplicationProblemPlusJSONResponse Problem
+
+type SessionStartedResponseHeaders struct {
+	SetCookie *string
+}
+type SessionStartedJSONResponse struct {
+	Body SessionResponse
+
+	Headers SessionStartedResponseHeaders
+}
+
+type UnauthorizedApplicationProblemPlusJSONResponse Problem
+
+type LoginRequestObject struct {
+	Body *LoginJSONRequestBody
+}
+
+type LoginResponseObject interface {
+	VisitLoginResponse(w http.ResponseWriter) error
+}
+
+type Login200JSONResponse LoginResponse
+
+func (response Login200JSONResponse) VisitLoginResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type Login401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response Login401ApplicationProblemPlusJSONResponse) VisitLoginResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type Login423ApplicationProblemPlusJSONResponse struct {
+	LockedApplicationProblemPlusJSONResponse
+}
+
+func (response Login423ApplicationProblemPlusJSONResponse) VisitLoginResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(423)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type LogoutRequestObject struct {
+	Params LogoutParams
+}
+
+type LogoutResponseObject interface {
+	VisitLogoutResponse(w http.ResponseWriter) error
+}
+
+type Logout204ResponseHeaders struct {
+	SetCookie *string
+}
+
+type Logout204Response struct {
+	Headers Logout204ResponseHeaders
+}
+
+func (response Logout204Response) VisitLogoutResponse(w http.ResponseWriter) error {
+	if response.Headers.SetCookie != nil {
+		w.Header().Set("Set-Cookie", fmt.Sprint(*response.Headers.SetCookie))
+	}
+	w.WriteHeader(204)
+	return nil
+}
+
+type VerifyMfaRequestObject struct {
+	Body *VerifyMfaJSONRequestBody
+}
+
+type VerifyMfaResponseObject interface {
+	VisitVerifyMfaResponse(w http.ResponseWriter) error
+}
+
+type VerifyMfa200JSONResponse struct{ SessionStartedJSONResponse }
+
+func (response VerifyMfa200JSONResponse) VisitVerifyMfaResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if response.Headers.SetCookie != nil {
+		w.Header().Set("Set-Cookie", fmt.Sprint(*response.Headers.SetCookie))
+	}
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type VerifyMfa401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response VerifyMfa401ApplicationProblemPlusJSONResponse) VisitVerifyMfaResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type VerifyMfa409ApplicationProblemPlusJSONResponse struct {
+	ConflictApplicationProblemPlusJSONResponse
+}
+
+func (response VerifyMfa409ApplicationProblemPlusJSONResponse) VisitVerifyMfaResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type VerifyMfa423ApplicationProblemPlusJSONResponse struct {
+	LockedApplicationProblemPlusJSONResponse
+}
+
+func (response VerifyMfa423ApplicationProblemPlusJSONResponse) VisitVerifyMfaResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(423)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type BeginMfaEnrollRequestObject struct {
+	Body *BeginMfaEnrollJSONRequestBody
+}
+
+type BeginMfaEnrollResponseObject interface {
+	VisitBeginMfaEnrollResponse(w http.ResponseWriter) error
+}
+
+type BeginMfaEnroll200JSONResponse MfaEnrollResponse
+
+func (response BeginMfaEnroll200JSONResponse) VisitBeginMfaEnrollResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type BeginMfaEnroll401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response BeginMfaEnroll401ApplicationProblemPlusJSONResponse) VisitBeginMfaEnrollResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type BeginMfaEnroll409ApplicationProblemPlusJSONResponse struct {
+	ConflictApplicationProblemPlusJSONResponse
+}
+
+func (response BeginMfaEnroll409ApplicationProblemPlusJSONResponse) VisitBeginMfaEnrollResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type BeginMfaEnroll423ApplicationProblemPlusJSONResponse struct {
+	LockedApplicationProblemPlusJSONResponse
+}
+
+func (response BeginMfaEnroll423ApplicationProblemPlusJSONResponse) VisitBeginMfaEnrollResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(423)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ConfirmMfaEnrollRequestObject struct {
+	Body *ConfirmMfaEnrollJSONRequestBody
+}
+
+type ConfirmMfaEnrollResponseObject interface {
+	VisitConfirmMfaEnrollResponse(w http.ResponseWriter) error
+}
+
+type ConfirmMfaEnroll200JSONResponse struct{ SessionStartedJSONResponse }
+
+func (response ConfirmMfaEnroll200JSONResponse) VisitConfirmMfaEnrollResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if response.Headers.SetCookie != nil {
+		w.Header().Set("Set-Cookie", fmt.Sprint(*response.Headers.SetCookie))
+	}
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ConfirmMfaEnroll401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ConfirmMfaEnroll401ApplicationProblemPlusJSONResponse) VisitConfirmMfaEnrollResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ConfirmMfaEnroll409ApplicationProblemPlusJSONResponse struct {
+	ConflictApplicationProblemPlusJSONResponse
+}
+
+func (response ConfirmMfaEnroll409ApplicationProblemPlusJSONResponse) VisitConfirmMfaEnrollResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ConfirmMfaEnroll423ApplicationProblemPlusJSONResponse struct {
+	LockedApplicationProblemPlusJSONResponse
+}
+
+func (response ConfirmMfaEnroll423ApplicationProblemPlusJSONResponse) VisitConfirmMfaEnrollResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(423)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ReauthRequestObject struct {
+	Body *ReauthJSONRequestBody
+}
+
+type ReauthResponseObject interface {
+	VisitReauthResponse(w http.ResponseWriter) error
+}
+
+type Reauth200JSONResponse ReauthResponse
+
+func (response Reauth200JSONResponse) VisitReauthResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type Reauth401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response Reauth401ApplicationProblemPlusJSONResponse) VisitReauthResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type Reauth423ApplicationProblemPlusJSONResponse struct {
+	LockedApplicationProblemPlusJSONResponse
+}
+
+func (response Reauth423ApplicationProblemPlusJSONResponse) VisitReauthResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(423)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RefreshSessionRequestObject struct {
+	Params RefreshSessionParams
+}
+
+type RefreshSessionResponseObject interface {
+	VisitRefreshSessionResponse(w http.ResponseWriter) error
+}
+
+type RefreshSession200JSONResponse struct{ SessionStartedJSONResponse }
+
+func (response RefreshSession200JSONResponse) VisitRefreshSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if response.Headers.SetCookie != nil {
+		w.Header().Set("Set-Cookie", fmt.Sprint(*response.Headers.SetCookie))
+	}
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RefreshSession401ResponseHeaders struct {
+	SetCookie *string
+}
+
+type RefreshSession401ApplicationProblemPlusJSONResponse struct {
+	Body    Problem
+	Headers RefreshSession401ResponseHeaders
+}
+
+func (response RefreshSession401ApplicationProblemPlusJSONResponse) VisitRefreshSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	if response.Headers.SetCookie != nil {
+		w.Header().Set("Set-Cookie", fmt.Sprint(*response.Headers.SetCookie))
+	}
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
 }
 
 type GetHealthRequestObject struct {
@@ -308,6 +1023,27 @@ func (response GetHealth503JSONResponse) VisitGetHealthResponse(w http.ResponseW
 
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
+	// Login Password step; returns an mfa_token for the TOTP step
+	// (POST /auth/login)
+	Login(ctx context.Context, request LoginRequestObject) (LoginResponseObject, error)
+	// Logout Revokes the current session and clears the refresh cookie
+	// (POST /auth/logout)
+	Logout(ctx context.Context, request LogoutRequestObject) (LogoutResponseObject, error)
+	// VerifyMfa TOTP step for an enrolled user; starts a session
+	// (POST /auth/mfa)
+	VerifyMfa(ctx context.Context, request VerifyMfaRequestObject) (VerifyMfaResponseObject, error)
+	// BeginMfaEnroll First login only; generates a TOTP secret to scan
+	// (POST /auth/mfa/enroll)
+	BeginMfaEnroll(ctx context.Context, request BeginMfaEnrollRequestObject) (BeginMfaEnrollResponseObject, error)
+	// ConfirmMfaEnroll Confirms enrollment with a first code and starts a session
+	// (POST /auth/mfa/enroll/confirm)
+	ConfirmMfaEnroll(ctx context.Context, request ConfirmMfaEnrollRequestObject) (ConfirmMfaEnrollResponseObject, error)
+	// Reauth Re-checks password + TOTP; returns a reauth_token for the X-Reauth header
+	// (POST /auth/reauth)
+	Reauth(ctx context.Context, request ReauthRequestObject) (ReauthResponseObject, error)
+	// RefreshSession Rotates the refresh cookie and returns a new access token
+	// (POST /auth/refresh)
+	RefreshSession(ctx context.Context, request RefreshSessionRequestObject) (RefreshSessionResponseObject, error)
 	// GetHealth Gateway health with dependency checks
 	// (GET /health)
 	GetHealth(ctx context.Context, request GetHealthRequestObject) (GetHealthResponseObject, error)
@@ -350,6 +1086,213 @@ type strictHandler struct {
 	ssi         StrictServerInterface
 	middlewares []StrictMiddlewareFunc
 	options     StrictHTTPServerOptions
+}
+
+// Login operation middleware
+func (sh *strictHandler) Login(w http.ResponseWriter, r *http.Request) {
+	var request LoginRequestObject
+
+	var body LoginJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.Login(ctx, request.(LoginRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "Login")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(LoginResponseObject); ok {
+		if err := validResponse.VisitLoginResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// Logout operation middleware
+func (sh *strictHandler) Logout(w http.ResponseWriter, r *http.Request, params LogoutParams) {
+	var request LogoutRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.Logout(ctx, request.(LogoutRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "Logout")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(LogoutResponseObject); ok {
+		if err := validResponse.VisitLogoutResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// VerifyMfa operation middleware
+func (sh *strictHandler) VerifyMfa(w http.ResponseWriter, r *http.Request) {
+	var request VerifyMfaRequestObject
+
+	var body VerifyMfaJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.VerifyMfa(ctx, request.(VerifyMfaRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "VerifyMfa")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(VerifyMfaResponseObject); ok {
+		if err := validResponse.VisitVerifyMfaResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// BeginMfaEnroll operation middleware
+func (sh *strictHandler) BeginMfaEnroll(w http.ResponseWriter, r *http.Request) {
+	var request BeginMfaEnrollRequestObject
+
+	var body BeginMfaEnrollJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.BeginMfaEnroll(ctx, request.(BeginMfaEnrollRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "BeginMfaEnroll")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(BeginMfaEnrollResponseObject); ok {
+		if err := validResponse.VisitBeginMfaEnrollResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ConfirmMfaEnroll operation middleware
+func (sh *strictHandler) ConfirmMfaEnroll(w http.ResponseWriter, r *http.Request) {
+	var request ConfirmMfaEnrollRequestObject
+
+	var body ConfirmMfaEnrollJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ConfirmMfaEnroll(ctx, request.(ConfirmMfaEnrollRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ConfirmMfaEnroll")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ConfirmMfaEnrollResponseObject); ok {
+		if err := validResponse.VisitConfirmMfaEnrollResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// Reauth operation middleware
+func (sh *strictHandler) Reauth(w http.ResponseWriter, r *http.Request) {
+	var request ReauthRequestObject
+
+	var body ReauthJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.Reauth(ctx, request.(ReauthRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "Reauth")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ReauthResponseObject); ok {
+		if err := validResponse.VisitReauthResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RefreshSession operation middleware
+func (sh *strictHandler) RefreshSession(w http.ResponseWriter, r *http.Request, params RefreshSessionParams) {
+	var request RefreshSessionRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RefreshSession(ctx, request.(RefreshSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RefreshSession")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RefreshSessionResponseObject); ok {
+		if err := validResponse.VisitRefreshSessionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
 }
 
 // GetHealth operation middleware
