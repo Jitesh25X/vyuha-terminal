@@ -8,7 +8,9 @@ VYUHA_TOOLS_DIR ?= $(HOME)/.local/share/vyuha-tools
 export VYUHA_TOOLS_DIR
 export PATH := $(VYUHA_TOOLS_DIR)/bin:$(PATH)
 export VCPKG_ROOT ?= $(VYUHA_TOOLS_DIR)/vcpkg
-COMPOSE := docker compose -f deploy/docker-compose.dev.yml --env-file .env $(foreach p,$(PROFILES),--profile $(p))
+# .env is optional in dev: fall back to the committed example (no secrets) until the owner creates one.
+ENV_FILE := $(if $(wildcard .env),.env,.env.example)
+COMPOSE := docker compose -f deploy/docker-compose.dev.yml --env-file $(ENV_FILE) $(foreach p,$(PROFILES),--profile $(p))
 
 # $(1) = marker file that exists once the service is scaffolded, $(2) = command
 define maybe
@@ -32,8 +34,9 @@ down:
 	$(COMPOSE) down
 
 # Postgres from M0; ClickHouse from M1.7 (profile md); Neo4j from M6.1 (profile graph)
+# psql inside the postgres container, golang-migrate-compatible state (scripts/migrate-pg.sh)
 migrate:
-	migrate -path db/migrations -database "$$POSTGRES_URL" up
+	@./scripts/migrate-pg.sh
 
 migrate-ch:
 	for f in db/clickhouse/*.sql; do docker compose -f deploy/docker-compose.dev.yml exec -T clickhouse clickhouse-client --multiquery < $$f; done
