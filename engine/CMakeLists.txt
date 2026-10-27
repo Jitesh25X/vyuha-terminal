@@ -7,7 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON) # core is also linked into the Python extension
 
 option(VYUHA_BUILD_TESTS "Build GoogleTest tests and Google Benchmark" ON)
-option(VYUHA_BUILD_PYTHON "Build the nanobind module vyuha_core" OFF)
+option(VYUHA_BUILD_PYTHON "Build the nanobind module vyuha_core (off in sanitizer presets)" ON)
 set(VYUHA_SANITIZER "" CACHE STRING "Sanitizers to enable, e.g. address,undefined or thread")
 
 # Strict warnings for our own targets only (never for vcpkg dependencies).

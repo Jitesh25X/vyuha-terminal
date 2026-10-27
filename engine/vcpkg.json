@@ -7,7 +7,16 @@
   "features": {
     "tests": {
       "description": "GoogleTest unit tests and Google Benchmark",
-      "dependencies": ["gtest", "benchmark"]
+      "dependencies": [
+        "gtest",
+        "benchmark"
+      ]
+    },
+    "python": {
+      "description": "nanobind module vyuha_core",
+      "dependencies": [
+        "nanobind"
+      ]
     }
   }
 }

@@ -95,7 +95,7 @@ e2e:
 	$(call maybe,web/package.json,cd web && pnpm exec playwright test)
 
 lint: proto-lint
-	$(call maybe,engine/CMakeLists.txt,cd engine && clang-format --dry-run --Werror $$(git ls-files '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA))
+	$(call maybe,engine/CMakeLists.txt,cd engine && clang-format --dry-run --Werror $$(git ls-files '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA) '/engine/(src|tests|bench|bindings|fuzz)/')
 	$(call maybe,gateway/go.mod,cd gateway && golangci-lint run)
 	$(call maybe,quant/pyproject.toml,cd quant && uv run ruff check && uv run mypy --strict src sdk)
 	$(call maybe,intel/pyproject.toml,cd intel && uv run ruff check && uv run mypy --strict src)
