@@ -8,6 +8,19 @@ VYUHA_TOOLS_DIR ?= $(HOME)/.local/share/vyuha-tools
 export VYUHA_TOOLS_DIR
 export PATH := $(VYUHA_TOOLS_DIR)/bin:$(PATH)
 export VCPKG_ROOT ?= $(VYUHA_TOOLS_DIR)/vcpkg
+# clang-tidy 18 cannot parse the newer libc++ in current macOS SDKs: analyse against LLVM 18's own libc++ headers.
+ifeq ($(shell uname -s),Darwin)
+  TIDY_EXTRA := -extra-arg=-nostdinc++ -extra-arg=-isystem$(shell brew --prefix llvm@18 2>/dev/null)/include/c++/v1
+endif
+# Engine compiler: GCC 14 on Ubuntu (24.04 defaults to GCC 13); Apple Clang on macOS. Override with CC=/CXX=.
+ifeq ($(shell uname -s),Linux)
+  ifeq ($(origin CC),default)
+    export CC := gcc-14
+  endif
+  ifeq ($(origin CXX),default)
+    export CXX := g++-14
+  endif
+endif
 # .env is optional in dev: fall back to the committed example (no secrets) until the owner creates one.
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 COMPOSE := docker compose -f deploy/docker-compose.dev.yml --env-file $(ENV_FILE) $(foreach p,$(PROFILES),--profile $(p))
@@ -82,7 +95,7 @@ e2e:
 	$(call maybe,web/package.json,cd web && pnpm exec playwright test)
 
 lint: proto-lint
-	$(call maybe,engine/CMakeLists.txt,cd engine && clang-format --dry-run --Werror $$(git ls-files '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet)
+	$(call maybe,engine/CMakeLists.txt,cd engine && clang-format --dry-run --Werror $$(git ls-files '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA))
 	$(call maybe,gateway/go.mod,cd gateway && golangci-lint run)
 	$(call maybe,quant/pyproject.toml,cd quant && uv run ruff check && uv run mypy --strict src sdk)
 	$(call maybe,intel/pyproject.toml,cd intel && uv run ruff check && uv run mypy --strict src)
