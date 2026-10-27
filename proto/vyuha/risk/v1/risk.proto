@@ -24,7 +24,7 @@ message Limit {
   Scope scope = 1;
   string scope_id = 2;
   string key = 3;
-  string value = 4;   // decimal string
+  string value = 4; // decimal string
   bool hard = 5;
 }
 
@@ -38,7 +38,7 @@ message KillSwitchState {
   string scope_id = 2;
   bool active = 3;
   repeated KillAction actions = 4;
-  string trigger = 5;   // "manual" | "auto:<rule>"
+  string trigger = 5; // "manual" | "auto:<rule>"
   string reason = 6;
   string set_by = 7;
   int64 ts_ns = 8;
@@ -55,11 +55,11 @@ message RiskSummary {
   Scope scope = 1;
   string scope_id = 2;
   int64 ts_ns = 3;
-  double delta_inr = 4;        // rupee delta (∂P/∂S × S)
-  double beta_delta_inr = 5;   // NIFTY-beta-adjusted
-  double gamma_inr = 6;        // per 1% move
-  double vega_inr = 7;         // per 1 vol point
-  double theta_inr = 8;        // per calendar day
+  double delta_inr = 4; // rupee delta (∂P/∂S × S)
+  double beta_delta_inr = 5; // NIFTY-beta-adjusted
+  double gamma_inr = 6; // per 1% move
+  double vega_inr = 7; // per 1 vol point
+  double theta_inr = 8; // per calendar day
   double gross_exposure_inr = 9;
   double net_exposure_inr = 10;
   double var99_1d_inr = 11;

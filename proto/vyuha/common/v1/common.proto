@@ -30,7 +30,7 @@ enum Broker {
 }
 
 message Uuid {
-  string value = 1;  // canonical lowercase hyphenated
+  string value = 1; // canonical lowercase hyphenated
 }
 
 message Health {

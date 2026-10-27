@@ -25,7 +25,7 @@ service EngineService {
   rpc StopSession(StopSessionRequest) returns (Ack);
   rpc GetSessions(GetSessionsRequest) returns (SessionList);
 
-  rpc Subscribe(SubscribeRequest) returns (Ack);      // market data interest from gateway/strategy host
+  rpc Subscribe(SubscribeRequest) returns (Ack); // market data interest from gateway/strategy host
   rpc Unsubscribe(SubscribeRequest) returns (Ack);
 
   rpc GetPositions(GetPositionsRequest) returns (PositionList);
@@ -41,9 +41,9 @@ message Ack {
 
 message PreviewResult {
   vyuha.orders.v1.IntentResult gate = 1;
-  string margin_required = 2;   // decimal string
+  string margin_required = 2; // decimal string
   string margin_available = 3;
-  string margin_source = 4;     // "broker" | "cache"
+  string margin_source = 4; // "broker" | "cache"
   string notional = 5;
   uint32 slices = 6;
   string reward_risk = 7;
@@ -64,8 +64,8 @@ message CancelRequest {
 
 message CancelAllRequest {
   string user_id = 1;
-  string account_id = 2;    // optional filter
-  string strategy_id = 3;   // optional filter
+  string account_id = 2; // optional filter
+  string strategy_id = 3; // optional filter
 }
 
 message CancelAllResult {
@@ -84,8 +84,8 @@ message StartSessionRequest {
   string account_id = 1;
   vyuha.common.v1.Broker broker = 2;
   string api_key = 3;
-  string api_secret = 4;     // never logged; zeroised after use
-  string access_token = 5;   // never logged
+  string api_secret = 4; // never logged; zeroised after use
+  string access_token = 5; // never logged
   string source_ip = 6;
   string backup_source_ip = 7;
   string public_ip = 8;
@@ -103,7 +103,7 @@ message GetSessionsRequest {}
 message SessionInfo {
   string account_id = 1;
   vyuha.common.v1.Broker broker = 2;
-  string state = 3;   // connected | awaiting_login | error | disconnected
+  string state = 3; // connected | awaiting_login | error | disconnected
   string detail = 4;
   repeated vyuha.marketdata.v1.FeedStatus feeds = 5;
   uint32 ops_cap = 6;
@@ -115,14 +115,14 @@ message SessionList {
 }
 
 message SubscribeRequest {
-  string requester = 1;   // "gateway" | "strategy:<id>"
+  string requester = 1; // "gateway" | "strategy:<id>"
   repeated uint64 instrument_ids = 2;
   vyuha.marketdata.v1.FeedMode mode = 3;
-  string via_account_id = 4;  // entitlement source account
+  string via_account_id = 4; // entitlement source account
 }
 
 message GetPositionsRequest {
-  string account_id = 1;   // empty = all
+  string account_id = 1; // empty = all
 }
 
 message PositionList {

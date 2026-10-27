@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Installs ONE component's toolchain, just-in-time (PRD §10.1). Supports Ubuntu 24.04 (apt) and macOS (Homebrew).
-# Usage: scripts/bootstrap.sh <core|cpp|go|py|web> [--check]
+# Usage: scripts/bootstrap.sh <core|proto|cpp|go|py|web> [--check]
 #   --check   report what is present / would be installed; install nothing
 # Pinned versions live here and in docs/TECH_STACK.md §6 — change both together.
-# Go, Node and uv go into $VYUHA_TOOLS_DIR (no sudo); the Makefile puts $VYUHA_TOOLS_DIR/bin first on PATH.
+# Go, Node, uv and buf go into $VYUHA_TOOLS_DIR (no sudo); the Makefile puts $VYUHA_TOOLS_DIR/bin first on PATH.
 # Must stay compatible with bash 3.2 (macOS /bin/bash): no associative arrays, no empty-array expansion.
 set -euo pipefail
 
@@ -11,6 +11,7 @@ GO_VERSION=1.27.3
 NODE_VERSION=22.23.4
 PNPM_VERSION=10.34.9
 UV_VERSION=0.13.6
+BUF_VERSION=1.75.0
 PYTHON_VERSION=3.13.14
 LLVM_MAJOR=18 # clang-format / clang-tidy / libFuzzer on both platforms, so formatting is identical everywhere
 GCC_MAJOR=14  # Ubuntu compiler (CI reference); macOS compiles with Apple Clang from the Command Line Tools
@@ -41,6 +42,15 @@ uv_sha256() {
   esac
 }
 
+buf_sha256() {
+  case "$1" in
+    Darwin-arm64) echo f71b009ebd8530b12fd85b060c6c245e15d6e5110ccc8da48d8b6fa71e59330b ;;
+    Darwin-x86_64) echo ff6d0979143c661d59178a032c57be883b2ac03dc9bf7d00ffca222b0354bd46 ;;
+    Linux-aarch64) echo 00eb190aa82df17f393e05b04889cc60a0b13b3259d336e21a87d5f23ab4fd26 ;;
+    Linux-x86_64) echo fad1e38d6909bbb583a4da81d8c02a01046e2cd663bde7e337dd24277393764b ;;
+  esac
+}
+
 TOOLS_DIR="${VYUHA_TOOLS_DIR:-$HOME/.local/share/vyuha-tools}"
 BIN_DIR="$TOOLS_DIR/bin"
 USER_PATH="$PATH"
@@ -52,7 +62,7 @@ ok() { echo "✔ $*"; }
 die() { echo "✖ $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-[ $# -ge 1 ] || die "usage: $0 <core|cpp|go|py|web> [--check]"
+[ $# -ge 1 ] || die "usage: $0 <core|proto|cpp|go|py|web> [--check]"
 component="$1"
 check_only=0
 [ "${2:-}" = "--check" ] && check_only=1
@@ -74,11 +84,12 @@ case "$(uname -s)" in
   *) die "unsupported OS: $(uname -s)" ;;
 esac
 case "$arch" in
-  x86_64 | amd64) goarch=amd64 nodearch=x64 uvarch=x86_64 ;;
-  arm64 | aarch64) goarch=arm64 nodearch=arm64 uvarch=aarch64 ;;
+  x86_64 | amd64) goarch=amd64 nodearch=x64 uvarch=x86_64 bufarch=x86_64 ;;
+  arm64 | aarch64) goarch=arm64 nodearch=arm64 uvarch=aarch64 bufarch=arm64 ;;
   *) die "unsupported CPU architecture: $arch" ;;
 esac
-if [ $platform = macos ]; then goos=darwin uvtarget="$uvarch-apple-darwin"; else goos=linux uvtarget="$uvarch-unknown-linux-gnu"; fi
+if [ $platform = macos ]; then goos=darwin uvtarget="$uvarch-apple-darwin" bufos=Darwin; else goos=linux uvtarget="$uvarch-unknown-linux-gnu" bufos=Linux; fi
+[ "$bufos-$bufarch" = Linux-arm64 ] && bufarch=aarch64
 
 SUDO=""
 [ "$(id -u)" -ne 0 ] && SUDO="sudo"
@@ -177,6 +188,25 @@ do_core() {
   docker compose version >/dev/null 2>&1 || die "Docker Compose v2 plugin not found"
   docker info >/dev/null 2>&1 || die "Docker daemon not reachable (start Docker Desktop, or: sudo systemctl start docker)"
   ok "core ready: git $(git --version | awk '{print $3}'), $(jq --version), docker $(docker version --format '{{.Server.Version}}'), compose $(docker compose version --short)"
+}
+
+# ── proto: buf CLI (single binary, pinned + checksummed); codegen uses remote BSR plugins ──
+do_proto() {
+  if [ -x "$BIN_DIR/buf" ] && [ "$("$BIN_DIR/buf" --version)" = "$BUF_VERSION" ]; then
+    ok "buf $BUF_VERSION already installed"
+    return
+  fi
+  if [ $check_only = 1 ]; then
+    log "would install buf $BUF_VERSION into $BIN_DIR"
+    return
+  fi
+  local file="buf-$bufos-$bufarch"
+  mkdir -p "$BIN_DIR"
+  fetch_verified "https://github.com/bufbuild/buf/releases/download/v$BUF_VERSION/$file" "$(buf_sha256 "$bufos-$bufarch")" "$BIN_DIR/buf.tmp"
+  chmod +x "$BIN_DIR/buf.tmp"
+  mv "$BIN_DIR/buf.tmp" "$BIN_DIR/buf"
+  ok "proto ready: buf $("$BIN_DIR/buf" --version)"
+  path_hint
 }
 
 # ── cpp: compiler, CMake, Ninja, LLVM tools, vcpkg (shallow, at engine/vcpkg.json baseline) ─────
@@ -304,9 +334,10 @@ do_web() {
 
 case "$component" in
   core) do_core ;;
+  proto) do_proto ;;
   cpp) do_cpp ;;
   go) do_go ;;
   py) do_py ;;
   web) do_web ;;
-  *) die "unknown component '$component' (core|cpp|go|py|web)" ;;
+  *) die "unknown component '$component' (core|proto|cpp|go|py|web)" ;;
 esac

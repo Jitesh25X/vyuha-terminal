@@ -1,0 +1,10 @@
+version: v2
+# Go (gateway). Run via `make proto` once gateway/go.mod exists (M0.6).
+# Pin plugin versions (e.g. buf.build/protocolbuffers/go:vX.Y.Z) to match gateway/go.mod when the gateway is scaffolded.
+plugins:
+  - remote: buf.build/protocolbuffers/go
+    out: ../gateway/gen
+    opt: paths=source_relative
+  - remote: buf.build/grpc/go
+    out: ../gateway/gen
+    opt: paths=source_relative

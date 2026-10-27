@@ -9,12 +9,12 @@ option go_package = "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1;
 enum FeedMode {
   FEED_MODE_UNSPECIFIED = 0;
   FEED_MODE_LTP = 1;
-  FEED_MODE_QUOTE = 2;  // LTP + OHLC + volume + OI + best bid/ask
-  FEED_MODE_FULL = 3;   // + 5-level depth (30 where available)
+  FEED_MODE_QUOTE = 2; // LTP + OHLC + volume + OI + best bid/ask
+  FEED_MODE_FULL = 3; // + 5-level depth (30 where available)
 }
 
 message DepthLevel {
-  int64 price = 1;   // price units
+  int64 price = 1; // price units
   uint32 qty = 2;
   uint32 orders = 3;
 }
@@ -45,20 +45,20 @@ message Tick {
   optional double gamma = 22;
   optional double theta = 23;
   optional double vega = 24;
-  uint64 seq = 25;  // engine sequence for gap detection
+  uint64 seq = 25; // engine sequence for gap detection
 }
 
 message Bar {
   uint64 instrument_id = 1;
-  string interval = 2;  // "1s","1m"
-  int64 ts_ns = 3;      // bar open time
+  string interval = 2; // "1s","1m"
+  int64 ts_ns = 3; // bar open time
   int64 open = 4;
   int64 high = 5;
   int64 low = 6;
   int64 close = 7;
   uint64 volume = 8;
   uint64 oi = 9;
-  bool final = 10;      // false while bar is forming
+  bool final = 10; // false while bar is forming
 }
 
 // Latest snapshot stored in NATS KV md_last.

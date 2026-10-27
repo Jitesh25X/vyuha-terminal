@@ -1,0 +1,10 @@
+version: v2
+# Python (quant, intel). Run via `make proto` once quant/pyproject.toml exists (M1.1).
+# Pin plugin versions to match the protobuf/grpcio versions in quant/uv.lock when quant is scaffolded.
+plugins:
+  - remote: buf.build/protocolbuffers/python
+    out: ../quant/src/vyuha_proto
+  - remote: buf.build/protocolbuffers/pyi
+    out: ../quant/src/vyuha_proto
+  - remote: buf.build/grpc/python
+    out: ../quant/src/vyuha_proto

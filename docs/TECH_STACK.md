@@ -135,7 +135,7 @@ versions in this file's lock table (§6), and keep them pinned in lockfiles (`vc
 | LangChain/LangGraph | A thin tool loop on the Anthropic SDK + MCP is simpler to audit |
 
 ## 6. Pinned versions (fill at M0)
-Toolchains are installed one component at a time by `scripts/bootstrap.sh <core|cpp|go|py|web>` (Ubuntu 24.04 via apt, macOS via Homebrew). Go, Node and uv are official release archives checked against the sha256 pinned in the script, unpacked into `$VYUHA_TOOLS_DIR` (default `~/.local/share/vyuha-tools`, no sudo), and the Makefile puts `$VYUHA_TOOLS_DIR/bin` first on `PATH`. **Change a version here and in `scripts/bootstrap.sh` together.** Rows marked "at Mx.y" are pinned by the task that first pulls or adds them (lockfiles / image digests), not before.
+Toolchains are installed one component at a time by `scripts/bootstrap.sh <core|cpp|go|py|web>` (Ubuntu 24.04 via apt, macOS via Homebrew). Go, Node, uv and buf are official release archives checked against the sha256 pinned in the script, unpacked into `$VYUHA_TOOLS_DIR` (default `~/.local/share/vyuha-tools`, no sudo), and the Makefile puts `$VYUHA_TOOLS_DIR/bin` first on `PATH`. **Change a version here and in `scripts/bootstrap.sh` together.** Rows marked "at Mx.y" are pinned by the task that first pulls or adds them (lockfiles / image digests), not before.
 
 **Core list** (`bootstrap.sh core`, the only thing M0 installs): git, jq, make, curl, ca-certificates, xz-utils, Docker Engine + Compose v2 (Ubuntu: `docker.io`, `docker-compose-v2` from the Ubuntu archive, skipped if Docker is already present; macOS: Docker Desktop must already be installed).
 
@@ -151,7 +151,7 @@ Toolchains are installed one component at a time by `scripts/bootstrap.sh <core|
 | ClickHouse image digest | at M1.7 | |
 | NATS image digest | `nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927` (nats-server 2.10.29) | 2026-10-28 |
 | Neo4j image digest | at M6.1 | |
-| buf | 1.75.0 (installed at M0.4) | 2026-10-28 |
+| buf | 1.75.0 (`bootstrap.sh proto`; same version in `.github/workflows/proto.yml`) | 2026-10-28 |
 | React / Vite / Dockview / AG Grid / Lightweight Charts | at M0.9 / M1.9 (`web/pnpm-lock.yaml`) | |
 | anthropic / mcp / sentence-transformers | at M6.4 / M7.1 / M6.2 (`intel/uv.lock`) | |
 | LLM model IDs (`LLM_MODEL_FAST`, `LLM_MODEL_SMART`) | at M6.4 / M7.2 | |
