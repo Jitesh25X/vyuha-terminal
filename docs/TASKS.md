@@ -19,7 +19,7 @@ Current milestone: **M0**
 
 ## M0 — Foundations
 
-- [ ] **M0.1** Monorepo skeleton per PRD §9; `Makefile` targets; `.editorconfig`; pre-commit (gitleaks, clang-format, ruff, gofmt, prettier)
+- [x] **M0.1** Monorepo skeleton per PRD §9; `Makefile` targets; `.editorconfig`; pre-commit (gitleaks, clang-format, ruff, gofmt, prettier) — 2026-10-28: done; skeleton dirs per PRD §9 (.gitkeep), .editorconfig, pre-commit via local system hooks (skip until each tool is installed), `make lint` skips buf until M0.4
   - deps: —
   - needs: nothing (text files only; write `.pre-commit-config.yaml` but don't install hooks until the tools arrive in their own tasks)
   - done: `make invariants` green; `make test` skips cleanly for unscaffolded services
@@ -429,3 +429,4 @@ Current milestone: **M0**
 
 ## Notes / deviations log
 - (append here: date — task — what changed vs spec and why)
+- 2026-10-28 — M0.1 — pre-commit uses `local`/`system` hooks through `scripts/precommit-tool.sh` instead of upstream hook repos, so pre-commit never downloads its own tool environments (PRD §10.1). gitleaks is enforced in CI (M0.10); locally it runs only once installed.
