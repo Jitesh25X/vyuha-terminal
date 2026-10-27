@@ -10,7 +10,7 @@ This file is the **single source of truth for what to build next**. Claude Code 
 5. Run the `done` check plus `make verify`. If the task touches risk/OMS/broker/auth/RBAC/MCP/agents, run the `risk-reviewer` subagent and fix every P0/P1.
 6. Mark the box `[x]`, append the date and a short note (`— 2026-11-02: done; PR #12; deviation: …`), and commit (Conventional Commit with the task ID).
 7. At the end of a milestone, run `/milestone-exit` before starting the next milestone's first task.
-8. Tasks marked 🧠 are hand-written by the owner. Claude Code only writes the interface, tests and benchmark, then stops.
+8. Claude Code writes all code (ADR-017). The owner reviews each task's result before saying "continue".
 
 Legend: `deps` = tasks that must be `[x]` first · `needs` = the **only** things you may install or download for this task · `done` = completion check.
 
@@ -70,7 +70,7 @@ Current milestone: **M0**
   - deps: M0 exit
   - needs: `bootstrap.sh py`: Python + uv. quant group `core`: polars, httpx, pydantic, sqlalchemy, asyncpg, exchange_calendars. Broker instrument files are fetched at runtime (not committed)
   - done: F-MD-1 ACs
-- [ ] **M1.2** 🧠 `SpscRing<T,N>` + benchmarks
+- [ ] **M1.2** `SpscRing<T,N>` + benchmarks
   - deps: M1.1
   - needs: nothing new
   - done: p99 push/pop < 50 ns; TSan clean
@@ -125,7 +125,7 @@ Current milestone: **M0**
   - deps: M1 exit
   - needs: vcpkg: `rapidcheck`
   - done: Property tests: only legal transitions
-- [ ] **M2.2** 🧠 RiskGate framework (`ApprovedOrder` construct-only-by-gate, rule table, GateContext)
+- [ ] **M2.2** RiskGate framework (`ApprovedOrder` construct-only-by-gate, rule table, GateContext)
   - deps: M2.1
   - needs: nothing new
   - done: Compile-time test that adapters can't receive raw intents

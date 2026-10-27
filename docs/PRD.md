@@ -620,10 +620,10 @@ The build must install and download **only what the current task needs**, when i
 | # | Question | Recommended default | Owner | Due |
 |---|----------|---------------------|-------|-----|
 | 1 | Product name | Keep "Vyuha" | Jitesh | Before M0 |
-| 2 | **Legal structure of the desk** — whose accounts, who may place orders on them, profit sharing; whether running Vyuha for others makes the operator an "algo provider" needing exchange empanelment | One account per account-holder trader; each account on its own static IP; desk = shared tooling + oversight. **Get a SEBI-practice lawyer's opinion before going live with other people's accounts.** | Jitesh + lawyer | Before M3 live pilot |
-| 3 | Open-source license | **AGPL-3.0** (keeps hosted forks open; same choice as OpenBB/OpenAlgo) — alternative Apache-2.0 for max adoption | Jitesh | Before first public commit |
+| 2 | **[Deferred — ADR-015: personal use only for now; resolve before onboarding anyone else]** **Legal structure of the desk** — whose accounts, who may place orders on them, profit sharing; whether running Vyuha for others makes the operator an "algo provider" needing exchange empanelment | One account per account-holder trader; each account on its own static IP; desk = shared tooling + oversight. **Get a SEBI-practice lawyer's opinion before going live with other people's accounts.** | Jitesh + lawyer | Before connecting any account other than Jitesh's own |
+| 3 | **[Deferred — ADR-016: repo stays private until licensed]** Open-source license | **AGPL-3.0** (keeps hosted forks open; same choice as OpenBB/OpenAlgo) — alternative Apache-2.0 for max adoption | Jitesh | Before first public commit |
 | 4 | Market-data sharing across desk | Per-account entitlement (no redistribution); licensed vendor adapter post-MVP | Jitesh | Before M1 |
-| 5 | Build mode | Claude Code writes; Jitesh reviews every PR, hand-writes selected C++ learning modules (risk gate rules, SPSC ring) | Jitesh | Before M0 |
+| 5 | **[Resolved — ADR-017: Claude Code writes all]** Build mode | Claude Code writes; Jitesh reviews every PR, hand-writes selected C++ learning modules (risk gate rules, SPSC ring) | Jitesh | Before M0 |
 | 6 | LLM provider & data privacy | Anthropic API; positions sent to LLM only as aggregated numbers + tickers; local model option via OpenAI-compatible endpoint | Jitesh | Before M6 |
 | 7 | Exchange announcements / F&O ban list source | Download the official daily files published by the exchange where its terms allow; announcement scraping disabled by default until ToS reviewed | Jitesh | Before M1 |
 | 8 | MARKET/SL-M handling | Allow, always send broker market-protection param (default 2%); desk can disable MARKET orders | Jitesh | Before M3 |
@@ -646,7 +646,7 @@ The build must install and download **only what the current task needs**, when i
 - [x] Environment variables are listed (`.env.example`)
 - [x] Project structure is defined
 - [x] Out-of-scope items are clearly separated
-- [ ] All `[DECISION NEEDED]` items are resolved or assigned — **#2, #3, #5, #7 must be resolved by Jitesh; others have defaults**
+- [ ] All `[DECISION NEEDED]` items are resolved or assigned. #5 resolved (Claude writes all); #2 deferred (personal use only); #3 deferred (private until licensed); **#7 still needed before M1.1**; others have defaults
 - [x] Non-functional requirements are set
 - [x] No features in scope are underspecified
 

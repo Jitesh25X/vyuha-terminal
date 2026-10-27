@@ -3,7 +3,7 @@
 Rules:
 - Work through milestones **in order**. A milestone is done only when every exit criterion passes in CI (or on the staging VM where noted) and its exit box in `docs/TASKS.md` is ticked.
 - Each task is sized to fit one Claude Code session (≈ one PR). IDs `M<milestone>.<n>`.
-- 🧠 = recommended **hand-written learning module**. The owner writes it, and Claude Code reviews it and writes the tests.
+- Build mode (ADR-017): **Claude Code writes all code**; the owner reviews. (The former 🧠 hand-written markers were removed.) Previously: The owner writes it, and Claude Code reviews it and writes the tests.
 - Effort is in *focused days* and assumes Claude Code writes most code while the owner reviews. Scale it to your weekly hours.
 - **Execution queue:** `docs/TASKS.md` holds every task below in order, with its dependencies, its `Needs:` download allow-list and its done check. `/next-task` executes it one task at a time.
 - **Lean footprint:** install and download only what the current task's `Needs:` lists (PRD §10.1).
@@ -30,7 +30,7 @@ Rules:
 | ID | Task | Done when |
 |---|---|---|
 | M1.1 | Instrument master sync (quant job): Kite + Upstox files → unified `instrument` with mapping, freeze qty, lot size; holiday calendar seed | F-MD-1 ACs |
-| M1.2 | 🧠 `SpscRing<T,N>` + benchmarks | p99 push/pop < 50 ns; TSan clean |
+| M1.2 | `SpscRing<T,N>` + benchmarks | p99 push/pop < 50 ns; TSan clean |
 | M1.3 | Engine core loop, canonical `Tick`, `Price` int64 type, LastValue book, bar builder | Unit tests incl. bar boundary at 09:15/15:30 IST |
 | M1.4 | Kite Ticker adapter (binary parser, sharding ≤ 3,000/conn, ≤ 3 conns/key, reconnect) with recorded-frame fixtures | Parser fuzz test (libFuzzer) 10 min clean; F-MD-2 ACs (fixture-based) |
 | M1.5 | Upstox Market Data Feed V3 adapter (authorize → WSS, protobuf decode, modes, limits table) | Same as above |
@@ -48,7 +48,7 @@ Rules:
 | ID | Task | Done when |
 |---|---|---|
 | M2.1 | OMS state machine + `order_event` writer thread + recovery from Postgres | Property tests: only legal transitions |
-| M2.2 | 🧠 RiskGate framework (`ApprovedOrder` construct-only-by-gate, rule table, GateContext) | Compile-time test that adapters can't receive raw intents |
+| M2.2 | RiskGate framework (`ApprovedOrder` construct-only-by-gate, rule table, GateContext) | Compile-time test that adapters can't receive raw intents |
 | M2.3 | Rules R-KILL…R-ORDER-SHAPE, R-FAT-FINGER, R-ORDER-VALUE, R-DUP, R-OPS | Per-rule unit tests; bench p99 < 20 µs |
 | M2.4 | Rules R-OPEN-ORDERS…R-DISCIPLINE with incremental scope aggregation | Property tests (RISK_ENGINE §3) |
 | M2.5 | SimBroker (paper) on live ticks; brackets/OCO; freeze-qty slicer | F-EX-4 ACs |
