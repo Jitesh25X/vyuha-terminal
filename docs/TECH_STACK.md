@@ -135,18 +135,23 @@ versions in this file's lock table (§6), and keep them pinned in lockfiles (`vc
 | LangChain/LangGraph | A thin tool loop on the Anthropic SDK + MCP is simpler to audit |
 
 ## 6. Pinned versions (fill at M0)
+Toolchains are installed one component at a time by `scripts/bootstrap.sh <core|cpp|go|py|web>` (Ubuntu 24.04 via apt, macOS via Homebrew). Go, Node and uv are official release archives checked against the sha256 pinned in the script, unpacked into `$VYUHA_TOOLS_DIR` (default `~/.local/share/vyuha-tools`, no sudo), and the Makefile puts `$VYUHA_TOOLS_DIR/bin` first on `PATH`. **Change a version here and in `scripts/bootstrap.sh` together.** Rows marked "at Mx.y" are pinned by the task that first pulls or adds them (lockfiles / image digests), not before.
+
+**Core list** (`bootstrap.sh core`, the only thing M0 installs): git, jq, make, curl, ca-certificates, xz-utils, Docker Engine + Compose v2 (Ubuntu: `docker.io`, `docker-compose-v2` from the Ubuntu archive, skipped if Docker is already present; macOS: Docker Desktop must already be installed).
+
 | Component | Version | Pinned on |
 |---|---|---|
-| GCC / Clang | | |
-| CMake | | |
-| vcpkg baseline commit | | |
-| Go | | |
-| Python | | |
-| Node / pnpm | | |
-| PostgreSQL image digest | | |
-| ClickHouse image digest | | |
-| NATS image digest | | |
-| Neo4j image digest | | |
-| React / Vite / Dockview / AG Grid / Lightweight Charts | | |
-| anthropic / mcp / sentence-transformers | | |
-| LLM model IDs (`LLM_MODEL_FAST`, `LLM_MODEL_SMART`) | | |
+| GCC / Clang | Ubuntu: GCC 14 (`g++-14`, CI reference). macOS: Apple Clang from Xcode Command Line Tools (≥ 16 for `std::expected`). clang-format / clang-tidy / libFuzzer: **LLVM 18** on both (`clang-*-18` apt, `llvm@18` brew) so formatting is identical everywhere | 2026-10-28 |
+| CMake | ≥ 3.28 (Ubuntu 24.04 apt 3.28.3; macOS Homebrew current), Ninja from the same source | 2026-10-28 |
+| vcpkg baseline commit | at M0.5 (`engine/vcpkg.json` `builtin-baseline`; bootstrap fetches only that commit, depth 1) | |
+| Go | 1.27.3 | 2026-10-28 |
+| Python | 3.13.14 (via uv 0.13.6) | 2026-10-28 |
+| Node / pnpm | Node 22.23.4 (22 LTS) / pnpm 10.34.9 via corepack | 2026-10-28 |
+| PostgreSQL image digest | at M0.3 | |
+| ClickHouse image digest | at M1.7 | |
+| NATS image digest | at M0.3 | |
+| Neo4j image digest | at M6.1 | |
+| buf | 1.75.0 (installed at M0.4) | 2026-10-28 |
+| React / Vite / Dockview / AG Grid / Lightweight Charts | at M0.9 / M1.9 (`web/pnpm-lock.yaml`) | |
+| anthropic / mcp / sentence-transformers | at M6.4 / M7.1 / M6.2 (`intel/uv.lock`) | |
+| LLM model IDs (`LLM_MODEL_FAST`, `LLM_MODEL_SMART`) | at M6.4 / M7.2 | |

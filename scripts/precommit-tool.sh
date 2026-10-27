@@ -21,4 +21,5 @@ while [ $# -gt 0 ]; do
   args+=("$1"); shift
 done
 
-exec "$bin" "${args[@]}" "${files[@]}"
+# "${a[@]+...}" form: bash 3.2 (macOS) treats an empty array as unbound under `set -u`.
+exec "$bin" ${args[@]+"${args[@]}"} ${files[@]+"${files[@]}"}

@@ -3,6 +3,11 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 PROFILES ?= core
+# Pinned toolchains from scripts/bootstrap.sh take precedence over whatever else is on PATH.
+VYUHA_TOOLS_DIR ?= $(HOME)/.local/share/vyuha-tools
+export VYUHA_TOOLS_DIR
+export PATH := $(VYUHA_TOOLS_DIR)/bin:$(PATH)
+export VCPKG_ROOT ?= $(VYUHA_TOOLS_DIR)/vcpkg
 COMPOSE := docker compose -f deploy/docker-compose.dev.yml --env-file .env $(foreach p,$(PROFILES),--profile $(p))
 
 # $(1) = marker file that exists once the service is scaffolded, $(2) = command
@@ -15,9 +20,10 @@ CLEAN_DIRS := engine/build gateway/bin web/dist web/test-results web/playwright-
 .PHONY: clean-space bootstrap up down migrate migrate-ch migrate-neo4j proto test test-engine test-gateway test-quant test-intel test-web bench e2e lint verify invariants
 
 # Installs ONE component, just-in-time: make bootstrap C=cpp   (core|cpp|go|py|web)
+# Add CHECK=1 to only report what is present / would be installed.
 bootstrap:
-	@if [ -z "$(C)" ]; then echo "usage: make bootstrap C=<core|cpp|go|py|web> (install only what the current task needs)"; exit 1; fi
-	@if [ -x scripts/bootstrap.sh ]; then ./scripts/bootstrap.sh "$(C)"; else echo "scripts/bootstrap.sh is created in task M0.2"; fi
+	@if [ -z "$(C)" ]; then echo "usage: make bootstrap C=<core|cpp|go|py|web> [CHECK=1] (install only what the current task needs)"; exit 1; fi
+	@./scripts/bootstrap.sh "$(C)" $(if $(CHECK),--check)
 
 up:
 	$(COMPOSE) up -d --wait
