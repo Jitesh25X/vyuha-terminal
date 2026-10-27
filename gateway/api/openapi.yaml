@@ -1,0 +1,90 @@
+openapi: 3.0.3
+info:
+  title: Vyuha Gateway API
+  version: 0.0.1
+  description: |
+    REST contract for the Vyuha gateway (source of truth for codegen; see docs/API.md).
+    Endpoints are added contract-first by the task that implements them.
+    Money/prices are decimal strings; timestamps are RFC 3339 UTC; errors are RFC 9457 problem+json.
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+tags:
+  - name: system
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Gateway health with dependency checks
+      description: Unauthenticated. 200 when every check passes, 503 when any dependency is unavailable.
+      tags: [system]
+      security: []
+      responses:
+        "200":
+          description: All checks pass
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: At least one dependency is unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Health:
+      type: object
+      required: [status, version, env, checks]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        version:
+          type: string
+          example: 0.0.1
+        env:
+          type: string
+          enum: [dev, staging, prod]
+        checks:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/Check" }
+    Check:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, fail]
+        latency_ms:
+          type: integer
+          format: int64
+        error:
+          type: string
+          description: Generic reason; never contains hosts, credentials or driver errors.
+    Problem:
+      type: object
+      description: RFC 9457 problem details.
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        code: { type: string, description: "Stable machine code, e.g. R-LOSS-DAILY" }
+        reasons:
+          type: array
+          items: { $ref: "#/components/schemas/ProblemReason" }
+    ProblemReason:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string }
+        limit: { type: string }
+        current: { type: string }

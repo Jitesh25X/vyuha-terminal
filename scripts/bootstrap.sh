@@ -12,6 +12,7 @@ NODE_VERSION=22.23.4
 PNPM_VERSION=10.34.9
 UV_VERSION=0.13.6
 BUF_VERSION=1.75.0
+SQLC_VERSION=1.31.1
 PYTHON_VERSION=3.13.14
 LLVM_MAJOR=18 # clang-format / clang-tidy / libFuzzer on both platforms, so formatting is identical everywhere
 GCC_MAJOR=14  # Ubuntu compiler (CI reference); macOS compiles with Apple Clang from the Command Line Tools
@@ -48,6 +49,15 @@ buf_sha256() {
     Darwin-x86_64) echo ff6d0979143c661d59178a032c57be883b2ac03dc9bf7d00ffca222b0354bd46 ;;
     Linux-aarch64) echo 00eb190aa82df17f393e05b04889cc60a0b13b3259d336e21a87d5f23ab4fd26 ;;
     Linux-x86_64) echo fad1e38d6909bbb583a4da81d8c02a01046e2cd663bde7e337dd24277393764b ;;
+  esac
+}
+
+sqlc_sha256() {
+  case "$1" in
+    darwin_arm64) echo 21602158c99eb1f2bae197a66abfb1941d1e9e50b23125bb193349c6b1acc71e ;;
+    darwin_amd64) echo c5af76772e3785d21663a62697056b383f07629979b1bd25b93872e73dbd519b ;;
+    linux_arm64) echo b7cae247740d0c51a1e657479e5b2d21e6fef428f596682a01bc55bf4ab8a23d ;;
+    linux_amd64) echo 497ae4fcdfa64c5b0c311ffe4c2bd991e43991e82e5367792ed78bc2dca27354 ;;
   esac
 }
 
@@ -257,8 +267,33 @@ setup_vcpkg() {
   link_bin "$root/vcpkg"
 }
 
-# ── go: official tarball, pinned + checksummed ────────────────────────────────
+# ── go: official tarball + sqlc binary, pinned + checksummed ──────────────────
+# Other Go tools (oapi-codegen, migrate) are `tool` directives in gateway/go.mod, not installed here.
 do_go() {
+  install_go
+  install_sqlc
+}
+
+install_sqlc() {
+  if [ -x "$BIN_DIR/sqlc" ] && [ "$("$BIN_DIR/sqlc" version)" = "v$SQLC_VERSION" ]; then
+    ok "sqlc $SQLC_VERSION already installed"
+    return
+  fi
+  if [ $check_only = 1 ]; then
+    log "would install sqlc $SQLC_VERSION into $BIN_DIR"
+    return
+  fi
+  local file="sqlc_${SQLC_VERSION}_${goos}_$goarch.tar.gz" tmp
+  tmp="$(mktemp -d)"
+  fetch_verified "https://github.com/sqlc-dev/sqlc/releases/download/v$SQLC_VERSION/$file" "$(sqlc_sha256 "${goos}_$goarch")" "$tmp/$file"
+  tar -C "$tmp" -xzf "$tmp/$file"
+  mkdir -p "$BIN_DIR"
+  mv "$tmp/sqlc" "$BIN_DIR/sqlc"
+  rm -rf "$tmp"
+  ok "sqlc ready: $("$BIN_DIR/sqlc" version)"
+}
+
+install_go() {
   if [ -x "$BIN_DIR/go" ] && [ "$("$BIN_DIR/go" env GOVERSION)" = "go$GO_VERSION" ]; then
     ok "go $GO_VERSION already installed"
     return

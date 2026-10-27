@@ -1,0 +1,12 @@
+# go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml   (run via `make gen`)
+package: api
+output: internal/api/api.gen.go
+generate:
+  models: true
+  std-http-server: true
+  strict-server: true
+  embedded-spec: false
+output-options:
+  skip-prune: true # keep shared schemas (Problem) even before an operation references them
+compatibility:
+  always-prefix-enum-values: true # HealthEnvDev, not Dev: avoids clashes as the API grows

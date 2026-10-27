@@ -32,7 +32,7 @@ endef
 
 CLEAN_DIRS := engine/build gateway/bin web/dist web/test-results web/playwright-report
 
-.PHONY: clean-space bootstrap up down migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking test test-engine test-gateway test-quant test-intel test-web bench e2e lint verify invariants
+.PHONY: clean-space bootstrap up down migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine test-gateway test-quant test-intel test-web bench e2e lint verify invariants
 
 # Installs ONE component, just-in-time: make bootstrap C=cpp   (core|proto|cpp|go|py|web)
 # Add CHECK=1 to only report what is present / would be installed.
@@ -46,10 +46,9 @@ up:
 down:
 	$(COMPOSE) down
 
-# Postgres from M0; ClickHouse from M1.7 (profile md); Neo4j from M6.1 (profile graph)
-# psql inside the postgres container, golang-migrate-compatible state (scripts/migrate-pg.sh)
+# Postgres from M0 (golang-migrate via vyuhactl); ClickHouse from M1.7 (profile md); Neo4j from M6.1 (profile graph)
 migrate:
-	@./scripts/migrate-pg.sh
+	cd gateway && go run ./cmd/vyuhactl migrate up
 
 migrate-ch:
 	for f in db/clickhouse/*.sql; do docker compose -f deploy/docker-compose.dev.yml exec -T clickhouse clickhouse-client --multiquery < $$f; done
@@ -67,6 +66,10 @@ proto-lint:
 	@command -v buf >/dev/null || { echo "✖ buf not found: make bootstrap C=proto"; exit 1; }
 	cd proto && buf lint && buf format -d --exit-code
 
+# All codegen: protobuf (scaffolded services) + gateway OpenAPI server + sqlc queries.
+gen: proto
+	$(call maybe,gateway/go.mod,cd gateway && go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml && sqlc generate)
+
 # Breaking-change check against main (CI runs the same against the PR base).
 proto-breaking:
 	cd proto && buf breaking --against '../.git#branch=main,subdir=proto'
@@ -76,8 +79,12 @@ test: test-engine test-gateway test-quant test-intel test-web
 test-engine:
 	$(call maybe,engine/CMakeLists.txt,cd engine && cmake --preset debug && cmake --build --preset debug && ctest --preset debug && cmake --preset asan && cmake --build --preset asan && ctest --preset asan)
 
+# Go protobuf code is gitignored, so generate it first. Store integration tests run when the dev Postgres is up.
 test-gateway:
-	$(call maybe,gateway/go.mod,cd gateway && go test ./...)
+	$(call maybe,gateway/go.mod,$(MAKE) --no-print-directory proto >/dev/null && cd gateway && go vet ./... && \
+	  if docker compose -f ../deploy/docker-compose.dev.yml ps --status running -q postgres 2>/dev/null | grep -q .; then \
+	    export VYUHA_TEST_POSTGRES_URL="$${VYUHA_TEST_POSTGRES_URL:-postgres://vyuha:vyuha@localhost:5432/vyuha?sslmode=disable}"; \
+	  else echo "· dev Postgres not running: store integration tests skip (make up)"; fi && go test ./...)
 
 test-quant:
 	$(call maybe,quant/pyproject.toml,cd quant && uv run pytest -q)
@@ -96,7 +103,8 @@ e2e:
 
 lint: proto-lint
 	$(call maybe,engine/CMakeLists.txt,cd engine && clang-format --dry-run --Werror $$(git ls-files '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA) '/engine/(src|tests|bench|bindings|fuzz)/')
-	$(call maybe,gateway/go.mod,cd gateway && golangci-lint run)
+	$(call maybe,gateway/go.mod,cd gateway && test -z "$$(gofmt -l $$(git ls-files '*.go'))" || { gofmt -l $$(git ls-files '*.go'); echo "✖ gofmt"; exit 1; }; \
+	  if command -v golangci-lint >/dev/null; then golangci-lint run; else echo "· golangci-lint not installed yet: gofmt + go vet only"; go vet ./...; fi)
 	$(call maybe,quant/pyproject.toml,cd quant && uv run ruff check && uv run mypy --strict src sdk)
 	$(call maybe,intel/pyproject.toml,cd intel && uv run ruff check && uv run mypy --strict src)
 	$(call maybe,web/package.json,cd web && pnpm lint && pnpm tsc --noEmit)

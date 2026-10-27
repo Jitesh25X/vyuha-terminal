@@ -1,0 +1,12 @@
+# sqlc generate   (run via `make gen`). Schema = the golang-migrate files; sqlc skips *.down.sql.
+version: "2"
+sql:
+  - engine: postgresql
+    schema: ../db/migrations
+    queries: db/queries
+    gen:
+      go:
+        package: store
+        out: internal/store
+        sql_package: pgx/v5
+        omit_unused_structs: true

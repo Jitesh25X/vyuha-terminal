@@ -14,6 +14,9 @@
 - Timestamps: RFC 3339 UTC.
 - RBAC scoping: `scoped` means traders see their mapped accounts and own strategies, while risk_manager/admin see everything.
 
+## 0. System
+### `GET /health` — no auth → `{ status: "ok"|"degraded", version, env, checks: { postgres: { status: "ok"|"fail", latency_ms, error? } } }`. 200 when all checks pass, 503 otherwise; `error` is a generic reason, never a driver message.
+
 ## 1. Auth
 ### `POST /auth/login` — no auth
 Req `{ "username": "meera", "password": "…" }` → 200 `{ "mfa_token": "…", "mfa_enrolled": true }` (the mfa_token is valid for 5 minutes).
