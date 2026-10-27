@@ -23,10 +23,10 @@ Current milestone: **M0**
   - deps: —
   - needs: nothing (text files only; write `.pre-commit-config.yaml` but don't install hooks until the tools arrive in their own tasks)
   - done: `make invariants` green; `make test` skips cleanly for unscaffolded services
-- [ ] **M0.2** Pin toolchains & versions (fill `TECH_STACK.md §6`); devcontainer/VM setup script
+- [x] **M0.2** Pin toolchains & versions (fill `TECH_STACK.md §6`); devcontainer/VM setup script — 2026-10-28: done; `scripts/bootstrap.sh` auto-detects macOS (Homebrew) / Ubuntu 24.04 (apt), pins Go/Node/uv with sha256, `--check` mode; macOS core run installed nothing; devcontainer not added
   - deps: M0.1
   - needs: nothing yet. Write `scripts/bootstrap.sh <component>` (core|cpp|go|py|web) but run only `core` (git, jq, docker present?)
-  - done: `make bootstrap C=core` on fresh Ubuntu 24.04 succeeds and installs nothing beyond the core list
+  - done: `make bootstrap C=core` works on macOS (dev machine) and installs nothing beyond the core list; Ubuntu 24.04 verification is deferred to M1.12 on the staging VM.
 - [ ] **M0.3** `deploy/docker-compose.dev.yml` with profiles: `core` (Postgres, NATS) now; `md` (ClickHouse), `graph` (Neo4j), `obs` (Grafana/Prometheus/Loki/OTel) started only at their milestones
   - deps: M0.2
   - needs: Docker images: `pgvector/pgvector:pg17`, `nats:2.10-alpine` only (profile `core`)
@@ -113,7 +113,7 @@ Current milestone: **M0**
 - [ ] **M1.12** **Staging:** VM with 2 static IPs, real Kite + Upstox sessions streaming Nifty 50 + NIFTY options
   - deps: M1.11
   - needs: Staging VM only; record only Nifty 50 + NIFTY options near expiries
-  - done: Tick→screen p95 < 400 ms measured
+  - done: Tick→screen p95 < 400 ms measured; `make bootstrap C=core` passes on the staging Ubuntu VM
 
 **M1 exit:** live data from both brokers on staging; benchmarks meet NFRs.
 - [ ] M1 exit verified (`/milestone-exit`)
@@ -430,3 +430,4 @@ Current milestone: **M0**
 ## Notes / deviations log
 - (append here: date — task — what changed vs spec and why)
 - 2026-10-28 — M0.1 — pre-commit uses `local`/`system` hooks through `scripts/precommit-tool.sh` instead of upstream hook repos, so pre-commit never downloads its own tool environments (PRD §10.1). gitleaks is enforced in CI (M0.10); locally it runs only once installed.
+- 2026-10-28 — M0.2 — done check changed from "fresh Ubuntu 24.04" to the macOS dev machine (owner develops on macOS; no `ubuntu:24.04` image download). The script still supports both OSes; Ubuntu verification moved to M1.12 on the staging VM. Devcontainer not added (task `needs:` only asks for `bootstrap.sh`).
