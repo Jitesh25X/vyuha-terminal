@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/jiteshraj/vyuha/gateway/internal/audit"
 	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
 	"github.com/jiteshraj/vyuha/gateway/internal/store"
 )
@@ -92,8 +93,17 @@ func NewService(db DB, envelope *vcrypto.Envelope, signer *Signer, cfg Config, n
 
 var usernameRe = regexp.MustCompile(`^[a-z0-9_.]{3,32}$`)
 
-// CreateUser adds an account (vyuhactl user create). TOTP is enrolled at first login.
-func (s *Service) CreateUser(ctx context.Context, username, displayName string, role store.UserRole, password string) (string, error) {
+// Actor identifies who performs an administrative action, for the audit log.
+type Actor struct {
+	ID   string // empty for system actors
+	Kind audit.ActorKind
+}
+
+// SystemActor is used by vyuhactl.
+var SystemActor = Actor{Kind: audit.ActorSystem}
+
+// CreateUser adds an account (vyuhactl user create) and audits it atomically. TOTP is enrolled at first login.
+func (s *Service) CreateUser(ctx context.Context, by Actor, username, displayName string, role store.UserRole, password string) (string, error) {
 	if !usernameRe.MatchString(username) {
 		return "", fmt.Errorf("%w: username must match %s", ErrInvalidInput, usernameRe)
 	}
@@ -109,7 +119,20 @@ func (s *Service) CreateUser(ctx context.Context, username, displayName string, 
 	if err != nil {
 		return "", err
 	}
-	id, err := s.q.CreateUser(ctx, store.CreateUserParams{Username: username, DisplayName: displayName, Role: role, PasswordHash: hash})
+	var id pgtype.UUID
+	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := s.q.WithTx(tx)
+		var err error
+		id, err = q.CreateUser(ctx, store.CreateUserParams{Username: username, DisplayName: displayName, Role: role, PasswordHash: hash})
+		if err != nil {
+			return err
+		}
+		_, err = audit.Record(ctx, q, audit.Event{
+			ActorID: by.ID, ActorKind: by.Kind, Action: "user.create", Entity: "app_user", EntityID: id.String(),
+			Payload: map[string]any{"username": username, "display_name": displayName, "role": string(role)},
+		})
+		return err
+	})
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -129,24 +152,25 @@ type LoginResult struct {
 // Login checks the password and returns a short-lived mfa_token. Failures count towards lockout.
 // Failure counters reset only after the TOTP step succeeds, so a known password can't be used
 // to keep resetting the counter while guessing TOTP codes.
-func (s *Service) Login(ctx context.Context, username, password string) (LoginResult, error) {
+func (s *Service) Login(ctx context.Context, username, password string, meta ClientMeta) (LoginResult, error) {
 	now := s.now()
 	u, err := s.q.GetUserByUsername(ctx, username)
 	if errors.Is(err, pgx.ErrNoRows) {
 		_, _ = verifyPassword(password, s.dummyHash)
-		return LoginResult{}, ErrInvalidCredentials
+		return LoginResult{}, s.auditRejected(ctx, "", "unknown_user", meta)
 	}
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("load user: %w", err)
 	}
 	if !u.IsActive {
 		_, _ = verifyPassword(password, s.dummyHash)
-		return LoginResult{}, ErrInvalidCredentials
+		return LoginResult{}, s.auditRejected(ctx, u.ID.String(), "inactive", meta)
 	}
 	// Password success does not reset the counter (see above), hence resetOnSuccess=false.
-	u, err = s.attempt(ctx, u.ID, now, false, func(_ *store.Queries, locked store.AppUser) (bool, error) {
-		return verifyPassword(password, locked.PasswordHash)
-	})
+	u, err = s.attempt(ctx, u.ID, now, attemptOpts{step: "password", failAction: "auth.login.failure", meta: meta},
+		func(_ *store.Queries, locked store.AppUser) (bool, error) {
+			return verifyPassword(password, locked.PasswordHash)
+		})
 	if errors.Is(err, ErrUnauthenticated) {
 		return LoginResult{}, ErrInvalidCredentials // deactivated or deleted between the two reads
 	}
@@ -167,7 +191,8 @@ func (s *Service) VerifyMFA(ctx context.Context, mfaToken, code string, meta Cli
 	if err != nil {
 		return Session{}, err
 	}
-	u, err := s.attempt(ctx, id, now, true, func(q *store.Queries, u store.AppUser) (bool, error) {
+	opts := attemptOpts{reset: true, step: "totp", failAction: "auth.login.failure", successAction: "auth.login.success", meta: meta}
+	u, err := s.attempt(ctx, id, now, opts, func(q *store.Queries, u store.AppUser) (bool, error) {
 		if !u.TotpEnrolled {
 			return false, ErrMFANotEnrolled
 		}
@@ -186,7 +211,7 @@ type Enrollment struct {
 }
 
 // BeginEnroll generates (or replaces an unconfirmed) TOTP secret for a not-yet-enrolled user.
-func (s *Service) BeginEnroll(ctx context.Context, mfaToken string) (Enrollment, error) {
+func (s *Service) BeginEnroll(ctx context.Context, mfaToken string, meta ClientMeta) (Enrollment, error) {
 	now := s.now()
 	u, err := s.userFromToken(ctx, mfaToken, audMFA, now)
 	if err != nil {
@@ -203,12 +228,19 @@ func (s *Service) BeginEnroll(ctx context.Context, mfaToken string) (Enrollment,
 	if err != nil {
 		return Enrollment{}, err
 	}
-	n, err := s.q.SetPendingTOTPSecret(ctx, store.SetPendingTOTPSecretParams{ID: u.ID, SecretEnc: sealed, Now: ts(now)})
+	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := s.q.WithTx(tx)
+		n, err := q.SetPendingTOTPSecret(ctx, store.SetPendingTOTPSecretParams{ID: u.ID, SecretEnc: sealed, Now: ts(now)})
+		if err != nil {
+			return fmt.Errorf("store totp secret: %w", err)
+		}
+		if n == 0 {
+			return ErrMFAAlreadyEnrolled
+		}
+		return s.auditUser(ctx, q, u.ID.String(), "auth.mfa.enroll_begin", nil, meta)
+	})
 	if err != nil {
-		return Enrollment{}, fmt.Errorf("store totp secret: %w", err)
-	}
-	if n == 0 {
-		return Enrollment{}, ErrMFAAlreadyEnrolled
+		return Enrollment{}, err
 	}
 	return Enrollment{OtpauthURL: e.otpauthURL, QRPNG: e.qrPNG}, nil
 }
@@ -220,7 +252,8 @@ func (s *Service) ConfirmEnroll(ctx context.Context, mfaToken, code string, meta
 	if err != nil {
 		return Session{}, err
 	}
-	u, err := s.attempt(ctx, id, now, true, func(q *store.Queries, u store.AppUser) (bool, error) {
+	opts := attemptOpts{reset: true, step: "enroll_confirm", failAction: "auth.login.failure", successAction: "auth.mfa.enrolled", meta: meta}
+	u, err := s.attempt(ctx, id, now, opts, func(q *store.Queries, u store.AppUser) (bool, error) {
 		if u.TotpEnrolled {
 			return false, ErrMFAAlreadyEnrolled
 		}
@@ -270,11 +303,13 @@ func (s *Service) Refresh(ctx context.Context, rawRefresh string, meta ClientMet
 		}
 		if rt.RevokedAt.Valid {
 			// Reuse: commit the family revocation, then report it.
-			if _, err := q.RevokeRefreshFamily(ctx, store.RevokeRefreshFamilyParams{FamilyID: rt.FamilyID, Now: ts(now)}); err != nil {
+			n, err := q.RevokeRefreshFamily(ctx, store.RevokeRefreshFamilyParams{FamilyID: rt.FamilyID, Now: ts(now)})
+			if err != nil {
 				return fmt.Errorf("revoke family: %w", err)
 			}
 			reused = true
-			return nil
+			return s.auditUser(ctx, q, rt.UserID.String(), "auth.refresh.reuse",
+				map[string]any{"family_id": rt.FamilyID.String(), "revoked_count": n}, meta)
 		}
 		if !rt.ExpiresAt.Time.After(now) {
 			return ErrRefreshInvalid
@@ -290,7 +325,8 @@ func (s *Service) Refresh(ctx context.Context, rawRefresh string, meta ClientMet
 				return fmt.Errorf("revoke family: %w", err)
 			}
 			ended = true
-			return nil
+			return s.auditUser(ctx, q, u.ID.String(), "auth.session.revoked",
+				map[string]any{"family_id": rt.FamilyID.String(), "reason": "user inactive or not enrolled"}, meta)
 		}
 		if err := q.RevokeRefreshToken(ctx, store.RevokeRefreshTokenParams{ID: rt.ID, Now: ts(now)}); err != nil {
 			return fmt.Errorf("revoke refresh token: %w", err)
@@ -311,32 +347,40 @@ func (s *Service) Refresh(ctx context.Context, rawRefresh string, meta ClientMet
 }
 
 // Logout revokes the session (refresh family) of the presented token. Unknown tokens are ignored.
-func (s *Service) Logout(ctx context.Context, rawRefresh string) error {
+func (s *Service) Logout(ctx context.Context, rawRefresh string, meta ClientMeta) error {
 	hash, ok := hashRefresh(rawRefresh)
 	if !ok {
 		return nil
 	}
-	rt, err := s.q.GetRefreshTokenForUpdate(ctx, hash)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("load refresh token: %w", err)
-	}
-	if _, err := s.q.RevokeRefreshFamily(ctx, store.RevokeRefreshFamilyParams{FamilyID: rt.FamilyID, Now: ts(s.now())}); err != nil {
-		return fmt.Errorf("revoke family: %w", err)
-	}
-	return nil
+	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		q := s.q.WithTx(tx)
+		rt, err := q.GetRefreshTokenForUpdate(ctx, hash)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("load refresh token: %w", err)
+		}
+		n, err := q.RevokeRefreshFamily(ctx, store.RevokeRefreshFamilyParams{FamilyID: rt.FamilyID, Now: ts(s.now())})
+		if err != nil {
+			return fmt.Errorf("revoke family: %w", err)
+		}
+		if n == 0 {
+			return nil // already logged out or revoked; nothing changed
+		}
+		return s.auditUser(ctx, q, rt.UserID.String(), "auth.logout", map[string]any{"family_id": rt.FamilyID.String()}, meta)
+	})
 }
 
 // Reauth re-checks password + TOTP for sensitive actions and returns a short-lived reauth_token.
-func (s *Service) Reauth(ctx context.Context, userID, password, code string) (string, time.Duration, error) {
+func (s *Service) Reauth(ctx context.Context, userID, password, code string, meta ClientMeta) (string, time.Duration, error) {
 	now := s.now()
 	var id pgtype.UUID
 	if err := id.Scan(userID); err != nil {
 		return "", 0, ErrUnauthenticated
 	}
-	u, err := s.attempt(ctx, id, now, true, func(q *store.Queries, u store.AppUser) (bool, error) {
+	opts := attemptOpts{reset: true, step: "reauth", failAction: "auth.reauth.failure", successAction: "auth.reauth.success", meta: meta}
+	u, err := s.attempt(ctx, id, now, opts, func(q *store.Queries, u store.AppUser) (bool, error) {
 		if !u.TotpEnrolled {
 			return false, ErrMFANotEnrolled
 		}
@@ -394,7 +438,16 @@ func (s *Service) subjectFromToken(token, aud string, now time.Time) (pgtype.UUI
 // lock check → verify → record failure or (if resetOnSuccess) reset, all in one transaction.
 // check returns ok=false for a wrong credential (counted) or an error for anything else (not
 // counted, rolled back). Failures are committed before ErrInvalidCredentials / LockedError returns.
-func (s *Service) attempt(ctx context.Context, id pgtype.UUID, now time.Time, resetOnSuccess bool,
+// attemptOpts: reset the failure counter on success; audit actions for failure/success (in the same tx).
+type attemptOpts struct {
+	reset         bool
+	step          string // password | totp | enroll_confirm | reauth
+	failAction    string
+	successAction string // empty: no success event (e.g. the password step alone)
+	meta          ClientMeta
+}
+
+func (s *Service) attempt(ctx context.Context, id pgtype.UUID, now time.Time, opts attemptOpts,
 	check func(q *store.Queries, u store.AppUser) (bool, error),
 ) (store.AppUser, error) {
 	var (
@@ -422,11 +475,24 @@ func (s *Service) attempt(ctx context.Context, id pgtype.UUID, now time.Time, re
 		}
 		if !ok {
 			failed, err = s.recordFailure(ctx, q, u.ID, now)
-			return err
+			if err != nil {
+				return err
+			}
+			payload := map[string]any{"step": opts.step}
+			var le *LockedError
+			if errors.As(failed, &le) {
+				payload["locked_until"] = le.Until.UTC().Format(time.RFC3339)
+			}
+			return s.auditUser(ctx, q, u.ID.String(), opts.failAction, payload, opts.meta)
 		}
-		if resetOnSuccess {
+		if opts.reset {
 			if err := q.ResetLoginFailures(ctx, store.ResetLoginFailuresParams{ID: u.ID, Now: ts(now)}); err != nil {
 				return fmt.Errorf("reset failures: %w", err)
+			}
+		}
+		if opts.successAction != "" {
+			if err := s.auditUser(ctx, q, u.ID.String(), opts.successAction, map[string]any{"step": opts.step}, opts.meta); err != nil {
+				return err
 			}
 		}
 		user = u
@@ -535,6 +601,30 @@ func (s *Service) issueSession(ctx context.Context, q *store.Queries, u store.Ap
 		RefreshMaxAge: s.cfg.RefreshTTL,
 		User:          User{ID: u.ID.String(), Username: u.Username, DisplayName: u.DisplayName, Role: u.Role},
 	}, nil
+}
+
+// auditUser records an auth event about (and by) a user, using q so it commits with the change.
+func (s *Service) auditUser(ctx context.Context, q *store.Queries, userID, action string, payload map[string]any, meta ClientMeta) error {
+	_, err := audit.Record(ctx, q, audit.Event{
+		ActorID: userID, ActorKind: audit.ActorUser, Action: action, Entity: "app_user", EntityID: userID,
+		Payload: payload, IP: meta.IP,
+	})
+	return err
+}
+
+// auditRejected records a login for an unknown or inactive user and returns ErrInvalidCredentials.
+// The attempted username is never stored for unknown users: people type passwords into the username
+// box, many passwords look like valid usernames, and audit rows can never be removed. An inactive
+// user is identified by their account id instead.
+func (s *Service) auditRejected(ctx context.Context, userID, reason string, meta ClientMeta) error {
+	_, err := audit.Record(ctx, s.q, audit.Event{
+		ActorID: userID, ActorKind: audit.ActorUser, Action: "auth.login.failure", Entity: "app_user", EntityID: userID,
+		Payload: map[string]any{"step": "password", "reason": reason}, IP: meta.IP,
+	})
+	if err != nil {
+		return err
+	}
+	return ErrInvalidCredentials
 }
 
 func lockedAt(u store.AppUser, now time.Time) error {

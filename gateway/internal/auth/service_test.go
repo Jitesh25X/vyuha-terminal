@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/netip"
-	"os"
 	"testing"
 	"time"
 
@@ -17,6 +16,7 @@ import (
 
 	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
 	"github.com/jiteshraj/vyuha/gateway/internal/store"
+	"github.com/jiteshraj/vyuha/gateway/internal/testdb"
 )
 
 // Integration suite: runs against Postgres when VYUHA_TEST_POSTGRES_URL is set (make test-gateway).
@@ -34,16 +34,8 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	url := os.Getenv("VYUHA_TEST_POSTGRES_URL")
-	if url == "" {
-		t.Skip("VYUHA_TEST_POSTGRES_URL not set")
-	}
 	ctx := context.Background()
-	pool, err := store.NewPool(ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	_, pool := testdb.New(t) // fresh migrated database, dropped after the test
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
 	env, err := vcrypto.NewEnvelope(base64.StdEncoding.EncodeToString(key))
@@ -60,17 +52,15 @@ func newFixture(t *testing.T) *fixture {
 
 func (f *fixture) advance(d time.Duration) { f.clock = f.clock.Add(d) }
 
-// createUser makes a fresh user and deletes it (and its refresh tokens) after the test.
+// createUser makes a fresh user (the whole database is dropped after the test).
 func (f *fixture) createUser() string {
 	f.t.Helper()
 	var b [4]byte
 	_, _ = rand.Read(b[:])
 	username := "t_" + hex.EncodeToString(b[:])
-	id, err := f.svc.CreateUser(f.ctx, username, "Test User", store.UserRoleTrader, testPassword)
-	if err != nil {
+	if _, err := f.svc.CreateUser(f.ctx, SystemActor, username, "Test User", store.UserRoleTrader, testPassword); err != nil {
 		f.t.Fatal(err)
 	}
-	f.t.Cleanup(func() { _, _ = f.pool.Exec(context.Background(), "DELETE FROM app_user WHERE id = $1", id) })
 	return username
 }
 
@@ -86,11 +76,11 @@ func (f *fixture) code(secret string) string {
 // enroll runs first login + enrollment and returns the TOTP secret and the first session.
 func (f *fixture) enroll(username string) (string, Session) {
 	f.t.Helper()
-	lr, err := f.svc.Login(f.ctx, username, testPassword)
+	lr, err := f.svc.Login(f.ctx, username, testPassword, f.meta)
 	if err != nil || lr.MFAEnrolled {
 		f.t.Fatalf("first login: %+v %v", lr, err)
 	}
-	e, err := f.svc.BeginEnroll(f.ctx, lr.MFAToken)
+	e, err := f.svc.BeginEnroll(f.ctx, lr.MFAToken, f.meta)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -108,7 +98,7 @@ func (f *fixture) enroll(username string) (string, Session) {
 // login does password + TOTP for an enrolled user.
 func (f *fixture) login(username, secret string) (Session, error) {
 	f.t.Helper()
-	lr, err := f.svc.Login(f.ctx, username, testPassword)
+	lr, err := f.svc.Login(f.ctx, username, testPassword, f.meta)
 	if err != nil {
 		return Session{}, err
 	}
@@ -148,7 +138,7 @@ func TestCreateUserValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := f.svc.CreateUser(f.ctx, tt.username, tt.display, tt.role, tt.password)
+			_, err := f.svc.CreateUser(f.ctx, SystemActor, tt.username, tt.display, tt.role, tt.password)
 			wantErr(t, err, tt.want)
 		})
 	}
@@ -158,7 +148,7 @@ func TestEnrollmentAndLogin(t *testing.T) {
 	f := newFixture(t)
 	username := f.createUser()
 
-	lr, err := f.svc.Login(f.ctx, username, testPassword)
+	lr, err := f.svc.Login(f.ctx, username, testPassword, f.meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,11 +166,11 @@ func TestEnrollmentAndLogin(t *testing.T) {
 		t.Fatalf("access token: %+v %v", claims, err)
 	}
 
-	lr, _ = f.svc.Login(f.ctx, username, testPassword)
+	lr, _ = f.svc.Login(f.ctx, username, testPassword, f.meta)
 	if !lr.MFAEnrolled {
 		t.Fatal("expected mfa_enrolled after confirmation")
 	}
-	_, err = f.svc.BeginEnroll(f.ctx, lr.MFAToken)
+	_, err = f.svc.BeginEnroll(f.ctx, lr.MFAToken, f.meta)
 	wantErr(t, err, ErrMFAAlreadyEnrolled)
 	_, err = f.svc.VerifyAccess(lr.MFAToken)
 	wantErr(t, err, ErrUnauthenticated)
@@ -204,7 +194,7 @@ func TestTOTPReplayRejected(t *testing.T) {
 		t.Fatalf("next step should work: %v", err)
 	}
 	// An older (still in-window) code is rejected once a newer step was used.
-	lr, _ := f.svc.Login(f.ctx, username, testPassword)
+	lr, _ := f.svc.Login(f.ctx, username, testPassword, f.meta)
 	old, _ := totp.GenerateCodeCustom(secret, f.clock.Add(-30*time.Second), totpOpts)
 	_, err = f.svc.VerifyMFA(f.ctx, lr.MFAToken, old, f.meta)
 	wantErr(t, err, ErrInvalidCredentials)
@@ -215,23 +205,23 @@ func TestLoginFailuresAndLockout(t *testing.T) {
 	username := f.createUser()
 	secret, _ := f.enroll(username)
 
-	_, err := f.svc.Login(f.ctx, "t_nobody_here", testPassword)
+	_, err := f.svc.Login(f.ctx, "t_nobody_here", testPassword, f.meta)
 	wantErr(t, err, ErrInvalidCredentials)
 
 	for i := 1; i <= 4; i++ {
-		_, err := f.svc.Login(f.ctx, username, "wrong password!!")
+		_, err := f.svc.Login(f.ctx, username, "wrong password!!", f.meta)
 		wantErr(t, err, ErrInvalidCredentials)
 	}
-	le := wantLocked(t, func() error { _, err := f.svc.Login(f.ctx, username, "wrong password!!"); return err }())
+	le := wantLocked(t, func() error { _, err := f.svc.Login(f.ctx, username, "wrong password!!", f.meta); return err }())
 	if want := f.clock.Add(15 * time.Minute); !le.Until.Equal(want) {
 		t.Fatalf("locked until %v, want %v", le.Until, want)
 	}
 	// Correct password is refused while locked, and doesn't extend the lock.
-	wantLocked(t, func() error { _, err := f.svc.Login(f.ctx, username, testPassword); return err }())
+	wantLocked(t, func() error { _, err := f.svc.Login(f.ctx, username, testPassword, f.meta); return err }())
 
 	f.advance(15*time.Minute + time.Second)
 	// After expiry a single failure starts a fresh count instead of re-locking.
-	_, err = f.svc.Login(f.ctx, username, "wrong password!!")
+	_, err = f.svc.Login(f.ctx, username, "wrong password!!", f.meta)
 	wantErr(t, err, ErrInvalidCredentials)
 	f.advance(30 * time.Second)
 	if _, err := f.login(username, secret); err != nil {
@@ -245,7 +235,7 @@ func TestWrongTOTPCountsTowardsLockout(t *testing.T) {
 	secret, _ := f.enroll(username)
 	f.advance(30 * time.Second)
 
-	lr, err := f.svc.Login(f.ctx, username, testPassword)
+	lr, err := f.svc.Login(f.ctx, username, testPassword, f.meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +244,7 @@ func TestWrongTOTPCountsTowardsLockout(t *testing.T) {
 		wantErr(t, err, ErrInvalidCredentials)
 	}
 	// A correct password in between must not reset the counter.
-	if _, err := f.svc.Login(f.ctx, username, testPassword); err != nil {
+	if _, err := f.svc.Login(f.ctx, username, testPassword, f.meta); err != nil {
 		t.Fatal(err)
 	}
 	_, err = f.svc.VerifyMFA(f.ctx, lr.MFAToken, "000000", f.meta)
@@ -336,13 +326,13 @@ func TestRefreshExpiryLogoutAndGarbage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.svc.Logout(f.ctx, s2.RefreshToken); err != nil {
+	if err := f.svc.Logout(f.ctx, s2.RefreshToken, f.meta); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.svc.Refresh(f.ctx, s2.RefreshToken, f.meta); err == nil {
 		t.Fatal("refresh after logout succeeded")
 	}
-	if err := f.svc.Logout(f.ctx, "unknown"); err != nil {
+	if err := f.svc.Logout(f.ctx, "unknown", f.meta); err != nil {
 		t.Fatalf("logout with unknown token: %v", err)
 	}
 }
@@ -369,10 +359,10 @@ func TestReauth(t *testing.T) {
 	secret, sess := f.enroll(username)
 	f.advance(30 * time.Second)
 
-	_, _, err := f.svc.Reauth(f.ctx, sess.User.ID, "wrong password!!", f.code(secret))
+	_, _, err := f.svc.Reauth(f.ctx, sess.User.ID, "wrong password!!", f.code(secret), f.meta)
 	wantErr(t, err, ErrInvalidCredentials)
 
-	tok, ttl, err := f.svc.Reauth(f.ctx, sess.User.ID, testPassword, f.code(secret))
+	tok, ttl, err := f.svc.Reauth(f.ctx, sess.User.ID, testPassword, f.code(secret), f.meta)
 	if err != nil || ttl != 5*time.Minute {
 		t.Fatalf("reauth: %v (ttl %v)", err, ttl)
 	}

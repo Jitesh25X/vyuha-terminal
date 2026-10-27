@@ -54,7 +54,7 @@ func TestLockoutHoldsUnderConcurrentPasswordGuesses(t *testing.T) {
 	f := newFixture(t)
 	username := f.createUser()
 	invalid, locked := countOutcomes(t, 20, func() error {
-		_, err := f.svc.Login(f.ctx, username, "wrong password!!")
+		_, err := f.svc.Login(f.ctx, username, "wrong password!!", f.meta)
 		return err
 	})
 	if invalid != 4 || locked != 16 {
@@ -70,7 +70,7 @@ func TestLockoutHoldsUnderConcurrentTOTPGuesses(t *testing.T) {
 	username := f.createUser()
 	f.enroll(username)
 	f.advance(30 * time.Second)
-	lr, err := f.svc.Login(f.ctx, username, testPassword)
+	lr, err := f.svc.Login(f.ctx, username, testPassword, f.meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,9 +92,9 @@ func TestLockoutDoesNotEndExistingSessions(t *testing.T) {
 	username := f.createUser()
 	_, sess := f.enroll(username)
 	for i := 0; i < 5; i++ {
-		_, _ = f.svc.Login(f.ctx, username, "wrong password!!")
+		_, _ = f.svc.Login(f.ctx, username, "wrong password!!", f.meta)
 	}
-	_, err := f.svc.Login(f.ctx, username, testPassword)
+	_, err := f.svc.Login(f.ctx, username, testPassword, f.meta)
 	wantLocked(t, err)
 	r, err := f.svc.Refresh(f.ctx, sess.RefreshToken, f.meta)
 	if err != nil {
@@ -111,18 +111,18 @@ func TestInactiveUserLoginIsGeneric(t *testing.T) {
 	if _, err := f.pool.Exec(f.ctx, "UPDATE app_user SET is_active = false WHERE username = $1", username); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.svc.Login(f.ctx, username, testPassword)
+	_, err := f.svc.Login(f.ctx, username, testPassword, f.meta)
 	wantErr(t, err, ErrInvalidCredentials)
 }
 
 func TestWrongEnrollmentCodesCountTowardsLockout(t *testing.T) {
 	f := newFixture(t)
 	username := f.createUser()
-	lr, err := f.svc.Login(f.ctx, username, testPassword)
+	lr, err := f.svc.Login(f.ctx, username, testPassword, f.meta)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, err := f.svc.BeginEnroll(f.ctx, lr.MFAToken)
+	e, err := f.svc.BeginEnroll(f.ctx, lr.MFAToken, f.meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,12 +141,12 @@ func TestWrongEnrollmentCodesCountTowardsLockout(t *testing.T) {
 func TestConfirmUsesLatestSecretOnly(t *testing.T) {
 	f := newFixture(t)
 	username := f.createUser()
-	lr, _ := f.svc.Login(f.ctx, username, testPassword)
-	first, err := f.svc.BeginEnroll(f.ctx, lr.MFAToken)
+	lr, _ := f.svc.Login(f.ctx, username, testPassword, f.meta)
+	first, err := f.svc.BeginEnroll(f.ctx, lr.MFAToken, f.meta)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := f.svc.BeginEnroll(f.ctx, lr.MFAToken)
+	second, err := f.svc.BeginEnroll(f.ctx, lr.MFAToken, f.meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,10 +166,10 @@ func TestReauthFailuresCountAndSuccessResets(t *testing.T) {
 	f.advance(30 * time.Second)
 
 	for i := 0; i < 3; i++ {
-		_, _, err := f.svc.Reauth(f.ctx, sess.User.ID, testPassword, "000000") // wrong TOTP
+		_, _, err := f.svc.Reauth(f.ctx, sess.User.ID, testPassword, "000000", f.meta) // wrong TOTP
 		wantErr(t, err, ErrInvalidCredentials)
 	}
-	if _, _, err := f.svc.Reauth(f.ctx, sess.User.ID, testPassword, f.code(secret)); err != nil {
+	if _, _, err := f.svc.Reauth(f.ctx, sess.User.ID, testPassword, f.code(secret), f.meta); err != nil {
 		t.Fatal(err)
 	}
 	var failures int
@@ -178,9 +178,9 @@ func TestReauthFailuresCountAndSuccessResets(t *testing.T) {
 	}
 	f.advance(30 * time.Second)
 	for i := 0; i < 4; i++ {
-		_, _, err := f.svc.Reauth(f.ctx, sess.User.ID, "wrong password!!", f.code(secret))
+		_, _, err := f.svc.Reauth(f.ctx, sess.User.ID, "wrong password!!", f.code(secret), f.meta)
 		wantErr(t, err, ErrInvalidCredentials)
 	}
-	_, _, err := f.svc.Reauth(f.ctx, sess.User.ID, "wrong password!!", f.code(secret))
+	_, _, err := f.svc.Reauth(f.ctx, sess.User.ID, "wrong password!!", f.code(secret), f.meta)
 	wantLocked(t, err)
 }

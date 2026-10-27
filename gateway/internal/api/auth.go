@@ -48,7 +48,7 @@ func classify(err error) (authProblemKind, Problem, bool) {
 
 // Login: password step.
 func (s *Server) Login(ctx context.Context, req LoginRequestObject) (LoginResponseObject, error) {
-	res, err := s.auth.Login(ctx, req.Body.Username, req.Body.Password)
+	res, err := s.auth.Login(ctx, req.Body.Username, req.Body.Password, clientMeta(ctx))
 	if err == nil {
 		return Login200JSONResponse{MfaToken: res.MFAToken, MfaEnrolled: res.MFAEnrolled}, nil
 	}
@@ -82,7 +82,7 @@ func (s *Server) VerifyMfa(ctx context.Context, req VerifyMfaRequestObject) (Ver
 
 // BeginMfaEnroll: first-login TOTP secret.
 func (s *Server) BeginMfaEnroll(ctx context.Context, req BeginMfaEnrollRequestObject) (BeginMfaEnrollResponseObject, error) {
-	e, err := s.auth.BeginEnroll(ctx, req.Body.MfaToken)
+	e, err := s.auth.BeginEnroll(ctx, req.Body.MfaToken, clientMeta(ctx))
 	if err == nil {
 		return BeginMfaEnroll200JSONResponse{OtpauthUrl: e.OtpauthURL, QrPngBase64: base64.StdEncoding.EncodeToString(e.QRPNG)}, nil
 	}
@@ -143,7 +143,7 @@ func (s *Server) RefreshSession(ctx context.Context, req RefreshSessionRequestOb
 // Logout revokes the session; always clears the cookie.
 func (s *Server) Logout(ctx context.Context, req LogoutRequestObject) (LogoutResponseObject, error) {
 	if req.Params.VyuhaRt != nil {
-		if err := s.auth.Logout(ctx, *req.Params.VyuhaRt); err != nil {
+		if err := s.auth.Logout(ctx, *req.Params.VyuhaRt, clientMeta(ctx)); err != nil {
 			return nil, err
 		}
 	}
@@ -157,7 +157,7 @@ func (s *Server) Reauth(ctx context.Context, req ReauthRequestObject) (ReauthRes
 		return Reauth401ApplicationProblemPlusJSONResponse{UnauthorizedApplicationProblemPlusJSONResponse(
 			problem(http.StatusUnauthorized, "AUTH_UNAUTHENTICATED", "Authentication required", ""))}, nil
 	}
-	tok, ttl, err := s.auth.Reauth(ctx, c.Subject, req.Body.Password, req.Body.Totp)
+	tok, ttl, err := s.auth.Reauth(ctx, c.Subject, req.Body.Password, req.Body.Totp, clientMeta(ctx))
 	if err == nil {
 		return Reauth200JSONResponse{ReauthToken: tok, ExpiresIn: int(ttl / time.Second)}, nil
 	}

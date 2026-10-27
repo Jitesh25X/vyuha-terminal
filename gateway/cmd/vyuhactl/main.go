@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -20,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jiteshraj/vyuha/gateway/internal/audit"
 	"github.com/jiteshraj/vyuha/gateway/internal/auth"
 	"github.com/jiteshraj/vyuha/gateway/internal/config"
 	"github.com/jiteshraj/vyuha/gateway/internal/store"
@@ -31,6 +33,10 @@ const usage = `usage:
       (password is read from the terminal with echo off, or from stdin when piped; never from a flag)
   vyuhactl secrets init [-env-file ../.env] [-env-example ../.env.example] [-jwt-key ../deploy/secrets/jwt_ed25519.pem]
       (creates missing dev secrets; never prints them; never overwrites an existing key)
+  vyuhactl audit verify [-anchor ID:HEXHASH ...]
+      (recomputes the audit hash chain; exit 1 on tampering. Anchors from 'audit head' catch deleted newest rows)
+  vyuhactl audit head
+      (prints the newest ID:HEXHASH; store it outside the database, e.g. in the daily compliance report)
 Reads POSTGRES_URL etc. from the environment (VYUHA_ENV=dev defaults apply).`
 
 func main() {
@@ -51,6 +57,8 @@ func run(args []string) error {
 		return runUserCreate(args[2:])
 	case "secrets init":
 		return runSecretsInit(args[2:])
+	case "audit verify", "audit head":
+		return runAudit(args[1], args[2:])
 	}
 	return errors.New(usage)
 }
@@ -113,7 +121,7 @@ func runUserCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	id, err := svc.CreateUser(ctx, *username, *display, store.UserRole(*role), password)
+	id, err := svc.CreateUser(ctx, auth.SystemActor, *username, *display, store.UserRole(*role), password)
 	if err != nil {
 		return err
 	}
@@ -256,5 +264,61 @@ func ensureMasterKey(envFile, example string) error {
 		return err
 	}
 	fmt.Printf("✔ %s: VYUHA_MASTER_KEY generated (0600; back it up — TOTP secrets are encrypted with it)\n", envFile)
+	return nil
+}
+
+type anchorFlags []audit.Anchor
+
+func (a *anchorFlags) String() string { return fmt.Sprint(len(*a)) }
+
+func (a *anchorFlags) Set(v string) error {
+	an, err := audit.ParseAnchor(v)
+	if err != nil {
+		return err
+	}
+	*a = append(*a, an)
+	return nil
+}
+
+func runAudit(cmd string, args []string) error {
+	fs := flag.NewFlagSet("audit "+cmd, flag.ContinueOnError)
+	var anchors anchorFlags
+	if cmd == "verify" {
+		fs.Var(&anchors, "anchor", "ID:HEXHASH from an earlier 'audit head' (repeatable)")
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	pool, err := store.NewPool(ctx, cfg.PostgresURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	res, err := audit.Verify(ctx, pool, anchors...)
+	if err != nil {
+		return err
+	}
+	if cmd == "head" {
+		if res.RowsChecked == 0 {
+			fmt.Println("audit log is empty")
+			return nil
+		}
+		fmt.Printf("%d:%s\n", res.HeadID, hex.EncodeToString(res.HeadHash))
+		if !res.OK {
+			return fmt.Errorf("chain is NOT intact (first bad id %d: %s); do not use this head as an anchor", res.FirstBadID, res.Reason)
+		}
+		return nil
+	}
+	if !res.OK {
+		return fmt.Errorf("✖ audit chain FAILED at id %d after %d rows: %s", res.FirstBadID, res.RowsChecked, res.Reason)
+	}
+	fmt.Printf("✔ audit chain intact: %d rows, head %d:%s\n", res.RowsChecked, res.HeadID, hex.EncodeToString(res.HeadHash))
 	return nil
 }

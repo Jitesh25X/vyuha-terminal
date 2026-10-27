@@ -24,7 +24,7 @@ Sources: [SEBI framework summary — QuantInsti](https://www.quantinsti.com/arti
 | ≤ 10 OPS unless registered | Token bucket per account per exchange, default 8, hard max 10 (DB CHECK) | engine R-OPS | Bench: burst of 50 intents → ≤ cap/s sent |
 | Traceability | Strategy tag on every order (`manual`, `strat:<id>`, `ai-draft`); `order_event` log with gate stamp | engine, DB | Tag coverage = 100% in `COMP` report |
 | Kill switch / control | Multi-scope kill switch; broker-side kill switch documented | engine | Kill tests |
-| Logs ≥ 5 years | Hash-chained `audit_event` + orders/events/fills retention | DB | `audit verify` |
+| Logs ≥ 5 years | Hash-chained `audit_event` + orders/events/fills retention | DB | `vyuhactl audit verify [-anchor id:hash]`; keep `vyuhactl audit head` output off-database |
 | Restricted order types/instruments | Gate rules `R-ORDER-SHAPE`, `R-INSTR-*`; MARKET disable switch; market protection param | engine | Unit tests |
 | Daily session expiry | Accounts → `awaiting_login`; trading blocked until the human logs in | engine/gateway | Token-expiry test |
 | White-box only | Strategies are code the desk owns and can read; AI never trades autonomously | design | Tool registry test |

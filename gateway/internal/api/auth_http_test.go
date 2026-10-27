@@ -14,7 +14,6 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -26,21 +25,14 @@ import (
 	"github.com/jiteshraj/vyuha/gateway/internal/config"
 	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
 	"github.com/jiteshraj/vyuha/gateway/internal/store"
+	"github.com/jiteshraj/vyuha/gateway/internal/testdb"
 )
 
 // End-to-end over HTTP with a real cookie jar: login → enroll → confirm → refresh → reuse → reauth → logout.
 // Runs when VYUHA_TEST_POSTGRES_URL is set.
 func TestAuthFlowHTTP(t *testing.T) {
-	pgURL := os.Getenv("VYUHA_TEST_POSTGRES_URL")
-	if pgURL == "" {
-		t.Skip("VYUHA_TEST_POSTGRES_URL not set")
-	}
 	ctx := context.Background()
-	pool, err := store.NewPool(ctx, pgURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
+	_, pool := testdb.New(t) // fresh migrated database, dropped after the test
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
 	env, _ := vcrypto.NewEnvelope(base64.StdEncoding.EncodeToString(key))
@@ -54,11 +46,9 @@ func TestAuthFlowHTTP(t *testing.T) {
 	_, _ = rand.Read(b[:])
 	username := "t_http_" + hex.EncodeToString(b[:])
 	const password = "correct horse battery staple"
-	id, err := svc.CreateUser(ctx, username, "HTTP Test", store.UserRoleAnalyst, password)
-	if err != nil {
+	if _, err := svc.CreateUser(ctx, auth.SystemActor, username, "HTTP Test", store.UserRoleAnalyst, password); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = pool.Exec(context.Background(), "DELETE FROM app_user WHERE id = $1", id) })
 
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))

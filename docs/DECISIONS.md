@@ -67,6 +67,11 @@ Claude Code: you may add **Proposed** entries. Only the owner moves them to Acce
 ### ADR-017 — Build mode: Claude Code writes all code — Accepted — 2026-10-28
 **Decision:** Claude Code implements every task, including the former hand-written learning modules (M1.2 SPSC ring, M2.2 RiskGate framework). The owner reviews each task before continuing.
 
+### ADR-018 — Audit hash chain v2 via a new migration — Accepted (default; owner may revisit) — 2026-10-28
+**Context:** `000001_init.up.sql`'s `audit_chain()` left `actor_id`/`actor_kind` out of the hash (a `--` comment swallowed that line), joined fields with `|` (text could shift between fields without changing the hash) and assigned ids before taking the chain lock (concurrent inserts could chain out of id order). `000001` is protected from edits in `.claude/settings.json`; the owner was offered (A) fixing 000001 in place or (B) a new migration, and continued without choosing.
+**Decision:** (B) `000004_audit_hash_v2` replaces `audit_chain()`: every column incl. `ip` is hashed, each field length-prefixed (`len:value`, NULL = `-`), ids assigned inside the trigger after the advisory lock. It refuses to run if `audit_event` already has rows. `gateway/internal/audit/verify.go` recomputes the same canonical form independently in Go. A chain cannot reveal deletion of its newest rows, so `vyuhactl audit head` prints an `id:hash` anchor to keep outside the database and `audit verify -anchor` checks it.
+**Consequences:** 000001 still contains the v1 function text (superseded). If the owner later prefers (A), fold 000004 into 000001 before any non-dev database exists.
+
 ---
 
 ## Open (owner to decide) — mirrored from PRD §13

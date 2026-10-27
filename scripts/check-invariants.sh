@@ -20,8 +20,8 @@ check "engine: no system_clock::now outside WallClock" \
 check "engine: no double/float prices in oms/risk/broker" \
   "grep -RInE '\b(double|float)\b[^;]*(price|Price|ltp|qty)' engine/src/oms engine/src/risk engine/src/broker 2>/dev/null"
 
-check "audit_event never updated/deleted" \
-  "grep -RInEi '(update|delete from)[[:space:]]+audit_event' --include='*.go' --include='*.py' --include='*.sql' --include='*.cc' gateway quant intel engine db 2>/dev/null | grep -v 'audit_no_update\|audit_immutable\|REVOKE'"
+check "audit_event never updated/deleted/truncated" \
+  "grep -RInEi '(update|delete from|truncate)[[:space:]]+(table[[:space:]]+)?audit_event' --include='*.go' --include='*.py' --include='*.sql' --include='*.cc' gateway quant intel engine db 2>/dev/null | grep -v 'audit_no_update\|audit_immutable\|REVOKE'"
 
 check "MCP tool registry has no mutating tools" \
   "grep -RInE 'def (place|modify|cancel)_order|set_limit|release_kill' intel/src 2>/dev/null"
