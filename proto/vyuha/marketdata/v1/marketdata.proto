@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package vyuha.marketdata.v1;
+
+import "vyuha/common/v1/common.proto";
+
+option go_package = "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1;marketdatav1";
+
+enum FeedMode {
+  FEED_MODE_UNSPECIFIED = 0;
+  FEED_MODE_LTP = 1;
+  FEED_MODE_QUOTE = 2;  // LTP + OHLC + volume + OI + best bid/ask
+  FEED_MODE_FULL = 3;   // + 5-level depth (30 where available)
+}
+
+message DepthLevel {
+  int64 price = 1;   // price units
+  uint32 qty = 2;
+  uint32 orders = 3;
+}
+
+message Tick {
+  uint64 instrument_id = 1;
+  int64 exchange_ts_ns = 2;
+  int64 recv_ts_ns = 3;
+  vyuha.common.v1.Broker source = 4;
+  int64 ltp = 5;
+  uint32 ltq = 6;
+  uint64 volume = 7;
+  uint64 oi = 8;
+  int64 open = 9;
+  int64 high = 10;
+  int64 low = 11;
+  int64 prev_close = 12;
+  int64 avg_price = 13;
+  int64 bid = 14;
+  int64 ask = 15;
+  uint32 bid_qty = 16;
+  uint32 ask_qty = 17;
+  repeated DepthLevel bids = 18;
+  repeated DepthLevel asks = 19;
+  // Broker-provided option greeks when available (Upstox option_greeks mode); engine/quant may override.
+  optional double iv = 20;
+  optional double delta = 21;
+  optional double gamma = 22;
+  optional double theta = 23;
+  optional double vega = 24;
+  uint64 seq = 25;  // engine sequence for gap detection
+}
+
+message Bar {
+  uint64 instrument_id = 1;
+  string interval = 2;  // "1s","1m"
+  int64 ts_ns = 3;      // bar open time
+  int64 open = 4;
+  int64 high = 5;
+  int64 low = 6;
+  int64 close = 7;
+  uint64 volume = 8;
+  uint64 oi = 9;
+  bool final = 10;      // false while bar is forming
+}
+
+// Latest snapshot stored in NATS KV md_last.
+message Snapshot {
+  Tick tick = 1;
+  double change_pct = 2;
+  bool stale = 3;
+}
+
+message FeedStatus {
+  string account_id = 1;
+  vyuha.common.v1.Broker broker = 2;
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    STATE_CONNECTING = 1;
+    STATE_CONNECTED = 2;
+    STATE_RECONNECTING = 3;
+    STATE_DOWN = 4;
+  }
+  State state = 3;
+  uint32 subscribed = 4;
+  int64 last_tick_ns = 5;
+  string detail = 6;
+}

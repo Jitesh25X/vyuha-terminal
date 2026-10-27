@@ -1,0 +1,145 @@
+syntax = "proto3";
+
+package vyuha.orders.v1;
+
+option go_package = "github.com/jiteshraj/vyuha/gateway/gen/vyuha/orders/v1;ordersv1";
+
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_BUY = 1;
+  SIDE_SELL = 2;
+}
+
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  ORDER_TYPE_LIMIT = 1;
+  ORDER_TYPE_MARKET = 2;
+  ORDER_TYPE_SL = 3;
+  ORDER_TYPE_SL_M = 4;
+}
+
+enum Product {
+  PRODUCT_UNSPECIFIED = 0;
+  PRODUCT_CNC = 1;
+  PRODUCT_MIS = 2;
+  PRODUCT_NRML = 3;
+}
+
+enum Validity {
+  VALIDITY_UNSPECIFIED = 0;
+  VALIDITY_DAY = 1;
+  VALIDITY_IOC = 2;
+}
+
+enum Source {
+  SOURCE_UNSPECIFIED = 0;
+  SOURCE_MANUAL = 1;
+  SOURCE_STRATEGY = 2;
+  SOURCE_AI_DRAFT = 3;   // human-submitted ticket that originated as a copilot draft
+  SOURCE_SYSTEM = 4;     // kill-switch flatten, bracket legs, auto-slice children
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_NEW = 1;
+  ORDER_STATUS_RISK_REJECTED = 2;
+  ORDER_STATUS_APPROVED = 3;
+  ORDER_STATUS_SENT = 4;
+  ORDER_STATUS_OPEN = 5;
+  ORDER_STATUS_PARTIALLY_FILLED = 6;
+  ORDER_STATUS_FILLED = 7;
+  ORDER_STATUS_CANCEL_PENDING = 8;
+  ORDER_STATUS_CANCELLED = 9;
+  ORDER_STATUS_MODIFY_PENDING = 10;
+  ORDER_STATUS_BROKER_REJECTED = 11;
+  ORDER_STATUS_UNKNOWN = 12;
+}
+
+message Bracket {
+  int64 stop_trigger = 1;  // price units
+  int64 stop_price = 2;    // 0 => SL-M
+  int64 target_price = 3;  // 0 => no target
+}
+
+message OrderIntent {
+  string client_order_id = 1;
+  string account_id = 2;       // uuid or "paper"
+  string user_id = 3;
+  string strategy_id = 4;      // empty for manual
+  Source source = 5;
+  uint64 instrument_id = 6;
+  Side side = 7;
+  int64 qty = 8;               // units
+  OrderType order_type = 9;
+  Product product = 10;
+  Validity validity = 11;
+  int64 price = 12;            // price units, 0 if not applicable
+  int64 trigger_price = 13;
+  double market_protection_pct = 14;
+  optional Bracket bracket = 15;
+  string ai_draft_id = 16;
+  string parent_order_id = 17;
+}
+
+message RiskReason {
+  string code = 1;      // R-*
+  string message = 2;
+  string limit = 3;     // decimal string
+  string current = 4;   // decimal string
+  bool hard = 5;
+}
+
+message GateStamp {
+  uint64 ruleset_version = 1;
+  uint64 eval_ns = 2;
+  int64 ts_ns = 3;
+}
+
+message IntentResult {
+  string order_id = 1;
+  OrderStatus status = 2;
+  repeated RiskReason reasons = 3;   // hard failures
+  repeated RiskReason warnings = 4;  // soft limits
+  repeated string child_order_ids = 5;
+  GateStamp stamp = 6;
+}
+
+message OrderUpdate {
+  string order_id = 1;
+  string account_id = 2;
+  OrderStatus status = 3;
+  int64 filled_qty = 4;
+  int64 avg_fill_price = 5;
+  string broker_order_id = 6;
+  string reason_code = 7;
+  string message = 8;
+  int64 ts_ns = 9;
+  uint32 seq = 10;
+  bool is_paper = 11;
+}
+
+message Fill {
+  string fill_id = 1;
+  string order_id = 2;
+  string account_id = 3;
+  uint64 instrument_id = 4;
+  Side side = 5;
+  int64 qty = 6;
+  int64 price = 7;
+  string broker_trade_id = 8;
+  int64 ts_ns = 9;
+  bool is_paper = 10;
+}
+
+message PositionUpdate {
+  string account_id = 1;
+  uint64 instrument_id = 2;
+  Product product = 3;
+  int64 net_qty = 4;
+  int64 avg_price = 5;
+  int64 mark = 6;
+  double realized_inr = 7;
+  double unrealized_inr = 8;
+  double costs_inr = 9;
+  int64 ts_ns = 10;
+}

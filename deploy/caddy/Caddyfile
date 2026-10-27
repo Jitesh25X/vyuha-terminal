@@ -1,0 +1,28 @@
+# Production reverse proxy. Prefer access over Tailscale; if exposed publicly, add an IP allowlist.
+{
+	email {$ACME_EMAIL}
+}
+
+{$PUBLIC_HOST} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Content-Security-Policy "default-src 'self'; connect-src 'self' wss://{$PUBLIC_HOST}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'"
+	}
+	handle /api/* {
+		reverse_proxy gateway:8080
+	}
+	handle /ws {
+		reverse_proxy gateway:8080
+	}
+	handle /mcp* {
+		reverse_proxy intel:8090
+	}
+	handle {
+		root * /srv/web
+		try_files {path} /index.html
+		file_server
+	}
+}

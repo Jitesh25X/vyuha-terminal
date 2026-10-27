@@ -1,0 +1,19 @@
+# Example: one VM, one NIC, three private IPs each mapped (by the cloud provider) to its own
+# public static/elastic IP. Each broker account binds to one private IP; the provider NATs it to the
+# account's registered public IP. Adjust interface name and addresses. Apply: sudo netplan apply
+#
+#   broker_account A (Zerodha, trader Meera)  -> static_ip 10.0.1.11 -> public 13.x.x.11
+#   broker_account B (Upstox,  trader Meera)  -> static_ip 10.0.1.12 -> public 13.x.x.12
+#   broker_account C (Zerodha, trader Kabir)  -> static_ip 10.0.1.13 -> public 13.x.x.13
+#
+# NSE rules: a static IP may be shared only among family members. Don't map unrelated
+# clients to the same public IP. Each client registers their public IP with their broker app.
+network:
+  version: 2
+  ethernets:
+    ens5:
+      dhcp4: true
+      addresses:
+        - 10.0.1.11/24
+        - 10.0.1.12/24
+        - 10.0.1.13/24

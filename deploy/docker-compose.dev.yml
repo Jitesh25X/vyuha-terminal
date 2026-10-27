@@ -1,0 +1,86 @@
+# Dev infrastructure. Application services run on the host during development (make dev-*).
+# Pin image digests at M0 (TECH_STACK.md §6); tags below are floors.
+# LEAN: services are grouped into profiles and pulled/started only when their milestone needs them:
+#   core  = postgres, nats            (M0+)
+#   md    = clickhouse                 (M1+)
+#   obs   = prometheus, loki, otel, grafana (M3+)
+#   graph = neo4j                      (M6+)
+# Usage: make up PROFILES="core md"
+name: vyuha-dev
+
+services:
+  postgres:
+    profiles: ["core"]
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: vyuha
+      POSTGRES_PASSWORD: vyuha
+      POSTGRES_DB: vyuha
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vyuha"]
+      interval: 5s
+      retries: 20
+
+  clickhouse:
+    profiles: ["md"]
+    image: clickhouse/clickhouse-server:24.8
+    ports: ["8123:8123", "9000:9000"]
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes: [chdata:/var/lib/clickhouse]
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      retries: 20
+
+  nats:
+    profiles: ["core"]
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports: ["4222:4222", "8222:8222"]
+    volumes: [natsdata:/data]
+
+  neo4j:
+    profiles: ["graph"]
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: neo4j/change-me-dev
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_server_memory_heap_max__size: 2G
+    ports: ["7474:7474", "7687:7687"]
+    volumes: [neo4jdata:/data]
+
+  prometheus:
+    profiles: ["obs"]
+    image: prom/prometheus:v3.1.0
+    volumes: [./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro]
+    ports: ["9090:9090"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  loki:
+    profiles: ["obs"]
+    image: grafana/loki:3.3.2
+    ports: ["3100:3100"]
+
+  otel-collector:
+    profiles: ["obs"]
+    image: otel/opentelemetry-collector-contrib:0.116.0
+    volumes: [./otel/collector.yaml:/etc/otelcol-contrib/config.yaml:ro]
+    ports: ["4317:4317", "4318:4318"]
+
+  grafana:
+    profiles: ["obs"]
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    ports: ["3000:3000"]
+    volumes: [./grafana/provisioning:/etc/grafana/provisioning:ro]
+
+volumes:
+  pgdata: {}
+  chdata: {}
+  natsdata: {}
+  neo4jdata: {}

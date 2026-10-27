@@ -1,0 +1,136 @@
+syntax = "proto3";
+
+package vyuha.ws.v1;
+
+import "vyuha/marketdata/v1/marketdata.proto";
+import "vyuha/orders/v1/orders.proto";
+import "vyuha/risk/v1/risk.proto";
+
+option go_package = "github.com/jiteshraj/vyuha/gateway/gen/vyuha/ws/v1;wsv1";
+
+// Browser <-> gateway WebSocket protocol (binary frames).
+
+message ClientMsg {
+  uint32 req_id = 1;
+  oneof body {
+    ClientHello hello = 10;
+    Subscribe subscribe = 11;
+    Unsubscribe unsubscribe = 12;
+    Ping ping = 13;
+    TokenRefresh token_refresh = 14;
+  }
+}
+
+message ClientHello {
+  string access_token = 1;
+  string client_version = 2;
+}
+
+enum Channel {
+  CHANNEL_UNSPECIFIED = 0;
+  CHANNEL_QUOTE = 1;
+  CHANNEL_DEPTH = 2;
+  CHANNEL_BAR_1M = 3;
+  CHANNEL_ORDERS = 4;
+  CHANNEL_POSITIONS = 5;
+  CHANNEL_PNL = 6;
+  CHANNEL_RISK_SUMMARY = 7;
+  CHANNEL_ALERTS = 8;
+  CHANNEL_CTX = 9;
+  CHANNEL_KILL = 10;
+  CHANNEL_SYSTEM = 11;
+  CHANNEL_UI = 12;
+}
+
+message Subscribe {
+  Channel channel = 1;
+  repeated string keys = 2;   // instrument ids or scope ids as strings
+  uint32 conflate_ms = 3;     // 50..1000, default 250
+}
+
+message Unsubscribe {
+  Channel channel = 1;
+  repeated string keys = 2;
+}
+
+message Ping {
+  int64 client_ts_ms = 1;
+}
+
+message TokenRefresh {
+  string access_token = 1;
+}
+
+message ServerMsg {
+  uint32 req_id = 1;   // echoes request where applicable
+  oneof body {
+    Welcome welcome = 10;
+    Snapshot snapshot = 11;
+    UpdateBatch updates = 12;
+    Alert alert = 13;
+    UiCommand ui = 14;
+    Error error = 15;
+    Pong pong = 16;
+  }
+}
+
+message Welcome {
+  string user_id = 1;
+  string role = 2;
+  int64 server_ts_ms = 3;
+}
+
+message Snapshot {
+  Channel channel = 1;
+  repeated Item items = 2;
+}
+
+message UpdateBatch {
+  Channel channel = 1;
+  repeated Item items = 2;
+  int64 server_ts_ms = 3;
+}
+
+message Item {
+  oneof value {
+    vyuha.marketdata.v1.Snapshot quote = 1;
+    vyuha.marketdata.v1.Tick depth = 2;
+    vyuha.marketdata.v1.Bar bar = 3;
+    vyuha.orders.v1.OrderUpdate order = 4;
+    vyuha.orders.v1.PositionUpdate position = 5;
+    vyuha.risk.v1.RiskSummary risk = 6;
+    vyuha.risk.v1.KillSwitchState kill = 7;
+    SystemStatus system = 8;
+    string json = 9;   // ctx alerts / pnl series (small, infrequent)
+  }
+}
+
+message SystemStatus {
+  string market_state = 1;  // pre_open | open | closed | holiday
+  repeated vyuha.marketdata.v1.FeedStatus feeds = 2;
+  bool engine_ok = 3;
+  int64 data_latency_ms = 4;
+}
+
+message Alert {
+  string id = 1;
+  string severity = 2;   // info | warn | critical
+  string title = 3;
+  string body_json = 4;
+  int64 ts_ms = 5;
+}
+
+message UiCommand {
+  string kind = 1;          // "open_ticket" | "open_panel"
+  string payload_json = 2;  // e.g. ticket draft
+}
+
+message Error {
+  string code = 1;   // MD_NOT_ENTITLED | SLOW_CONSUMER | AUTH_EXPIRED | BAD_REQUEST
+  string message = 2;
+}
+
+message Pong {
+  int64 client_ts_ms = 1;
+  int64 server_ts_ms = 2;
+}

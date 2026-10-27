@@ -1,0 +1,141 @@
+syntax = "proto3";
+
+package vyuha.engine.v1;
+
+import "vyuha/common/v1/common.proto";
+import "vyuha/marketdata/v1/marketdata.proto";
+import "vyuha/orders/v1/orders.proto";
+import "vyuha/risk/v1/risk.proto";
+
+option go_package = "github.com/jiteshraj/vyuha/gateway/gen/vyuha/engine/v1;enginev1";
+
+// Internal control API of the C++ engine. Private network + mTLS in prod.
+service EngineService {
+  rpc SubmitIntent(vyuha.orders.v1.OrderIntent) returns (vyuha.orders.v1.IntentResult);
+  rpc PreviewIntent(vyuha.orders.v1.OrderIntent) returns (PreviewResult);
+  rpc ModifyOrder(ModifyRequest) returns (vyuha.orders.v1.IntentResult);
+  rpc CancelOrder(CancelRequest) returns (Ack);
+  rpc CancelAll(CancelAllRequest) returns (CancelAllResult);
+
+  rpc SetKill(vyuha.risk.v1.KillSwitchState) returns (Ack);
+  rpc ReleaseKill(ReleaseKillRequest) returns (Ack);
+  rpc ReloadLimits(vyuha.risk.v1.LimitSet) returns (Ack);
+
+  rpc StartSession(StartSessionRequest) returns (SessionInfo);
+  rpc StopSession(StopSessionRequest) returns (Ack);
+  rpc GetSessions(GetSessionsRequest) returns (SessionList);
+
+  rpc Subscribe(SubscribeRequest) returns (Ack);      // market data interest from gateway/strategy host
+  rpc Unsubscribe(SubscribeRequest) returns (Ack);
+
+  rpc GetPositions(GetPositionsRequest) returns (PositionList);
+  rpc Reconcile(ReconcileRequest) returns (ReconcileResult);
+  rpc Health(HealthRequest) returns (vyuha.common.v1.Health);
+}
+
+message Ack {
+  bool ok = 1;
+  string code = 2;
+  string message = 3;
+}
+
+message PreviewResult {
+  vyuha.orders.v1.IntentResult gate = 1;
+  string margin_required = 2;   // decimal string
+  string margin_available = 3;
+  string margin_source = 4;     // "broker" | "cache"
+  string notional = 5;
+  uint32 slices = 6;
+  string reward_risk = 7;
+}
+
+message ModifyRequest {
+  string order_id = 1;
+  string user_id = 2;
+  optional int64 qty = 3;
+  optional int64 price = 4;
+  optional int64 trigger_price = 5;
+}
+
+message CancelRequest {
+  string order_id = 1;
+  string user_id = 2;
+}
+
+message CancelAllRequest {
+  string user_id = 1;
+  string account_id = 2;    // optional filter
+  string strategy_id = 3;   // optional filter
+}
+
+message CancelAllResult {
+  uint32 requested = 1;
+  repeated string order_ids = 2;
+}
+
+message ReleaseKillRequest {
+  vyuha.risk.v1.Scope scope = 1;
+  string scope_id = 2;
+  string user_id = 3;
+  string reason = 4;
+}
+
+message StartSessionRequest {
+  string account_id = 1;
+  vyuha.common.v1.Broker broker = 2;
+  string api_key = 3;
+  string api_secret = 4;     // never logged; zeroised after use
+  string access_token = 5;   // never logged
+  string source_ip = 6;
+  string backup_source_ip = 7;
+  string public_ip = 8;
+  uint32 ops_cap = 9;
+  bool data_entitled = 10;
+}
+
+message StopSessionRequest {
+  string account_id = 1;
+  string reason = 2;
+}
+
+message GetSessionsRequest {}
+
+message SessionInfo {
+  string account_id = 1;
+  vyuha.common.v1.Broker broker = 2;
+  string state = 3;   // connected | awaiting_login | error | disconnected
+  string detail = 4;
+  repeated vyuha.marketdata.v1.FeedStatus feeds = 5;
+  uint32 ops_cap = 6;
+  double ops_max_1m = 7;
+}
+
+message SessionList {
+  repeated SessionInfo sessions = 1;
+}
+
+message SubscribeRequest {
+  string requester = 1;   // "gateway" | "strategy:<id>"
+  repeated uint64 instrument_ids = 2;
+  vyuha.marketdata.v1.FeedMode mode = 3;
+  string via_account_id = 4;  // entitlement source account
+}
+
+message GetPositionsRequest {
+  string account_id = 1;   // empty = all
+}
+
+message PositionList {
+  repeated vyuha.orders.v1.PositionUpdate positions = 1;
+}
+
+message ReconcileRequest {
+  string account_id = 1;
+}
+
+message ReconcileResult {
+  bool clean = 1;
+  repeated string mismatches = 2;
+}
+
+message HealthRequest {}

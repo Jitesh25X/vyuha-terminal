@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package vyuha.common.v1;
+
+option go_package = "github.com/jiteshraj/vyuha/gateway/gen/vyuha/common/v1;commonv1";
+
+// Price in units of 1/10000 rupee (1/100 paise). 1 rupee = 10000.
+message Price {
+  int64 units = 1;
+}
+
+// Unix epoch nanoseconds, UTC.
+message Timestamp {
+  int64 unix_nanos = 1;
+}
+
+enum Exchange {
+  EXCHANGE_UNSPECIFIED = 0;
+  EXCHANGE_NSE = 1;
+  EXCHANGE_BSE = 2;
+  EXCHANGE_NFO = 3;
+  EXCHANGE_BFO = 4;
+}
+
+enum Broker {
+  BROKER_UNSPECIFIED = 0;
+  BROKER_ZERODHA = 1;
+  BROKER_UPSTOX = 2;
+  BROKER_SIM = 3;
+}
+
+message Uuid {
+  string value = 1;  // canonical lowercase hyphenated
+}
+
+message Health {
+  string service = 1;
+  bool ok = 2;
+  string detail = 3;
+  Timestamp ts = 4;
+  map<string, string> checks = 5;
+}
