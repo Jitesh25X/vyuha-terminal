@@ -142,9 +142,10 @@ clean-space:
 	@echo "Before:"; du -sh . 2>/dev/null || true
 	rm -rf $(CLEAN_DIRS)
 	find . -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
-	if command -v uv >/dev/null; then uv cache prune; fi
-	if command -v pnpm >/dev/null; then pnpm store prune; fi
-	if command -v go >/dev/null; then go clean -cache -testcache; fi
+	# Cache prunes are best effort: a failure (e.g. a read-only cache entry) warns instead of stopping cleanup.
+	if command -v uv >/dev/null; then uv cache prune || echo "· warning: uv cache prune failed"; fi
+	if command -v pnpm >/dev/null; then pnpm store prune || echo "· warning: pnpm store prune failed"; fi
+	if command -v go >/dev/null; then go clean -cache -testcache || echo "· warning: go clean failed"; fi
 	if [ -n "$${VCPKG_ROOT:-}" ]; then rm -rf "$$VCPKG_ROOT/buildtrees" "$$VCPKG_ROOT/downloads" "$$VCPKG_ROOT/packages"; fi
 	if command -v docker >/dev/null; then docker image prune -f && docker builder prune -f; fi
 	@echo "After:"; du -sh . 2>/dev/null || true

@@ -14,7 +14,7 @@ This file is the **single source of truth for what to build next**. Claude Code 
 
 Legend: `deps` = tasks that must be `[x]` first · `needs` = the **only** things you may install or download for this task · `done` = completion check.
 
-Current milestone: **M0**
+Current milestone: **M1**
 
 
 ## M0 — Foundations
@@ -65,7 +65,7 @@ Current milestone: **M0**
   - done: PR checks required on `main`
 
 **M0 exit:** login with TOTP works end-to-end in the browser; CI green; DB migrations apply cleanly.
-- [ ] M0 exit verified (`/milestone-exit`)
+- [x] M0 exit verified (`/milestone-exit`) — 2026-10-28: TOTP login end-to-end in Chromium (`make e2e`: enroll via QR → workspace → HELP; enrolled sign-in; reload restore; sign-out); CI green on PR #1 (all jobs + `ci-ok`; advisory, not required — M0.10 deviation); migrations 000001–000005 apply to a fresh DB and re-apply as a no-op (v5, not dirty; dev DB v5 clean); `make verify` green; `make clean-space` run (repo 213M → 162M; Docker build cache 10.7 GB pruned; free disk 24 → 34 GiB)
 
 
 ## M1 — Instruments & market data
