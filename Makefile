@@ -128,7 +128,7 @@ lint: proto-lint lint-engine lint-gateway lint-quant lint-intel lint-web
 
 # clang-tidy reads build/debug/compile_commands.json; configure debug if it's missing (e.g. after clean-space).
 lint-engine:
-	$(call maybe,engine/CMakeLists.txt,cd engine && { test -f build/debug/compile_commands.json || cmake --preset debug >/dev/null; } && clang-format --dry-run --Werror $$(git ls-files '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA) '/engine/(src|tests|bench|bindings|fuzz)/')
+	$(call maybe,engine/CMakeLists.txt,cd engine && { test -f build/debug/compile_commands.json || cmake --preset debug >/dev/null; } && clang-format --dry-run --Werror $$(git ls-files --cached --others --exclude-standard '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA) '/engine/(src|tests|bench|bindings|fuzz)/')
 
 lint-gateway:
 	$(call maybe,gateway/go.mod,cd gateway && test -z "$$(gofmt -l $$(git ls-files '*.go'))" || { gofmt -l $$(git ls-files '*.go'); echo "✖ gofmt"; exit 1; }; \

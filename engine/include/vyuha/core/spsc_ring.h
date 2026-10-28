@@ -47,7 +47,9 @@ class SpscRing {
   [[nodiscard]] static constexpr std::size_t capacity() noexcept { return N; }
 
   // Producer: returns false (and leaves `value` untouched) when the ring is full.
-  [[nodiscard]] bool try_push(T&& value) noexcept { return push_impl([&](T& slot) { slot = std::move(value); }); }
+  [[nodiscard]] bool try_push(T&& value) noexcept {
+    return push_impl([&](T& slot) { slot = std::move(value); });
+  }
 
   [[nodiscard]] bool try_push(const T& value) noexcept
     requires std::is_nothrow_copy_assignable_v<T>
