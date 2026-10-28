@@ -28,6 +28,13 @@ void* operator new(std::size_t n) {
   }
   throw std::bad_alloc();
 }
+// The nothrow forms must be replaced too, or a library's nothrow new (e.g. std::stable_sort's
+// temporary buffer) allocates through the sanitizer and is freed here (alloc-dealloc mismatch).
+void* operator new(std::size_t n, const std::nothrow_t& /*tag*/) noexcept {
+  g_allocs.fetch_add(1, std::memory_order_relaxed);
+  return std::malloc(n == 0 ? 1 : n);
+}
+void operator delete(void* p, const std::nothrow_t& /*tag*/) noexcept { std::free(p); }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t /*n*/) noexcept { std::free(p); }
 // NOLINTEND(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory,misc-new-delete-overloads)
