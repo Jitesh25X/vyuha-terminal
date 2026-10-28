@@ -51,6 +51,19 @@
         "VYUHA_SANITIZER": "thread",
         "VYUHA_BUILD_PYTHON": "OFF"
       }
+    },
+    {
+      "name": "fuzz",
+      "displayName": "libFuzzer targets (clang; no vcpkg)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/fuzz",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "$env{VYUHA_FUZZ_CXX}",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "VYUHA_FUZZ_ONLY": "ON",
+        "VYUHA_BUILD_TESTS": "OFF",
+        "VYUHA_BUILD_PYTHON": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -69,6 +82,10 @@
     {
       "name": "tsan",
       "configurePreset": "tsan"
+    },
+    {
+      "name": "fuzz",
+      "configurePreset": "fuzz"
     }
   ],
   "testPresets": [

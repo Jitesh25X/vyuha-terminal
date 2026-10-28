@@ -16,7 +16,7 @@ ifeq ($(shell uname -s),Linux)
   TIDY_EXTRA := -extra-arg=-Wno-builtin-macro-redefined -extra-arg=-D__cpp_concepts=202002L
 endif
 ifeq ($(shell uname -s),Darwin)
-  TIDY_EXTRA := -extra-arg=-nostdinc++ -extra-arg=-isystem$(shell brew --prefix llvm@18 2>/dev/null)/include/c++/v1
+  TIDY_EXTRA := -extra-arg=-fexperimental-library -extra-arg=-nostdinc++ -extra-arg=-isystem$(shell brew --prefix llvm@18 2>/dev/null)/include/c++/v1
 endif
 # Engine compiler: GCC 14 on Ubuntu (24.04 defaults to GCC 13); Apple Clang on macOS. Override with CC=/CXX=.
 ifeq ($(shell uname -s),Linux)
@@ -38,7 +38,7 @@ endef
 
 CLEAN_DIRS := engine/build gateway/bin web/dist web/test-results web/playwright-report
 
-.PHONY: clean-space bootstrap up down dev-secrets dev-gateway migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine lint-engine lint-gateway lint-quant lint-intel lint-web test-gateway test-quant test-intel test-web bench e2e lint verify invariants
+.PHONY: clean-space bootstrap up down dev-secrets dev-gateway migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine lint-engine lint-gateway lint-quant lint-intel lint-web test-gateway test-quant test-intel test-web bench fuzz fuzz-kite fuzz-upstox e2e lint verify invariants
 
 # Installs ONE component, just-in-time: make bootstrap C=cpp   (core|proto|cpp|go|py|web)
 # Add CHECK=1 to only report what is present / would be installed.
@@ -117,6 +117,29 @@ test-intel:
 
 test-web:
 	$(call maybe,web/package.json,cd web && pnpm test --run)
+
+# libFuzzer: clang with compiler-rt (macOS: Homebrew llvm@18; Ubuntu: clang-18 + libclang-rt-18-dev).
+FUZZ_SECONDS ?= 600
+ifeq ($(shell uname -s),Darwin)
+  FUZZ_CXX ?= $(shell brew --prefix llvm@18 2>/dev/null)/bin/clang++
+  FUZZ_SANITIZERS ?= fuzzer,undefined  # LLVM 18 ASan+libFuzzer hangs on current macOS; CI runs ASan
+else
+  FUZZ_CXX ?= clang++-18
+  FUZZ_SANITIZERS ?= fuzzer,address,undefined
+  # clang 18 can't use GCC 14's <expected>; LLVM's libc++ also brings the same hardening as macOS.
+  FUZZ_CXXFLAGS ?= -stdlib=libc++
+endif
+# make fuzz-kite / fuzz-upstox (FUZZ_SECONDS each), or `make fuzz` for all parsers.
+define run_fuzz
+	$(call maybe,engine/fuzz/$(1).cc,cd engine && VYUHA_FUZZ_CXX=$(FUZZ_CXX) cmake --preset fuzz -DVYUHA_FUZZ_SANITIZERS=$(FUZZ_SANITIZERS) -DCMAKE_CXX_FLAGS="$(FUZZ_CXXFLAGS)" >/dev/null && cmake --build --preset fuzz && \
+	  mkdir -p build/fuzz/corpus/$(2) && cp fixtures/vcr/$(2)/*.bin build/fuzz/corpus/$(2)/ && \
+	  ./build/fuzz/fuzz/$(1) -max_total_time=$(FUZZ_SECONDS) -print_final_stats=1 -timeout=5 -artifact_prefix=build/fuzz/ build/fuzz/corpus/$(2))
+endef
+fuzz-kite:
+	$(call run_fuzz,kite_ticker_fuzz,kite)
+fuzz-upstox:
+	$(call run_fuzz,upstox_feed_fuzz,upstox)
+fuzz: fuzz-kite fuzz-upstox
 
 bench:
 	$(call maybe,engine/CMakeLists.txt,cd engine && cmake --preset release && cmake --build --preset release && ./build/release/bench/vyuha_bench --benchmark_min_time=2s)

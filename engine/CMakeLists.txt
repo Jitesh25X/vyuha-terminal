@@ -10,6 +10,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON) # core is also linked into the Python ex
 
 option(VYUHA_BUILD_TESTS "Build GoogleTest tests and Google Benchmark" ON)
 option(VYUHA_BUILD_PYTHON "Build the nanobind module vyuha_core (off in sanitizer presets)" ON)
+option(VYUHA_FUZZ_ONLY "Build only the libFuzzer targets (fuzz preset; no vcpkg)" OFF)
 set(VYUHA_SANITIZER "" CACHE STRING "Sanitizers to enable, e.g. address,undefined or thread")
 
 # Strict warnings for our own targets only (never for vcpkg dependencies).
@@ -21,12 +22,62 @@ if(VYUHA_SANITIZER)
   add_link_options(-fsanitize=${VYUHA_SANITIZER})
 endif()
 
+if(VYUHA_FUZZ_ONLY)
+  add_subdirectory(fuzz)
+  return()
+endif()
+
+find_package(quill CONFIG REQUIRED)
+find_package(boost_asio CONFIG REQUIRED)
+find_package(boost_beast CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(simdjson CONFIG REQUIRED)
+
 add_library(vyuha_core_lib
+  src/core/core_loop.cc
+  src/core/price.cc
   src/core/version.cc
+  src/core/wall_clock.cc
+  src/md/bar_builder.cc
+  src/md/last_value.cc
+  src/util/log.cc
+  src/util/net.cc
+  src/util/secret.cc
 )
 add_library(vyuha::core ALIAS vyuha_core_lib)
 target_include_directories(vyuha_core_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(vyuha_core_lib PRIVATE vyuha_warnings)
+target_link_libraries(vyuha_core_lib PUBLIC quill::quill PRIVATE vyuha_warnings)
+
+# Kite Connect adapter (market data now; orders in M3). Kept out of core so core stays Boost-free.
+# Broker-neutral WebSocket feed runner shared by the adapters.
+add_library(vyuha_feed STATIC src/broker/common/feed_client.cc)
+target_link_libraries(vyuha_feed
+  PUBLIC vyuha::core Boost::asio Boost::beast OpenSSL::SSL OpenSSL::Crypto
+  PRIVATE vyuha_warnings)
+target_compile_definitions(vyuha_feed PUBLIC BOOST_ASIO_NO_DEPRECATED)
+
+add_library(vyuha_kite
+  src/broker/kite/ticker.cc
+  src/broker/kite/ticker_parser.cc
+  src/broker/kite/ticker_shards.cc
+)
+add_library(vyuha::kite ALIAS vyuha_kite)
+
+# Upstox adapter (market data now; orders in M3).
+add_library(vyuha_upstox
+  src/broker/upstox/feed.cc
+  src/broker/upstox/feed_parser.cc
+  src/broker/upstox/subscriptions.cc
+)
+add_library(vyuha::upstox ALIAS vyuha_upstox)
+target_link_libraries(vyuha_upstox
+  PUBLIC vyuha::core
+  PRIVATE vyuha_warnings vyuha_feed simdjson::simdjson)
+# Non-deprecated Asio: synchronous ops taking an error_code return void (nothing to ignore).
+target_compile_definitions(vyuha_kite PUBLIC BOOST_ASIO_NO_DEPRECATED)
+target_link_libraries(vyuha_kite
+  PUBLIC vyuha::core
+  PRIVATE vyuha_warnings vyuha_feed simdjson::simdjson)
 
 if(VYUHA_BUILD_TESTS)
   enable_testing()

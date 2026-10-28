@@ -82,6 +82,24 @@ jobs:
             engine/build/${{ matrix.preset }}/vcpkg-manifest-install.log
           retention-days: 7
 
+  # Parser fuzzing with libFuzzer + ASan + UBSan (macOS can't run ASan with libFuzzer on LLVM 18).
+  # PRs fuzz for 60 s; pushes to main (and manual runs) for the full 10 minutes.
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          sudo apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends clang-18 libclang-rt-18-dev libc++-18-dev libc++abi-18-dev cmake ninja-build
+      - run: make fuzz FUZZ_SECONDS=${{ github.event_name == 'pull_request' && '60' || '600' }}
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crashes
+          path: engine/build/fuzz/crash-*
+          retention-days: 14
+
   gateway:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -183,7 +201,7 @@ jobs:
   # The one required status check on main.
   ci-ok:
     if: always()
-    needs: [hygiene, engine, gateway, quant, web]
+    needs: [hygiene, engine, fuzz, gateway, quant, web]
     runs-on: ubuntu-24.04
     steps:
       - run: |
