@@ -143,7 +143,7 @@ Features are grouped into 8 modules. IDs (e.g. `F-MD-1`) are referenced in `ROAD
 - [ ] Given both brokers' files downloaded, then every NFO/BFO contract present in both maps to one `instrument_id` with both `kite_token` and `upstox_key`.
 - [ ] Given a contract present in only one broker, then it is stored with the other mapping NULL and flagged `partial_mapping=true`.
 - [ ] Given the sync fails, then yesterday's master stays active and an admin alert is raised; trading is not blocked.
-- [ ] The NSE F&O ban list is ingested daily and `instrument.fo_ban` updated before 09:00 IST. `[DECISION NEEDED: ban-list source — see §13 #7]`
+- [ ] The NSE F&O ban list is ingested daily and `instrument.fo_ban` updated before 09:00 IST. (manual import, ADR-019)
 
 #### F-MD-2: Live streaming (Kite + Upstox)
 **Description:** C++ engine connects to Kite Ticker (binary) and Upstox Market Data Feed V3 (protobuf), normalizes to canonical `Tick`/`Depth`, publishes on NATS, and the gateway fans out to browsers with per-panel conflation (default 250 ms).
@@ -646,7 +646,7 @@ The build must install and download **only what the current task needs**, when i
 - [x] Environment variables are listed (`.env.example`)
 - [x] Project structure is defined
 - [x] Out-of-scope items are clearly separated
-- [ ] All `[DECISION NEEDED]` items are resolved or assigned. #5 resolved (Claude writes all); #2 deferred (personal use only); #3 deferred (private until licensed); **#7 still needed before M1.1**; others have defaults
+- [ ] All `[DECISION NEEDED]` items are resolved or assigned. #5 resolved (Claude writes all); #2 deferred (personal use only); #3 deferred (private until licensed); #7 resolved (ADR-019: manual import of the NSE ban file); others have defaults
 - [x] Non-functional requirements are set
 - [x] No features in scope are underspecified
 

@@ -18,6 +18,11 @@ strategies/examples/  sma_cross, orb_breakout, short_straddle_with_stop
 tests/ (+ tests/golden/)
 ```
 
+## Jobs (`uv run vyuha-quant …`, JSON report on stdout, JSON logs on stderr)
+- `instruments sync [--date D] [--from-dir DIR] [--allow-large-change]` — F-MD-1 master sync (08:00 IST)
+- `ban import FILE [--date D]` / `ban check` — NSE F&O ban list, manual import only (ADR-019; never fetch from NSE)
+- `holidays seed` — exchange_holiday from exchange_calendars XBOM (existing rows win)
+
 ## Rules
 - `uv run pytest`, `uv run mypy --strict src sdk`, `uv run ruff check`.
 - Polars first. NumPy/Numba for numeric kernels. No pandas in library code (allowed in notebooks only).

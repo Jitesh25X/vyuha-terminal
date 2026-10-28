@@ -72,6 +72,11 @@ Claude Code: you may add **Proposed** entries. Only the owner moves them to Acce
 **Decision:** (B) `000004_audit_hash_v2` replaces `audit_chain()`: every column incl. `ip` is hashed, each field length-prefixed (`len:value`, NULL = `-`), ids assigned inside the trigger after the advisory lock. It refuses to run if `audit_event` already has rows. `gateway/internal/audit/verify.go` recomputes the same canonical form independently in Go. A chain cannot reveal deletion of its newest rows, so `vyuhactl audit head` prints an `id:hash` anchor to keep outside the database and `audit verify -anchor` checks it.
 **Consequences:** 000001 still contains the v1 function text (superseded). If the owner later prefers (A), fold 000004 into 000001 before any non-dev database exists.
 
+### ADR-019 — F&O ban list: manual import of NSE's daily file (D-7) — Accepted (owner) — 2026-10-28
+**Context:** F-MD-1 needs the NSE F&O ban list daily before 09:00 IST. The owner first chose an automated daily fetch of NSE's published `fo_secban.csv`, on condition that NSE's terms allow it. NSE circular NSE/WEB/45032 (2020-07-16) states that using scripts to download information or scraping data from the NSE website is not permitted and points to NSE's paid data subscription; NSE is also reported to block cloud IP ranges.
+**Decision:** No scripted access to NSE. An operator downloads "Securities in Ban Period" (`fo_secban.csv`, currently `archives.nseindia.com/content/fo/fo_secban.csv`) in a browser and runs `vyuha-quant ban import FILE`. The file's own trade date must match the day imported. Each import is stored in `fo_ban_import` (migration 000006) and audited. `vyuha-quant ban check` (scheduled before 09:00 IST) raises an admin alert when today's list is missing; until then the latest earlier list stays applied. Ban flags apply to NFO futures/options of the listed underlyings only; cash and BFO are unaffected. Announcement scraping stays disabled.
+**Consequences:** Ban flags depend on a daily human step; a missed import is visible (alert + stale-list date) but does not block trading. Revisit with a licensed feed (NSE data subscription or a broker API exposing the list).
+
 ---
 
 ## Open (owner to decide) — mirrored from PRD §13
@@ -82,7 +87,7 @@ Claude Code: you may add **Proposed** entries. Only the owner moves them to Acce
 | D-3 | License | **Deferred** (ADR-016): repo private; pick before going public (AGPL-3.0 recommended) |
 | D-5 | Build mode | **Resolved** (ADR-017): Claude Code writes all |
 | D-6 | LLM provider & privacy | Anthropic API; aggregated data only |
-| D-7 | Exchange announcements / ban list source | **Still open, needed before M1.1**. Default: scraping disabled; official daily exchange files where terms allow |
+| D-7 | Exchange announcements / ban list source | **Resolved** (ADR-019): ban list imported manually from NSE's daily file; no scripted NSE access; announcement scraping disabled |
 | D-8 | MARKET order handling | Allowed with market protection 2% |
 | D-9 | Hosting provider | Any Mumbai-region VM with multiple static IPs |
 | D-10 | Auto-flatten | Off |

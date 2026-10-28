@@ -28,7 +28,8 @@ Four stores, each with one job:
 | `instrument` | Unified instrument master | Kite token + Upstox key on one row; option chain index; F&O ban flag; freeze qty |
 | `restricted_instrument` | Desk restricted list | Gate rule `R-INSTR-RESTRICTED` |
 | `corporate_action` | Price/volume adjustment factors | Raw bars never mutated |
-| `exchange_holiday` | Calendar overrides incl. special sessions | Seeded yearly from the exchange holiday list |
+| `exchange_holiday` | Calendar overrides incl. special sessions | Seeded from `exchange_calendars` XBOM (`vyuha-quant holidays seed`); existing rows win |
+| `fo_ban_import` | NSE F&O ban list per trade date (ADR-019) | One row per imported day (`symbols` may be empty); drives `instrument.fo_ban` on NFO derivatives |
 | `strategy`, `strategy_version`, `strategy_paper_session` | Strategy lifecycle | Live needs approval + paper sessions |
 | `order` | Current order state (projection) | Engine is the only writer |
 | `order_event` | Every state transition (event log) | `(order_id, seq)` unique; payload has gate stamp |

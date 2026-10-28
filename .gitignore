@@ -23,7 +23,7 @@ __pycache__/
 .pytest_cache/
 
 # data
-data/
+/data/
 *.parquet
 !quant/tests/golden/**/*.parquet
 

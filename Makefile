@@ -104,8 +104,12 @@ test-gateway:
 	    export VYUHA_TEST_POSTGRES_URL="$${VYUHA_TEST_POSTGRES_URL:-postgres://vyuha:vyuha@localhost:5432/vyuha?sslmode=disable}"; \
 	  else echo "· dev Postgres not running: store integration tests skip (make up)"; fi && go test ./...)
 
+# Integration tests (fresh DB per test) run when the dev Postgres is up, like test-gateway.
 test-quant:
-	$(call maybe,quant/pyproject.toml,cd quant && uv run pytest -q)
+	$(call maybe,quant/pyproject.toml,cd quant && \
+	  if docker compose -f ../deploy/docker-compose.dev.yml ps --status running -q postgres 2>/dev/null | grep -q .; then \
+	    export VYUHA_TEST_POSTGRES_URL="$${VYUHA_TEST_POSTGRES_URL:-postgres://vyuha:vyuha@localhost:5432/vyuha?sslmode=disable}"; \
+	  else echo "· dev Postgres not running: quant integration tests skip (make up)"; fi && uv run pytest -q)
 
 test-intel:
 	$(call maybe,intel/pyproject.toml,cd intel && uv run pytest -q)
@@ -121,16 +125,16 @@ e2e:
 
 lint: proto-lint lint-engine lint-gateway lint-quant lint-intel lint-web
 
-# clang-tidy reads build/debug/compile_commands.json: run `make test-engine` (or configure debug) first.
+# clang-tidy reads build/debug/compile_commands.json; configure debug if it's missing (e.g. after clean-space).
 lint-engine:
-	$(call maybe,engine/CMakeLists.txt,cd engine && clang-format --dry-run --Werror $$(git ls-files '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA) '/engine/(src|tests|bench|bindings|fuzz)/')
+	$(call maybe,engine/CMakeLists.txt,cd engine && { test -f build/debug/compile_commands.json || cmake --preset debug >/dev/null; } && clang-format --dry-run --Werror $$(git ls-files '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA) '/engine/(src|tests|bench|bindings|fuzz)/')
 
 lint-gateway:
 	$(call maybe,gateway/go.mod,cd gateway && test -z "$$(gofmt -l $$(git ls-files '*.go'))" || { gofmt -l $$(git ls-files '*.go'); echo "✖ gofmt"; exit 1; }; \
 	  command -v golangci-lint >/dev/null || { echo "✖ golangci-lint not found: make bootstrap C=go"; exit 1; }; golangci-lint run)
 
 lint-quant:
-	$(call maybe,quant/pyproject.toml,cd quant && uv run ruff check && uv run mypy --strict src sdk)
+	$(call maybe,quant/pyproject.toml,cd quant && uv run ruff check && uv run ruff format --check && uv run mypy --strict src)
 
 lint-intel:
 	$(call maybe,intel/pyproject.toml,cd intel && uv run ruff check && uv run mypy --strict src)

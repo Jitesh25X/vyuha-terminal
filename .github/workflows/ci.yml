@@ -1,7 +1,7 @@
 # CI: one job per service plus sanitizers, all through the same `make` targets used locally.
 # Toolchains come from scripts/bootstrap.sh (pinned + sha256) so CI and dev machines match.
 # Branch protection requires the single `ci-ok` check, so jobs can be added or renamed freely.
-# quant/ and intel/ jobs are added by the tasks that scaffold them (M1.1, M6.x).
+# The intel/ job is added by the task that scaffolds it (M6.x).
 name: ci
 
 on:
@@ -112,6 +112,27 @@ jobs:
           make gen
           git diff --exit-code -- gateway
 
+  quant:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VYUHA_TOOLS_DIR }}
+          key: tools-py-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh') }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('quant/uv.lock') }}
+      - run: |
+          scripts/bootstrap.sh py
+          echo "$VYUHA_TOOLS_DIR/bin" >> "$GITHUB_PATH"
+      - working-directory: quant
+        run: uv sync --locked
+      - run: make up # instrument sync / ban list / holiday integration tests need Postgres
+      - run: make lint-quant test-quant
+
   web:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -162,7 +183,7 @@ jobs:
   # The one required status check on main.
   ci-ok:
     if: always()
-    needs: [hygiene, engine, gateway, web]
+    needs: [hygiene, engine, gateway, quant, web]
     runs-on: ubuntu-24.04
     steps:
       - run: |
