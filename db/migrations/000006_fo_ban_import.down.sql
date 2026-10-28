@@ -1,0 +1,3 @@
+BEGIN;
+DROP TABLE IF EXISTS fo_ban_import;
+COMMIT;

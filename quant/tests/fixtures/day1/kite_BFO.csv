@@ -1,0 +1,2 @@
+instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,tick_size,lot_size,instrument_type,segment,exchange
+282017029,1101628,SENSEX26NOV80000CE,"SENSEX",0,2026-11-24,80000,0.05,20,CE,BFO-OPT,BFO

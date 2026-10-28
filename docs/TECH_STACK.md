@@ -69,7 +69,7 @@ versions in this file's lock table (§6), and keep them pinned in lockfiles (`vc
 | Dataframes | **Polars** (primary), NumPy, Numba for hot loops, SciPy (optimisation, stats) |
 | Local analytics | DuckDB (Parquet lake queries) |
 | ClickHouse | `clickhouse-connect` |
-| Postgres | SQLAlchemy 2 (async) + asyncpg (read models), no ORM writes to order tables |
+| Postgres | asyncpg (bulk jobs use COPY into a temp table + set-based SQL); SQLAlchemy 2 (async) for read models when a task needs them; no ORM writes to order tables |
 | NATS | `nats-py` |
 | Engine bindings | `vyuha_core` (nanobind wheel built from `engine/bindings/python`) |
 | Calendar | `exchange_calendars` (XBOM) plus a desk override table for NSE special sessions |
@@ -146,6 +146,7 @@ Toolchains are installed one component at a time by `scripts/bootstrap.sh <core|
 | vcpkg baseline commit | `19c330612911442c9939e4a89f85c97603089389` (vcpkg tool 2026-09-26; `engine/vcpkg.json` `builtin-baseline`, bootstrap fetches only that commit, depth 1). Ports: gtest 1.18.0, benchmark 1.9.5, nanobind 3.1.0 (overlay without `python3`, see `engine/vcpkg-overlays/README.md`), robin-map 1.4.1 | 2026-10-28 |
 | Go | 1.27.3 | 2026-10-28 |
 | Python | 3.13.14 (via uv 0.13.6) | 2026-10-28 |
+| quant (M1.1) | `quant/uv.lock` (`exclude-newer` 7 days): polars 2.0.0, httpx 0.28.1, pydantic 2.14.1, asyncpg 0.32.0, exchange-calendars 4.13.2 (pulls pandas transitively; not imported by library code); dev: pytest 9.1.1, mypy 2.4.0, ruff 0.17.1 | 2026-10-28 |
 | Node / pnpm | Node 22.23.4 (22 LTS) / pnpm 10.34.9 via corepack | 2026-10-28 |
 | sqlc | 1.31.1 (`bootstrap.sh go`, pinned + sha256) | 2026-10-28 |
 | golangci-lint | 2.15.0 (`bootstrap.sh go`, pinned + sha256; config `gateway/.golangci.yml`: standard + gosec, errorlint, bodyclose, noctx, misspell, unconvert) | 2026-10-28 |

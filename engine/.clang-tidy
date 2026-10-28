@@ -21,3 +21,6 @@ Checks: >
 WarningsAsErrors: "*"
 HeaderFilterRegex: "engine/(include|src)/.*"
 FormatStyle: file
+CheckOptions:
+  # GoogleTest assertion macros expand into branches; count only the code we wrote.
+  readability-function-cognitive-complexity.IgnoreMacros: true

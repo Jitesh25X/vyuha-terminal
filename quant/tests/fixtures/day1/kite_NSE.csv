@@ -1,0 +1,5 @@
+instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,tick_size,lot_size,instrument_type,segment,exchange
+256265,1001,NIFTY 50,"NIFTY 50",0,,0,0,0,EQ,INDICES,NSE
+738561,2885,RELIANCE,"RELIANCE INDUSTRIES",0,,0,0.1,1,EQ,NSE,NSE
+2402561,9999,GOLDSTAR-ST,"GOLDSTAR POWER",0,,0,0.05,1,EQ,NSE,NSE
+1990401,7777,KITEONLY,"KITE ONLY LTD",0,,0,0.05,1,EQ,NSE,NSE
