@@ -9,6 +9,12 @@ import (
 	"github.com/pquerna/otp"
 )
 
+// uncapped lifts the M0.8a concurrency cap and row-lock timeout so all 20 guesses race on the row lock;
+// these tests target the lockout's serialisation (the cap has its own tests in busy_test.go).
+func uncapped(c *Config) {
+	c.MaxConcurrentChecks, c.CheckWait, c.RowLockTimeout = 32, time.Minute, time.Minute
+}
+
 // countOutcomes fires n attempts concurrently and tallies invalid vs locked results.
 func countOutcomes(t *testing.T, n int, try func() error) (invalid, locked int) {
 	t.Helper()
@@ -51,7 +57,7 @@ func (f *fixture) evaluatedGuesses(username string) int {
 
 // At most MaxFailures guesses may be evaluated per lock window, however many arrive at once.
 func TestLockoutHoldsUnderConcurrentPasswordGuesses(t *testing.T) {
-	f := newFixture(t)
+	f := newFixtureWith(t, uncapped)
 	username := f.createUser()
 	invalid, locked := countOutcomes(t, 20, func() error {
 		_, err := f.svc.Login(f.ctx, username, "wrong password!!", f.meta)
@@ -66,7 +72,7 @@ func TestLockoutHoldsUnderConcurrentPasswordGuesses(t *testing.T) {
 }
 
 func TestLockoutHoldsUnderConcurrentTOTPGuesses(t *testing.T) {
-	f := newFixture(t)
+	f := newFixtureWith(t, uncapped)
 	username := f.createUser()
 	f.enroll(username)
 	f.advance(30 * time.Second)

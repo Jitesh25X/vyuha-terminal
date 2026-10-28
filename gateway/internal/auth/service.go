@@ -28,6 +28,12 @@ type Config struct {
 	ReauthTTL    time.Duration // reauth_token lifetime (API.md: 300 s)
 	MaxFailures  int32
 	LockDuration time.Duration
+
+	// Bounds on concurrent credential checks: each holds an argon2 buffer (64 MiB) and, while waiting
+	// on the per-user row lock, a pooled DB connection. Set MaxConcurrentChecks well below the pool size.
+	MaxConcurrentChecks int
+	CheckWait           time.Duration // how long to queue for a slot before ErrBusy
+	RowLockTimeout      time.Duration // SET LOCAL lock_timeout for the per-user row lock
 }
 
 // DefaultConfig matches the spec defaults.
@@ -35,6 +41,7 @@ func DefaultConfig() Config {
 	return Config{
 		AccessTTL: 15 * time.Minute, RefreshTTL: 168 * time.Hour, MFATTL: 5 * time.Minute,
 		ReauthTTL: 5 * time.Minute, MaxFailures: 5, LockDuration: 15 * time.Minute,
+		MaxConcurrentChecks: 2, CheckWait: 2 * time.Second, RowLockTimeout: 2 * time.Second,
 	}
 }
 
@@ -76,7 +83,11 @@ type Service struct {
 	signer    *Signer
 	now       func() time.Time
 	cfg       Config
-	dummyHash string // compared for unknown users so response time doesn't reveal usernames
+	dummyHash string        // compared for unknown users so response time doesn't reveal usernames
+	checks    chan struct{} // semaphore: anonymous credential checks in flight (login, mfa, enroll)
+	// reauthChecks is reserved for signed-in users re-authenticating (kill-switch release, limit edits),
+	// so a flood of anonymous logins can't make reauth fail with ErrBusy.
+	reauthChecks chan struct{}
 }
 
 // NewService builds the auth service. now is injected for tests; pass time.Now in production.
@@ -85,9 +96,22 @@ func NewService(db DB, envelope *vcrypto.Envelope, signer *Signer, cfg Config, n
 	if err != nil {
 		return nil, err
 	}
+	// Zero values would silently disable a protection (lock_timeout 0 = wait forever), so use defaults.
+	def := DefaultConfig()
+	if cfg.MaxConcurrentChecks < 1 {
+		cfg.MaxConcurrentChecks = 1
+	}
+	if cfg.CheckWait <= 0 {
+		cfg.CheckWait = def.CheckWait
+	}
+	if cfg.RowLockTimeout <= 0 {
+		cfg.RowLockTimeout = def.RowLockTimeout
+	}
 	return &Service{
 		db: db, q: store.New(db), envelope: envelope, signer: signer,
 		now: func() time.Time { return now().UTC() }, cfg: cfg, dummyHash: dummy,
+		checks:       make(chan struct{}, cfg.MaxConcurrentChecks),
+		reauthChecks: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -153,6 +177,11 @@ type LoginResult struct {
 // Failure counters reset only after the TOTP step succeeds, so a known password can't be used
 // to keep resetting the counter while guessing TOTP codes.
 func (s *Service) Login(ctx context.Context, username, password string, meta ClientMeta) (LoginResult, error) {
+	release, err := s.acquireCheck(ctx)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	defer release()
 	now := s.now()
 	u, err := s.q.GetUserByUsername(ctx, username)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -186,6 +215,11 @@ func (s *Service) Login(ctx context.Context, username, password string, meta Cli
 
 // VerifyMFA completes login for an enrolled user and starts a new session (refresh family).
 func (s *Service) VerifyMFA(ctx context.Context, mfaToken, code string, meta ClientMeta) (Session, error) {
+	release, err := s.acquireCheck(ctx)
+	if err != nil {
+		return Session{}, err
+	}
+	defer release()
 	now := s.now()
 	id, err := s.subjectFromToken(mfaToken, audMFA, now)
 	if err != nil {
@@ -247,6 +281,11 @@ func (s *Service) BeginEnroll(ctx context.Context, mfaToken string, meta ClientM
 
 // ConfirmEnroll verifies the first code from the new authenticator, marks TOTP enrolled and logs in.
 func (s *Service) ConfirmEnroll(ctx context.Context, mfaToken, code string, meta ClientMeta) (Session, error) {
+	release, err := s.acquireCheck(ctx)
+	if err != nil {
+		return Session{}, err
+	}
+	defer release()
 	now := s.now()
 	id, err := s.subjectFromToken(mfaToken, audMFA, now)
 	if err != nil {
@@ -374,6 +413,11 @@ func (s *Service) Logout(ctx context.Context, rawRefresh string, meta ClientMeta
 
 // Reauth re-checks password + TOTP for sensitive actions and returns a short-lived reauth_token.
 func (s *Service) Reauth(ctx context.Context, userID, password, code string, meta ClientMeta) (string, time.Duration, error) {
+	release, err := s.acquire(ctx, s.reauthChecks)
+	if err != nil {
+		return "", 0, err
+	}
+	defer release()
 	now := s.now()
 	var id pgtype.UUID
 	if err := id.Scan(userID); err != nil {
@@ -455,10 +499,18 @@ func (s *Service) attempt(ctx context.Context, id pgtype.UUID, now time.Time, op
 		failed error
 	)
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		// SET doesn't take bind parameters; the value is an integer from config.
+		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = %d", s.cfg.RowLockTimeout.Milliseconds())); err != nil {
+			return fmt.Errorf("set lock_timeout: %w", err)
+		}
 		q := s.q.WithTx(tx)
 		u, err := q.GetUserForUpdate(ctx, id)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrUnauthenticated
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "55P03" { // lock_not_available
+			return ErrBusy
 		}
 		if err != nil {
 			return fmt.Errorf("lock user: %w", err)
@@ -601,6 +653,22 @@ func (s *Service) issueSession(ctx context.Context, q *store.Queries, u store.Ap
 		RefreshMaxAge: s.cfg.RefreshTTL,
 		User:          User{ID: u.ID.String(), Username: u.Username, DisplayName: u.DisplayName, Role: u.Role},
 	}, nil
+}
+
+// acquireCheck takes an anonymous credential-check slot, waiting at most CheckWait. Call release.
+func (s *Service) acquireCheck(ctx context.Context) (func(), error) { return s.acquire(ctx, s.checks) }
+
+func (s *Service) acquire(ctx context.Context, sem chan struct{}) (func(), error) {
+	timer := time.NewTimer(s.cfg.CheckWait)
+	defer timer.Stop()
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, nil
+	case <-timer.C:
+		return nil, ErrBusy
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // auditUser records an auth event about (and by) a user, using q so it commits with the change.

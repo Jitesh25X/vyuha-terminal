@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"net/netip"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jiteshraj/vyuha/gateway/internal/auth"
+	"github.com/jiteshraj/vyuha/gateway/internal/ratelimit"
 )
 
 type ctxKey int
@@ -63,16 +65,110 @@ func authenticate(verify func(string) (*auth.Claims, error), next http.Handler) 
 	})
 }
 
-// captureClient stores the user agent and peer IP for refresh-token records.
-// The peer is the direct connection (Caddy in production); X-Forwarded-For is not trusted yet.
-func captureClient(next http.Handler) http.Handler {
+// captureClient stores the user agent and client IP (for rate limits, refresh tokens and audit).
+// X-Forwarded-For is believed only when the direct peer is a trusted proxy (e.g. Caddy); then the
+// client is the right-most address that is not itself a trusted proxy.
+func captureClient(trusted []netip.Prefix, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		meta := auth.ClientMeta{UserAgent: r.UserAgent()}
-		if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
-			meta.IP = ap.Addr().Unmap()
-		}
+		meta.IP = clientIP(r, trusted)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), clientMetaKey, meta)))
 	})
+}
+
+func clientIP(r *http.Request, trusted []netip.Prefix) netip.Addr {
+	ap, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return netip.Addr{}
+	}
+	peer := ap.Addr().Unmap()
+	if !isTrusted(peer, trusted) {
+		return peer
+	}
+	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
+	for i := len(hops) - 1; i >= 0; i-- {
+		addr, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
+		if err != nil {
+			return peer // malformed chain: fall back to the proxy itself
+		}
+		if addr = addr.Unmap(); !isTrusted(addr, trusted) {
+			return addr
+		}
+	}
+	return peer
+}
+
+func isTrusted(a netip.Addr, trusted []netip.Prefix) bool {
+	for _, p := range trusted {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// Per-client limits on the unauthenticated auth endpoints (ASVS 2.2.1; bounds audit growth and argon2
+// load). Per-account guessing is capped separately by the 5-failure lockout, so the per-IP ceiling can
+// allow a desk behind one NAT to log in together at market open.
+const (
+	credentialBurst = 30 // login, mfa, enroll, confirm: 30 per minute per client
+	sessionBurst    = 30 // refresh, logout: 30 per minute per client
+	reauthBurst     = 5  // reauth: 5 per minute per signed-in user (keyed by token subject, not IP)
+)
+
+var (
+	credentialRoutes = map[string]bool{
+		"POST " + BaseURL + "/auth/login": true, "POST " + BaseURL + "/auth/mfa": true,
+		"POST " + BaseURL + "/auth/mfa/enroll": true, "POST " + BaseURL + "/auth/mfa/enroll/confirm": true,
+	}
+	sessionRoutes = map[string]bool{"POST " + BaseURL + "/auth/refresh": true, "POST " + BaseURL + "/auth/logout": true}
+)
+
+// rateLimitAuth applies the per-IP limits; it must run after captureClient.
+func rateLimitAuth(creds, sessions *ratelimit.Limiter, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		route := r.Method + " " + r.URL.Path
+		var l *ratelimit.Limiter
+		switch {
+		case credentialRoutes[route]:
+			l = creds
+		case sessionRoutes[route]:
+			l = sessions
+		default:
+			next.ServeHTTP(w, r)
+			return
+		}
+		if ok, wait := l.Allow(clientKey(clientMeta(r.Context()).IP)); !ok {
+			writeRateLimited(w, wait)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// clientKey buckets IPv4 clients by address and IPv6 clients by /64, since one IPv6 client
+// usually controls a whole /64 and could otherwise rotate addresses to dodge the limit.
+func clientKey(ip netip.Addr) string {
+	switch {
+	case !ip.IsValid():
+		return "unknown"
+	case ip.Is6():
+		return netip.PrefixFrom(ip, 64).Masked().String()
+	}
+	return ip.String()
+}
+
+func writeRateLimited(w http.ResponseWriter, wait time.Duration) {
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(wait)))
+	writeProblem(w, http.StatusTooManyRequests, "RATE_LIMITED", "Too many requests", "Slow down and retry later.")
+}
+
+func retryAfterSeconds(d time.Duration) int {
+	s := int((d + time.Second - 1) / time.Second)
+	if s < 1 {
+		return 1
+	}
+	return s
 }
 
 func clientMeta(ctx context.Context) auth.ClientMeta {

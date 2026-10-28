@@ -22,11 +22,17 @@ const (
 	kindUnauthorized authProblemKind = iota
 	kindLocked
 	kindConflict
+	kindBusy
 )
+
+// busyRetrySeconds is the Retry-After for AUTH_BUSY.
+const busyRetrySeconds = 2
 
 func classify(err error) (authProblemKind, Problem, bool) {
 	var le *auth.LockedError
 	switch {
+	case errors.Is(err, auth.ErrBusy):
+		return kindBusy, problem(http.StatusTooManyRequests, "AUTH_BUSY", "Too many sign-in attempts in progress", "Retry shortly."), true
 	case errors.As(err, &le):
 		p := problem(http.StatusLocked, "AUTH_LOCKED", "Account locked", "Too many failed attempts; try again later.")
 		until := le.Until.UTC()
@@ -56,6 +62,8 @@ func (s *Server) Login(ctx context.Context, req LoginRequestObject) (LoginRespon
 	switch {
 	case ok && kind == kindLocked:
 		return Login423ApplicationProblemPlusJSONResponse{LockedApplicationProblemPlusJSONResponse(p)}, nil
+	case ok && kind == kindBusy:
+		return Login429ApplicationProblemPlusJSONResponse{tooMany(p)}, nil
 	case ok && kind == kindUnauthorized:
 		return Login401ApplicationProblemPlusJSONResponse{UnauthorizedApplicationProblemPlusJSONResponse(p)}, nil
 	}
@@ -72,6 +80,8 @@ func (s *Server) VerifyMfa(ctx context.Context, req VerifyMfaRequestObject) (Ver
 	switch {
 	case ok && kind == kindLocked:
 		return VerifyMfa423ApplicationProblemPlusJSONResponse{LockedApplicationProblemPlusJSONResponse(p)}, nil
+	case ok && kind == kindBusy:
+		return VerifyMfa429ApplicationProblemPlusJSONResponse{tooMany(p)}, nil
 	case ok && kind == kindConflict:
 		return VerifyMfa409ApplicationProblemPlusJSONResponse{ConflictApplicationProblemPlusJSONResponse(p)}, nil
 	case ok:
@@ -108,6 +118,8 @@ func (s *Server) ConfirmMfaEnroll(ctx context.Context, req ConfirmMfaEnrollReque
 	switch {
 	case ok && kind == kindLocked:
 		return ConfirmMfaEnroll423ApplicationProblemPlusJSONResponse{LockedApplicationProblemPlusJSONResponse(p)}, nil
+	case ok && kind == kindBusy:
+		return ConfirmMfaEnroll429ApplicationProblemPlusJSONResponse{tooMany(p)}, nil
 	case ok && kind == kindConflict:
 		return ConfirmMfaEnroll409ApplicationProblemPlusJSONResponse{ConflictApplicationProblemPlusJSONResponse(p)}, nil
 	case ok:
@@ -157,6 +169,13 @@ func (s *Server) Reauth(ctx context.Context, req ReauthRequestObject) (ReauthRes
 		return Reauth401ApplicationProblemPlusJSONResponse{UnauthorizedApplicationProblemPlusJSONResponse(
 			problem(http.StatusUnauthorized, "AUTH_UNAUTHENTICATED", "Authentication required", ""))}, nil
 	}
+	if ok, wait := s.reauthLimiter.Allow(c.Subject); !ok {
+		retry := retryAfterSeconds(wait)
+		return Reauth429ApplicationProblemPlusJSONResponse{TooManyRequestsApplicationProblemPlusJSONResponse{
+			Body:    problem(http.StatusTooManyRequests, "RATE_LIMITED", "Too many requests", "Slow down and retry later."),
+			Headers: TooManyRequestsResponseHeaders{RetryAfter: &retry},
+		}}, nil
+	}
 	tok, ttl, err := s.auth.Reauth(ctx, c.Subject, req.Body.Password, req.Body.Totp, clientMeta(ctx))
 	if err == nil {
 		return Reauth200JSONResponse{ReauthToken: tok, ExpiresIn: int(ttl / time.Second)}, nil
@@ -165,6 +184,8 @@ func (s *Server) Reauth(ctx context.Context, req ReauthRequestObject) (ReauthRes
 	switch {
 	case ok && kind == kindLocked:
 		return Reauth423ApplicationProblemPlusJSONResponse{LockedApplicationProblemPlusJSONResponse(p)}, nil
+	case ok && kind == kindBusy:
+		return Reauth429ApplicationProblemPlusJSONResponse{tooMany(p)}, nil
 	case ok:
 		return Reauth401ApplicationProblemPlusJSONResponse{UnauthorizedApplicationProblemPlusJSONResponse(p)}, nil
 	}
@@ -196,4 +217,9 @@ func clearRefreshCookie() *string {
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
 	}).String()
 	return &c
+}
+
+func tooMany(p Problem) TooManyRequestsApplicationProblemPlusJSONResponse {
+	retry := busyRetrySeconds
+	return TooManyRequestsApplicationProblemPlusJSONResponse{Body: p, Headers: TooManyRequestsResponseHeaders{RetryAfter: &retry}}
 }

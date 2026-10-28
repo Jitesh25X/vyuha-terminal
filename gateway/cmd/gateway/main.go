@@ -64,14 +64,17 @@ func run() error {
 	}
 	authCfg := auth.DefaultConfig()
 	authCfg.AccessTTL, authCfg.RefreshTTL = cfg.AccessTokenTTL, cfg.RefreshTTL
+	// Credential checks may use at most a quarter of the pool, so auth bursts can't starve other work.
+	authCfg.MaxConcurrentChecks = max(1, int(pool.Config().MaxConns)/4)
 	authSvc, err := auth.NewService(pool, envelope, auth.NewSigner(signingKey), authCfg, time.Now)
 	if err != nil {
 		return err
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           api.NewHandler(api.NewServer(version, cfg.Env, store.New(pool), authSvc, logger), logger),
+		Addr: cfg.HTTPAddr,
+		Handler: api.NewHandler(api.NewServer(version, cfg.Env, store.New(pool), authSvc, logger).
+			WithTrustedProxies(cfg.TrustedProxies), logger),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       120 * time.Second,

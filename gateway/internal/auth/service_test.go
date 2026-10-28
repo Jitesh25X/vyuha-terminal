@@ -34,6 +34,11 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureWith(t, func(*Config) {})
+}
+
+func newFixtureWith(t *testing.T, tweak func(*Config)) *fixture {
+	t.Helper()
 	ctx := context.Background()
 	_, pool := testdb.New(t) // fresh migrated database, dropped after the test
 	key := make([]byte, 32)
@@ -43,7 +48,9 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	f := &fixture{t: t, ctx: ctx, pool: pool, clock: t0, meta: ClientMeta{UserAgent: "test", IP: netip.MustParseAddr("127.0.0.1")}}
-	f.svc, err = NewService(pool, env, newSigner(t), DefaultConfig(), func() time.Time { return f.clock })
+	cfg := DefaultConfig()
+	tweak(&cfg)
+	f.svc, err = NewService(pool, env, newSigner(t), cfg, func() time.Time { return f.clock })
 	if err != nil {
 		t.Fatal(err)
 	}

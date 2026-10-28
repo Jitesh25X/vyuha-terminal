@@ -19,6 +19,8 @@ var (
 	ErrRefreshReused      = errors.New("auth: refresh token reuse detected; session revoked")
 	ErrUserExists         = errors.New("auth: username already exists")
 	ErrInvalidInput       = errors.New("auth: invalid input")
+	// ErrBusy: too many credential checks in progress, or the user row stayed locked past LockTimeout.
+	ErrBusy = errors.New("auth: busy; retry shortly")
 )
 
 // LockedError is returned while an account is locked after repeated failures.

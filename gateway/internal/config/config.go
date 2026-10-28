@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -31,6 +32,7 @@ type Config struct {
 	LogLevel           slog.Level
 	OTLPEndpoint       string // empty disables trace export
 	LiveTradingEnabled bool
+	TrustedProxies     []netip.Prefix // peers whose X-Forwarded-For is believed (e.g. Caddy); empty = none
 
 	// Auth. MasterKey is a secret: never log it (LogValue omits it).
 	MasterKey      string // VYUHA_MASTER_KEY, base64 32 bytes; required by the gateway, not by every vyuhactl command
@@ -68,6 +70,33 @@ func Load(getenv func(string) string) (Config, error) {
 		} else {
 			errs = append(errs, errors.New("POSTGRES_URL is required outside dev"))
 		}
+	}
+
+	// Default: loopback, because the gateway listens on 127.0.0.1 behind Caddy; without it every
+	// request would share one rate-limit bucket. Staging/prod must say explicitly ("none" = no proxy).
+	proxies := get("TRUSTED_PROXIES", "")
+	switch {
+	case proxies == "" && cfg.Env != EnvDev:
+		errs = append(errs, errors.New(`TRUSTED_PROXIES is required outside dev (proxy IPs/CIDRs, or "none")`))
+	case proxies == "":
+		proxies = "127.0.0.1/32,::1/128"
+	case proxies == "none":
+		proxies = ""
+	}
+	for _, p := range strings.Split(proxies, ",") {
+		if p = strings.TrimSpace(p); p == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(p)
+		if err != nil {
+			addr, aerr := netip.ParseAddr(p)
+			if aerr != nil {
+				errs = append(errs, fmt.Errorf("TRUSTED_PROXIES: %q is not an IP or CIDR", p))
+				continue
+			}
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		cfg.TrustedProxies = append(cfg.TrustedProxies, prefix.Masked())
 	}
 
 	cfg.MasterKey = getenv("VYUHA_MASTER_KEY")
@@ -125,6 +154,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("log_level", c.LogLevel.String()),
 		slog.Bool("otlp_export", c.OTLPEndpoint != ""),
 		slog.Bool("live_trading_enabled", c.LiveTradingEnabled),
+		slog.Int("trusted_proxies", len(c.TrustedProxies)),
 		slog.String("jwt_key_path", c.JWTKeyPath),
 		slog.Bool("master_key_set", c.MasterKey != ""),
 		slog.Duration("access_token_ttl", c.AccessTokenTTL),

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/jiteshraj/vyuha/gateway/internal/auth"
 	"github.com/jiteshraj/vyuha/gateway/internal/config"
+	"github.com/jiteshraj/vyuha/gateway/internal/ratelimit"
 )
 
 // BaseURL is the prefix for every REST route.
@@ -31,13 +33,29 @@ type Server struct {
 	db      DB
 	auth    *auth.Service
 	logger  *slog.Logger
+
+	trustedProxies []netip.Prefix
+	credLimiter    *ratelimit.Limiter
+	sessionLimiter *ratelimit.Limiter
+	reauthLimiter  *ratelimit.Limiter
 }
 
 var _ StrictServerInterface = (*Server)(nil)
 
 // NewServer builds the REST handler implementation. authSvc may be nil in tests that only hit public routes.
 func NewServer(version string, env config.Env, db DB, authSvc *auth.Service, logger *slog.Logger) *Server {
-	return &Server{version: version, env: env, db: db, auth: authSvc, logger: logger}
+	return &Server{
+		version: version, env: env, db: db, auth: authSvc, logger: logger,
+		credLimiter:    ratelimit.New(credentialBurst, time.Minute, time.Now),
+		sessionLimiter: ratelimit.New(sessionBurst, time.Minute, time.Now),
+		reauthLimiter:  ratelimit.New(reauthBurst, time.Minute, time.Now),
+	}
+}
+
+// WithTrustedProxies sets the peers whose X-Forwarded-For is believed (config TRUSTED_PROXIES).
+func (s *Server) WithTrustedProxies(p []netip.Prefix) *Server {
+	s.trustedProxies = p
+	return s
 }
 
 // NewHandler wires the generated routes, problem+json error handling and middleware.
@@ -67,7 +85,8 @@ func NewHandler(s *Server, logger *slog.Logger) http.Handler {
 	var h http.Handler = mux
 	h = recoverPanics(logger, h)
 	h = authenticate(verify, h)
-	h = captureClient(h)
+	h = rateLimitAuth(s.credLimiter, s.sessionLimiter, h)
+	h = captureClient(s.trustedProxies, h)
 	h = logRequests(logger, h)
 	h = requestID(h)
 	return otelhttp.NewHandler(h, "gateway")

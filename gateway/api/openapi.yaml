@@ -44,6 +44,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/LoginRequest" }
       responses:
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: Password accepted
           content:
@@ -63,6 +64,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/MfaRequest" }
       responses:
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "200": { $ref: "#/components/responses/SessionStarted" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -79,6 +81,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/MfaTokenRequest" }
       responses:
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: Secret generated (not active until confirmed)
           content:
@@ -99,6 +102,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/MfaRequest" }
       responses:
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "200": { $ref: "#/components/responses/SessionStarted" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { $ref: "#/components/responses/Conflict" }
@@ -113,6 +117,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/RefreshCookie"
       responses:
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "200": { $ref: "#/components/responses/SessionStarted" }
         "401":
           description: Missing, invalid, expired or reused refresh token; the cookie is cleared
@@ -130,6 +135,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/RefreshCookie"
       responses:
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "204":
           description: Logged out
           headers:
@@ -145,6 +151,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/ReauthRequest" }
       responses:
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: Re-authenticated
           content:
@@ -178,6 +185,14 @@ components:
           schema: { $ref: "#/components/schemas/Problem" }
     Locked:
       description: Account locked after repeated failures (AUTH_LOCKED, see locked_until)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    TooManyRequests:
+      description: Rate limited (RATE_LIMITED) or too many credential checks in progress (AUTH_BUSY); retry after Retry-After seconds
+      headers:
+        Retry-After:
+          schema: { type: integer }
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }

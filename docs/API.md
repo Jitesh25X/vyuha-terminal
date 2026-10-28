@@ -29,6 +29,8 @@ Req `{ "mfa_token": "…", "totp": "123456" }` → 200 `{ "access_token": "…",
 ### `POST /auth/logout` — revoke the current session (refresh family) → 204, cookie cleared.
 - Lockout: 5 consecutive failures (wrong password **or** wrong/replayed TOTP, including on `/auth/reauth`) → 423 `AUTH_LOCKED` with `locked_until` for 15 min. The counter resets only after a full password + TOTP success. Each TOTP code is accepted once (replay → `AUTH_INVALID`).
 - Every non-public route requires `Authorization: Bearer`; otherwise 401 `AUTH_UNAUTHENTICATED`.
+- Rate limits: login / mfa / enroll / confirm share 30 per minute per client; refresh / logout 30 per minute per client; reauth 5 per minute per signed-in user → 429 `RATE_LIMITED` with `Retry-After`. A client is its IPv4 address or IPv6 /64. The client IP is the direct peer unless the peer is in `TRUSTED_PROXIES` (default loopback; required in staging/prod), in which case the right-most untrusted `X-Forwarded-For` hop is used.
+- Anonymous credential checks (argon2 + row lock) run at most N at a time (N = a quarter of the DB pool); reauth has its own reserved slot. A request that can't get a slot within 2 s, or whose user row stays locked over 2 s, gets 429 `AUTH_BUSY` with `Retry-After: 2` and is not counted as a failure.
 ### `POST /auth/reauth` — `{ password, totp }` → `{ "reauth_token": "…", "expires_in": 300 }`. Required header `X-Reauth` for sensitive endpoints (marked 🔐).
 
 ## 2. Instruments & market data

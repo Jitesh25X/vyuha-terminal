@@ -28,6 +28,9 @@ func TestLoad(t *testing.T) {
 				if c.JWTKeyPath != "./deploy/secrets/jwt_ed25519.pem" || c.AccessTokenTTL != 15*time.Minute || c.RefreshTTL != 168*time.Hour {
 					t.Fatalf("unexpected auth defaults: %+v", c)
 				}
+				if len(c.TrustedProxies) != 2 || c.TrustedProxies[0].String() != "127.0.0.1/32" || c.TrustedProxies[1].String() != "::1/128" {
+					t.Fatalf("trusted proxies default should be loopback: %v", c.TrustedProxies)
+				}
 			},
 		},
 		{
@@ -36,10 +39,14 @@ func TestLoad(t *testing.T) {
 				"VYUHA_ENV": "staging", "POSTGRES_URL": "postgres://u:p@db:5432/v", "GATEWAY_HTTP_ADDR": ":8080",
 				"LOG_LEVEL": "debug", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel:4317", "LIVE_TRADING_ENABLED": "true",
 				"JWT_SIGNING_KEY_PATH": "/run/secrets/jwt.pem", "ACCESS_TOKEN_TTL": "10m",
+				"TRUSTED_PROXIES": "172.18.0.0/16, 10.0.0.7",
 			},
 			check: func(t *testing.T, c Config) {
 				if c.Env != EnvStaging || c.HTTPAddr != ":8080" || c.LogLevel != slog.LevelDebug || !c.LiveTradingEnabled {
 					t.Fatalf("unexpected config: %+v", c)
+				}
+				if len(c.TrustedProxies) != 2 || c.TrustedProxies[0].String() != "172.18.0.0/16" || c.TrustedProxies[1].String() != "10.0.0.7/32" {
+					t.Fatalf("trusted proxies: %v", c.TrustedProxies)
 				}
 			},
 		},
@@ -48,8 +55,19 @@ func TestLoad(t *testing.T) {
 		{name: "live trading refused in dev", env: map[string]string{"LIVE_TRADING_ENABLED": "true"}, wantErr: "must be false when VYUHA_ENV is dev"},
 		{name: "live trading flag must parse", env: map[string]string{"LIVE_TRADING_ENABLED": "maybe"}, wantErr: "LIVE_TRADING_ENABLED"},
 		{name: "bad log level", env: map[string]string{"LOG_LEVEL": "loud"}, wantErr: "LOG_LEVEL"},
-		{name: "staging needs jwt key path", env: map[string]string{"VYUHA_ENV": "staging", "POSTGRES_URL": "postgres://x"}, wantErr: "JWT_SIGNING_KEY_PATH"},
+		{name: "staging needs jwt key path", env: map[string]string{"VYUHA_ENV": "staging", "POSTGRES_URL": "postgres://x", "TRUSTED_PROXIES": "none"}, wantErr: "JWT_SIGNING_KEY_PATH"},
+		{name: "prod needs trusted proxies", env: map[string]string{"VYUHA_ENV": "prod", "POSTGRES_URL": "postgres://x", "JWT_SIGNING_KEY_PATH": "/k"}, wantErr: "TRUSTED_PROXIES is required"},
+		{
+			name: "none means no proxy",
+			env:  map[string]string{"VYUHA_ENV": "prod", "POSTGRES_URL": "postgres://x", "JWT_SIGNING_KEY_PATH": "/k", "TRUSTED_PROXIES": "none"},
+			check: func(t *testing.T, c Config) {
+				if len(c.TrustedProxies) != 0 {
+					t.Fatalf("want no trusted proxies, got %v", c.TrustedProxies)
+				}
+			},
+		},
 		{name: "access ttl capped", env: map[string]string{"ACCESS_TOKEN_TTL": "24h"}, wantErr: "ACCESS_TOKEN_TTL"},
+		{name: "bad trusted proxy", env: map[string]string{"TRUSTED_PROXIES": "caddy"}, wantErr: "TRUSTED_PROXIES"},
 		{name: "refresh ttl must parse", env: map[string]string{"REFRESH_TOKEN_TTL": "a week"}, wantErr: "REFRESH_TOKEN_TTL"},
 	}
 	for _, tt := range tests {
