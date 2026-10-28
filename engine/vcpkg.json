@@ -3,7 +3,9 @@
   "name": "vyuha-engine",
   "version-semver": "0.0.1",
   "builtin-baseline": "19c330612911442c9939e4a89f85c97603089389",
-  "dependencies": [],
+  "dependencies": [
+    "quill"
+  ],
   "features": {
     "tests": {
       "description": "GoogleTest unit tests and Google Benchmark",

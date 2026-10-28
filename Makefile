@@ -16,7 +16,7 @@ ifeq ($(shell uname -s),Linux)
   TIDY_EXTRA := -extra-arg=-Wno-builtin-macro-redefined -extra-arg=-D__cpp_concepts=202002L
 endif
 ifeq ($(shell uname -s),Darwin)
-  TIDY_EXTRA := -extra-arg=-nostdinc++ -extra-arg=-isystem$(shell brew --prefix llvm@18 2>/dev/null)/include/c++/v1
+  TIDY_EXTRA := -extra-arg=-fexperimental-library -extra-arg=-nostdinc++ -extra-arg=-isystem$(shell brew --prefix llvm@18 2>/dev/null)/include/c++/v1
 endif
 # Engine compiler: GCC 14 on Ubuntu (24.04 defaults to GCC 13); Apple Clang on macOS. Override with CC=/CXX=.
 ifeq ($(shell uname -s),Linux)

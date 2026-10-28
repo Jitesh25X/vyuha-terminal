@@ -21,12 +21,20 @@ if(VYUHA_SANITIZER)
   add_link_options(-fsanitize=${VYUHA_SANITIZER})
 endif()
 
+find_package(quill CONFIG REQUIRED)
+
 add_library(vyuha_core_lib
+  src/core/core_loop.cc
+  src/core/price.cc
   src/core/version.cc
+  src/core/wall_clock.cc
+  src/md/bar_builder.cc
+  src/md/last_value.cc
+  src/util/log.cc
 )
 add_library(vyuha::core ALIAS vyuha_core_lib)
 target_include_directories(vyuha_core_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(vyuha_core_lib PRIVATE vyuha_warnings)
+target_link_libraries(vyuha_core_lib PUBLIC quill::quill PRIVATE vyuha_warnings)
 
 if(VYUHA_BUILD_TESTS)
   enable_testing()

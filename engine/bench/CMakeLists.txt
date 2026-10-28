@@ -2,6 +2,7 @@ find_package(Threads REQUIRED)
 find_package(benchmark CONFIG REQUIRED)
 
 add_executable(vyuha_bench
+  core_loop_bench.cc
   spsc_ring_bench.cc
   version_bench.cc
 )

@@ -3,6 +3,9 @@ find_package(GTest CONFIG REQUIRED)
 include(GoogleTest)
 
 add_executable(vyuha_tests
+  bar_builder_test.cc
+  core_loop_test.cc
+  price_test.cc
   spsc_ring_test.cc
   version_test.cc
 )
