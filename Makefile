@@ -126,8 +126,9 @@ ifeq ($(shell uname -s),Darwin)
 else
   FUZZ_CXX ?= clang++-18
   FUZZ_SANITIZERS ?= fuzzer,address,undefined
-  # clang 18 can't use GCC 14's <expected>; LLVM's libc++ also brings the same hardening as macOS.
-  FUZZ_CXXFLAGS ?= -stdlib=libc++
+  # clang 18 doesn't report __cpp_concepts >= 202002L, so GCC 14's libstdc++ hides <expected> from it.
+  # (libc++ isn't an option: Ubuntu's libFuzzer runtime is built against libstdc++.)
+  FUZZ_CXXFLAGS ?= -D__cpp_concepts=202002L -Wno-builtin-macro-redefined
 endif
 # make fuzz-kite / fuzz-upstox (FUZZ_SECONDS each), or `make fuzz` for all parsers.
 define run_fuzz
