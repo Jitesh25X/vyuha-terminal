@@ -148,6 +148,7 @@ Toolchains are installed one component at a time by `scripts/bootstrap.sh <core|
 | Python | 3.13.14 (via uv 0.13.6) | 2026-10-28 |
 | Node / pnpm | Node 22.23.4 (22 LTS) / pnpm 10.34.9 via corepack | 2026-10-28 |
 | sqlc | 1.31.1 (`bootstrap.sh go`, pinned + sha256) | 2026-10-28 |
+| golangci-lint | 2.15.0 (`bootstrap.sh go`, pinned + sha256; config `gateway/.golangci.yml`: standard + gosec, errorlint, bodyclose, noctx, misspell, unconvert) | 2026-10-28 |
 | Gateway Go modules | `gateway/go.mod` + `go.sum`: pgx 5.11.0, golang-migrate 4.20.1 (pgx/v5 driver), OTel 1.47.0 (+ otelhttp 0.72.0), protobuf 1.36.12, grpc 1.83.2 (via OTel exporter); oapi-codegen 2.8.1 as a `tool` directive. Buf Go plugins pinned to match in `proto/buf.gen.go.yaml` | 2026-10-28 |
 | Gateway auth modules | alexedwards/argon2id 1.0.0 (m=64 MiB, t=2, p=2), pquerna/otp 1.5.0 (SHA1, 6 digits, 30 s, ±1 step), golang-jwt/jwt/v5 5.3.1 (EdDSA only); oapi-codegen/runtime 1.8.0 | 2026-10-28 |
 | PostgreSQL image digest | `pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d` (PostgreSQL 17.11, pgvector 0.8.7) | 2026-10-28 |

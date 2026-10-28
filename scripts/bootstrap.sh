@@ -13,6 +13,7 @@ PNPM_VERSION=10.34.9
 UV_VERSION=0.13.6
 BUF_VERSION=1.75.0
 SQLC_VERSION=1.31.1
+GOLANGCI_LINT_VERSION=2.15.0
 PYTHON_VERSION=3.13.14
 LLVM_MAJOR=18 # clang-format / clang-tidy / libFuzzer on both platforms, so formatting is identical everywhere
 GCC_MAJOR=14  # Ubuntu compiler (CI reference); macOS compiles with Apple Clang from the Command Line Tools
@@ -58,6 +59,15 @@ sqlc_sha256() {
     darwin_amd64) echo c5af76772e3785d21663a62697056b383f07629979b1bd25b93872e73dbd519b ;;
     linux_arm64) echo b7cae247740d0c51a1e657479e5b2d21e6fef428f596682a01bc55bf4ab8a23d ;;
     linux_amd64) echo 497ae4fcdfa64c5b0c311ffe4c2bd991e43991e82e5367792ed78bc2dca27354 ;;
+  esac
+}
+
+golangci_sha256() {
+  case "$1" in
+    darwin-arm64) echo d1e409481a8ca846c4bc97e781eb5cb1bd5c23353a0b3977a1cbda1b1b6447d5 ;;
+    darwin-amd64) echo 767b899a28285e88ded2823d5dcc4bc5ef681173eb2d80f029a7b17ee4ece3b8 ;;
+    linux-arm64) echo b4d8f17068b35ee6060cc2f69a16fb48740d706fbba81661c318649c114a6998 ;;
+    linux-amd64) echo 9b7fe6a6bf6334b98decf8d86b11415ea7889afdabdd1959fdce23af2a9ebcea ;;
   esac
 }
 
@@ -267,11 +277,32 @@ setup_vcpkg() {
   link_bin "$root/vcpkg"
 }
 
-# ── go: official tarball + sqlc binary, pinned + checksummed ──────────────────
+# ── go: official tarball + sqlc + golangci-lint binaries, pinned + checksummed ─
 # Other Go tools (oapi-codegen, migrate) are `tool` directives in gateway/go.mod, not installed here.
 do_go() {
   install_go
   install_sqlc
+  install_golangci_lint
+}
+
+install_golangci_lint() {
+  if [ -x "$BIN_DIR/golangci-lint" ] && "$BIN_DIR/golangci-lint" version 2>/dev/null | grep -q "version $GOLANGCI_LINT_VERSION "; then
+    ok "golangci-lint $GOLANGCI_LINT_VERSION already installed"
+    return
+  fi
+  if [ $check_only = 1 ]; then
+    log "would install golangci-lint $GOLANGCI_LINT_VERSION into $BIN_DIR"
+    return
+  fi
+  local name="golangci-lint-$GOLANGCI_LINT_VERSION-$goos-$goarch" tmp
+  tmp="$(mktemp -d)"
+  fetch_verified "https://github.com/golangci/golangci-lint/releases/download/v$GOLANGCI_LINT_VERSION/$name.tar.gz" \
+    "$(golangci_sha256 "$goos-$goarch")" "$tmp/$name.tar.gz"
+  tar -C "$tmp" -xzf "$tmp/$name.tar.gz"
+  mkdir -p "$BIN_DIR"
+  mv "$tmp/$name/golangci-lint" "$BIN_DIR/golangci-lint"
+  rm -rf "$tmp"
+  ok "golangci-lint ready: $("$BIN_DIR/golangci-lint" version | head -1)"
 }
 
 install_sqlc() {

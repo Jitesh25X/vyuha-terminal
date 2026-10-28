@@ -67,7 +67,7 @@ func Record(ctx context.Context, q *store.Queries, e Event) (int64, error) {
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return 0, fmt.Errorf("%w: payload: %v", ErrInvalidEvent, err)
+		return 0, fmt.Errorf("%w: payload: %w", ErrInvalidEvent, err)
 	}
 
 	params := store.InsertAuditEventParams{
@@ -76,7 +76,7 @@ func Record(ctx context.Context, q *store.Queries, e Event) (int64, error) {
 	}
 	if e.ActorID != "" {
 		if err := params.ActorID.Scan(e.ActorID); err != nil {
-			return 0, fmt.Errorf("%w: actor id: %v", ErrInvalidEvent, err)
+			return 0, fmt.Errorf("%w: actor id: %w", ErrInvalidEvent, err)
 		}
 	}
 	if e.IP.IsValid() {

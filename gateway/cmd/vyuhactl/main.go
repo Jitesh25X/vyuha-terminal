@@ -39,8 +39,14 @@ const usage = `usage:
       (prints the newest ID:HEXHASH; store it outside the database, e.g. in the daily compliance report)
 Reads POSTGRES_URL etc. from the environment (VYUHA_ENV=dev defaults apply).`
 
+// errUsage makes main print the usage text.
+var errUsage = errors.New("invalid arguments")
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		if errors.Is(err, errUsage) {
+			fmt.Fprintln(os.Stderr, usage)
+		}
 		fmt.Fprintln(os.Stderr, "vyuhactl:", err)
 		os.Exit(1)
 	}
@@ -48,7 +54,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) < 2 {
-		return errors.New(usage)
+		return errUsage
 	}
 	switch args[0] + " " + args[1] {
 	case "migrate up", "migrate version":
@@ -60,7 +66,7 @@ func run(args []string) error {
 	case "audit verify", "audit head":
 		return runAudit(args[1], args[2:])
 	}
-	return errors.New(usage)
+	return errUsage
 }
 
 func runMigrate(cmd string, args []string) error {
@@ -158,10 +164,10 @@ func readPassword() (string, error) {
 
 func promptNoEcho(prompt string) (string, error) {
 	fmt.Fprint(os.Stderr, prompt)
-	if err := stty("-echo"); err != nil {
+	if err := stty(false); err != nil {
 		return "", fmt.Errorf("disable echo: %w", err)
 	}
-	defer func() { _ = stty("echo"); fmt.Fprintln(os.Stderr) }()
+	defer func() { _ = stty(true); fmt.Fprintln(os.Stderr) }()
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
@@ -169,8 +175,13 @@ func promptNoEcho(prompt string) (string, error) {
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
-func stty(arg string) error {
-	cmd := exec.Command("stty", arg)
+func stty(echo bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "stty", "-echo")
+	if echo {
+		cmd = exec.CommandContext(ctx, "stty", "echo")
+	}
 	cmd.Stdin = os.Stdin
 	return cmd.Run()
 }
@@ -205,13 +216,17 @@ func ensureJWTKey(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// Paths below come from the operator's own -jwt-key / -env-file flags on an admin CLI.
+	f, err := os.OpenFile(filepath.Clean(path), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // G304: operator-supplied path
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	if err := pem.Encode(f, &pem.Block{Type: "PRIVATE KEY", Bytes: der}); err != nil {
+		_ = f.Close()
 		return err
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	fmt.Printf("✔ wrote JWT signing key %s (0600)\n", path)
 	return nil
@@ -220,10 +235,10 @@ func ensureJWTKey(path string) error {
 // ensureMasterKey creates envFile from the example if needed and fills an empty VYUHA_MASTER_KEY.
 // An existing non-empty key is never replaced: TOTP secrets are encrypted under it.
 func ensureMasterKey(envFile, example string) error {
-	content, err := os.ReadFile(envFile)
+	content, err := os.ReadFile(filepath.Clean(envFile)) //nolint:gosec // G304: operator-supplied path
 	created := false
 	if errors.Is(err, os.ErrNotExist) {
-		if content, err = os.ReadFile(example); err != nil {
+		if content, err = os.ReadFile(filepath.Clean(example)); err != nil { //nolint:gosec // G304: operator-supplied path
 			return fmt.Errorf("read %s: %w", example, err)
 		}
 		created = true
@@ -257,7 +272,7 @@ func ensureMasterKey(envFile, example string) error {
 		fmt.Printf("· %s already has VYUHA_MASTER_KEY; left unchanged\n", envFile)
 		return nil
 	}
-	if err := os.WriteFile(envFile, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Clean(envFile), []byte(strings.Join(lines, "\n")), 0o600); err != nil { //nolint:gosec // G304/G703: operator-supplied path
 		return err
 	}
 	if err := os.Chmod(envFile, 0o600); err != nil {

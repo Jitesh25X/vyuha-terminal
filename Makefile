@@ -116,7 +116,7 @@ e2e:
 lint: proto-lint
 	$(call maybe,engine/CMakeLists.txt,cd engine && clang-format --dry-run --Werror $$(git ls-files '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA) '/engine/(src|tests|bench|bindings|fuzz)/')
 	$(call maybe,gateway/go.mod,cd gateway && test -z "$$(gofmt -l $$(git ls-files '*.go'))" || { gofmt -l $$(git ls-files '*.go'); echo "✖ gofmt"; exit 1; }; \
-	  if command -v golangci-lint >/dev/null; then golangci-lint run; else echo "· golangci-lint not installed yet: gofmt + go vet only"; go vet ./...; fi)
+	  command -v golangci-lint >/dev/null || { echo "✖ golangci-lint not found: make bootstrap C=go"; exit 1; }; golangci-lint run)
 	$(call maybe,quant/pyproject.toml,cd quant && uv run ruff check && uv run mypy --strict src sdk)
 	$(call maybe,intel/pyproject.toml,cd intel && uv run ruff check && uv run mypy --strict src)
 	$(call maybe,web/package.json,cd web && pnpm lint && pnpm tsc --noEmit)

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -46,7 +47,7 @@ func NewSigner(priv ed25519.PrivateKey) *Signer {
 
 // LoadSigningKey reads a PKCS#8 PEM Ed25519 private key (JWT_SIGNING_KEY_PATH).
 func LoadSigningKey(path string) (ed25519.PrivateKey, error) {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(filepath.Clean(path)) //nolint:gosec // G304: path is operator config (JWT_SIGNING_KEY_PATH)
 	if err != nil {
 		return nil, fmt.Errorf("read JWT signing key: %w (create one: make dev-secrets)", err)
 	}

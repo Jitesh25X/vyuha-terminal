@@ -38,7 +38,7 @@ func New(t testing.TB) (string, *pgxpool.Pool) {
 	if err != nil {
 		t.Fatalf("testdb: connect: %v", err)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	if _, err := conn.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
 		t.Fatalf("testdb: create: %v", err)
 	}
@@ -66,7 +66,7 @@ func New(t testing.TB) (string, *pgxpool.Pool) {
 			t.Errorf("testdb: drop connect: %v", err)
 			return
 		}
-		defer c.Close(ctx)
+		defer func() { _ = c.Close(ctx) }()
 		if _, err := c.Exec(ctx, "DROP DATABASE "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
 			t.Errorf("testdb: drop: %v", err)
 		}

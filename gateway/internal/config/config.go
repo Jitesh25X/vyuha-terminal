@@ -21,7 +21,7 @@ const (
 )
 
 // devPostgresURL matches deploy/docker-compose.dev.yml; it is only ever used when VYUHA_ENV=dev.
-const devPostgresURL = "postgres://vyuha:vyuha@localhost:5432/vyuha?sslmode=disable"
+const devPostgresURL = "postgres://vyuha:vyuha@localhost:5432/vyuha?sslmode=disable" //nolint:gosec // G101: well-known dev-only credentials from docker-compose.dev.yml; never used outside VYUHA_ENV=dev
 
 // Config holds gateway settings. It implements slog.LogValuer so it can be logged without secrets.
 type Config struct {
