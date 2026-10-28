@@ -30,6 +30,7 @@ trap cleanup EXIT
 psql_admin "CREATE DATABASE \"$db\""
 export VYUHA_ENV=dev POSTGRES_URL="$pg_base/$db?sslmode=disable"
 
+make -C "$root" --no-print-directory proto >/dev/null # Go protobuf code is gitignored
 cd "$root/gateway"
 go build -o "$tmp/gateway" ./cmd/gateway
 go build -o "$tmp/vyuhactl" ./cmd/vyuhactl

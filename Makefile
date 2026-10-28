@@ -34,7 +34,7 @@ endef
 
 CLEAN_DIRS := engine/build gateway/bin web/dist web/test-results web/playwright-report
 
-.PHONY: clean-space bootstrap up down dev-secrets dev-gateway migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine test-gateway test-quant test-intel test-web bench e2e lint verify invariants
+.PHONY: clean-space bootstrap up down dev-secrets dev-gateway migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine lint-engine lint-gateway lint-quant lint-intel lint-web test-gateway test-quant test-intel test-web bench e2e lint verify invariants
 
 # Installs ONE component, just-in-time: make bootstrap C=cpp   (core|proto|cpp|go|py|web)
 # Add CHECK=1 to only report what is present / would be installed.
@@ -88,8 +88,10 @@ proto-breaking:
 
 test: test-engine test-gateway test-quant test-intel test-web
 
+# ENGINE_PRESETS picks the CMake presets (CI runs debug, asan and tsan as separate jobs).
+ENGINE_PRESETS ?= debug asan
 test-engine:
-	$(call maybe,engine/CMakeLists.txt,cd engine && cmake --preset debug && cmake --build --preset debug && ctest --preset debug && cmake --preset asan && cmake --build --preset asan && ctest --preset asan)
+	$(call maybe,engine/CMakeLists.txt,cd engine && for p in $(ENGINE_PRESETS); do cmake --preset $$p && cmake --build --preset $$p && ctest --preset $$p || exit 1; done)
 
 # Go protobuf code is gitignored, so generate it first. Store integration tests run when the dev Postgres is up.
 test-gateway:
@@ -113,12 +115,23 @@ bench:
 e2e:
 	$(call maybe,web/package.json,scripts/e2e.sh)
 
-lint: proto-lint
+lint: proto-lint lint-engine lint-gateway lint-quant lint-intel lint-web
+
+# clang-tidy reads build/debug/compile_commands.json: run `make test-engine` (or configure debug) first.
+lint-engine:
 	$(call maybe,engine/CMakeLists.txt,cd engine && clang-format --dry-run --Werror $$(git ls-files '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA) '/engine/(src|tests|bench|bindings|fuzz)/')
+
+lint-gateway:
 	$(call maybe,gateway/go.mod,cd gateway && test -z "$$(gofmt -l $$(git ls-files '*.go'))" || { gofmt -l $$(git ls-files '*.go'); echo "✖ gofmt"; exit 1; }; \
 	  command -v golangci-lint >/dev/null || { echo "✖ golangci-lint not found: make bootstrap C=go"; exit 1; }; golangci-lint run)
+
+lint-quant:
 	$(call maybe,quant/pyproject.toml,cd quant && uv run ruff check && uv run mypy --strict src sdk)
+
+lint-intel:
 	$(call maybe,intel/pyproject.toml,cd intel && uv run ruff check && uv run mypy --strict src)
+
+lint-web:
 	$(call maybe,web/package.json,cd web && pnpm lint)
 
 clean-space:
