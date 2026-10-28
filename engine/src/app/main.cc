@@ -1,0 +1,109 @@
+// vyuha_engine: core loop + broker sessions + gRPC control API (engine.v1.EngineService).
+// Env: ENGINE_GRPC_ADDR (default 127.0.0.1:7443; private network + mTLS in prod, see README).
+
+#include <atomic>
+#include <csignal>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
+#include <memory>
+#include <stop_token>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <grpcpp/grpcpp.h>
+
+#include "../rpc/engine_service.h"
+#include "quill/LogMacros.h"
+#include "vyuha/core/clock.h"
+#include "vyuha/core/core_loop.h"
+#include "vyuha/core/version.h"
+#include "vyuha/md/tick.h"
+#include "vyuha/session/instrument_directory.h"
+#include "vyuha/session/session_manager.h"
+#include "vyuha/util/log.h"
+
+namespace {
+
+constexpr std::size_t kFeedRings = 4;  // concurrent data-entitled broker sessions
+
+std::atomic<bool> g_stop{false};  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables): signal flag
+
+extern "C" void on_signal(int /*sig*/) { g_stop.store(true); }
+
+// Until the NATS publisher lands (M1.7), the core forwards into this counter.
+class CountingSink final : public vyuha::md::IMdSink {
+ public:
+  void on_tick(const vyuha::md::Tick& /*t*/) noexcept override {
+    ticks.fetch_add(1, std::memory_order_relaxed);
+  }
+  void on_bar(const vyuha::md::Bar& /*b*/) noexcept override { bars.fetch_add(1, std::memory_order_relaxed); }
+  std::atomic<std::uint64_t> ticks{0};
+  std::atomic<std::uint64_t> bars{0};
+};
+
+std::string env_or(const char* name, const char* def) {
+  const char* v = std::getenv(name);  // NOLINT(concurrency-mt-unsafe): read at startup, single-threaded
+  return v != nullptr && *v != '\0' ? v : def;
+}
+
+int run() {
+  vyuha::log::init();
+  quill::Logger* log = vyuha::log::engine();
+  const std::string addr = env_or("ENGINE_GRPC_ADDR", "127.0.0.1:7443");
+
+  const vyuha::WallClock clock;
+  CountingSink sink;
+  vyuha::CoreLoop core(vyuha::CoreConfig{}, clock, sink);
+  std::vector<std::unique_ptr<vyuha::TickRing>> rings;
+  std::vector<vyuha::TickRing*> ring_ptrs;
+  for (std::size_t i = 0; i < kFeedRings; ++i) {
+    rings.push_back(std::make_unique<vyuha::TickRing>());
+    ring_ptrs.push_back(rings.back().get());
+    (void)core.add_input(*rings.back());
+  }
+  // Instrument ids → broker ids come from Postgres from M1.7; until then no instrument resolves.
+  const vyuha::session::StaticInstrumentDirectory instruments({});
+  vyuha::session::SessionManager sessions(vyuha::session::SessionManagerConfig{}, instruments, ring_ptrs,
+                                          clock);
+  vyuha::rpc::EngineServiceImpl service(sessions);
+
+  grpc::ServerBuilder builder;
+  int bound_port = 0;
+  builder.AddListeningPort(addr, grpc::InsecureServerCredentials(), &bound_port);
+  builder.RegisterService(&service);
+  const std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
+  if (!server || bound_port == 0) {
+    LOG_ERROR(log, "engine: cannot listen on {}", addr);
+    return 1;
+  }
+  std::jthread core_thread([&core](const std::stop_token& st) { core.run(st); });
+  LOG_INFO(log, "vyuha engine {} listening on {} (gRPC)", vyuha::version(), addr);
+  log->flush_log();
+
+  (void)std::signal(SIGINT, on_signal);
+  (void)std::signal(SIGTERM, on_signal);
+  while (!g_stop.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+  LOG_INFO(log, "engine shutting down");
+  server->Shutdown();
+  core_thread.request_stop();
+  core_thread.join();
+  log->flush_log();  // Quill formats on its backend thread: drain it before exit
+  return 0;
+}
+
+}  // namespace
+
+int main() {
+  try {
+    return run();
+  } catch (const std::exception& e) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): last-resort message, logging may be down
+    (void)std::fprintf(stderr, "vyuha_engine: fatal: %s\n", e.what());
+    return 1;
+  }
+}
