@@ -26,7 +26,7 @@ void BM_CorePollTicks(benchmark::State& state) {
   const vyuha::Nanos t0 = std::chrono::duration_cast<std::chrono::nanoseconds>(
                               std::chrono::sys_days{std::chrono::year{2026} / 10 / 28}.time_since_epoch())
                               .count() +
-                          (10 * 60 * vyuha::kNanosPerMinute) - vyuha::md::kIstOffset;
+                          (vyuha::Nanos{600} * vyuha::kNanosPerMinute) - vyuha::md::kIstOffset;
   vyuha::SimClock clock(t0);
   CountingSink sink;
   vyuha::CoreLoop core(vyuha::CoreConfig{.max_instruments = 50'000}, clock, sink);

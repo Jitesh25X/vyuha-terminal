@@ -38,7 +38,7 @@ endef
 
 CLEAN_DIRS := engine/build gateway/bin web/dist web/test-results web/playwright-report
 
-.PHONY: clean-space bootstrap up down dev-secrets dev-gateway migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine lint-engine lint-gateway lint-quant lint-intel lint-web test-gateway test-quant test-intel test-web bench e2e lint verify invariants
+.PHONY: clean-space bootstrap up down dev-secrets dev-gateway migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine lint-engine lint-gateway lint-quant lint-intel lint-web test-gateway test-quant test-intel test-web bench fuzz-kite e2e lint verify invariants
 
 # Installs ONE component, just-in-time: make bootstrap C=cpp   (core|proto|cpp|go|py|web)
 # Add CHECK=1 to only report what is present / would be installed.
@@ -117,6 +117,20 @@ test-intel:
 
 test-web:
 	$(call maybe,web/package.json,cd web && pnpm test --run)
+
+# libFuzzer: clang with compiler-rt (macOS: Homebrew llvm@18; Ubuntu: clang-18 + libclang-rt-18-dev).
+FUZZ_SECONDS ?= 600
+ifeq ($(shell uname -s),Darwin)
+  FUZZ_CXX ?= $(shell brew --prefix llvm@18 2>/dev/null)/bin/clang++
+  FUZZ_SANITIZERS ?= fuzzer,undefined  # LLVM 18 ASan+libFuzzer hangs on current macOS; CI runs ASan
+else
+  FUZZ_CXX ?= clang++-18
+  FUZZ_SANITIZERS ?= fuzzer,address,undefined
+endif
+fuzz-kite:
+	$(call maybe,engine/fuzz/kite_ticker_fuzz.cc,cd engine && VYUHA_FUZZ_CXX=$(FUZZ_CXX) cmake --preset fuzz -DVYUHA_FUZZ_SANITIZERS=$(FUZZ_SANITIZERS) >/dev/null && cmake --build --preset fuzz && \
+	  mkdir -p build/fuzz/corpus/kite && cp fixtures/vcr/kite/*.bin build/fuzz/corpus/kite/ && \
+	  ./build/fuzz/fuzz/kite_ticker_fuzz -max_total_time=$(FUZZ_SECONDS) -print_final_stats=1 -timeout=5 -artifact_prefix=build/fuzz/ build/fuzz/corpus/kite)
 
 bench:
 	$(call maybe,engine/CMakeLists.txt,cd engine && cmake --preset release && cmake --build --preset release && ./build/release/bench/vyuha_bench --benchmark_min_time=2s)

@@ -9,6 +9,8 @@ enum class ErrorCode : std::uint8_t {
   kInvalidArgument = 1,
   kOutOfRange,
   kCapacityExceeded,
+  kStaticIpNotOnHost,  // invariant 4 preflight (STATIC_IP_NOT_ON_HOST)
+  kConnectFailed,
 };
 
 // Errors are values (std::expected<T, Error>); `detail` points at static text, never at user data.
