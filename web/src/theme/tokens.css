@@ -1,0 +1,92 @@
+/* Design tokens: docs/UI_SPEC.md §6. Fonts fall back to system monospace/sans (no font downloads). */
+@import "tailwindcss";
+@import "dockview/dist/styles/dockview.css";
+
+:root {
+  --bg: #000000;
+  --panel: #0a0a0a;
+  --panel-header: #141414;
+  --grid: #1e1e1e;
+  --border: #2a2a2a;
+  --text-primary: #ffb000; /* amber */
+  --text-secondary: #c8c8c8;
+  --text-muted: #8a8a8a;
+  --up: #00d26a;
+  --down: #ff3b3b;
+  --flat: #c8c8c8;
+  --accent: #3ab8ff;
+  --warn: #ffd400;
+  --paper: #00e5ff;
+  --kill: #ff1744;
+  --link-amber: #ffb000;
+  --link-cyan: #00e5ff;
+  --link-magenta: #ff4fd8;
+  --link-green: #00d26a;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --font-label: "IBM Plex Sans Condensed", system-ui, sans-serif;
+  --fs-base: 12px;
+  --row-h: 18px;
+  --header-h: 22px;
+  color-scheme: dark;
+}
+
+/* Expose the tokens as Tailwind utilities: bg-panel, text-amber, border-line, font-mono … */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-panel-header: var(--panel-header);
+  --color-grid: var(--grid);
+  --color-line: var(--border);
+  --color-amber: var(--text-primary);
+  --color-fg: var(--text-secondary);
+  --color-muted: var(--text-muted);
+  --color-up: var(--up);
+  --color-down: var(--down);
+  --color-accent: var(--accent);
+  --color-warn: var(--warn);
+  --color-paper: var(--paper);
+  --color-kill: var(--kill);
+  --font-mono: var(--font-mono);
+  --font-label: var(--font-label);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  font-variant-numeric: tabular-nums;
+}
+
+/* UI_SPEC §10: visible 2px focus ring. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Dockview, retinted with the terminal tokens. */
+.dockview-theme-vyuha {
+  --dv-background-color: var(--bg);
+  --dv-group-view-background-color: var(--panel);
+  --dv-tabs-and-actions-container-background-color: var(--panel-header);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--panel);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--panel-header);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--panel);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--panel-header);
+  --dv-activegroup-visiblepanel-tab-color: var(--text-primary);
+  --dv-activegroup-hiddenpanel-tab-color: var(--text-muted);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--text-secondary);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--text-muted);
+  --dv-tab-divider-color: var(--border);
+  --dv-separator-border: var(--border);
+  --dv-paneview-header-border-color: var(--border);
+  --dv-tabs-and-actions-container-height: var(--header-h);
+  --dv-tabs-and-actions-container-font-size: var(--fs-base);
+  --dv-drag-over-background-color: rgba(58, 184, 255, 0.15);
+  --dv-drag-over-border-color: var(--accent);
+  font-family: var(--font-mono);
+}

@@ -55,8 +55,8 @@ make dev-gateway    # run the gateway with .env loaded
 make test           # all unit tests (engine, gateway, quant, intel, web)
 make test-engine    # ctest incl. sanitizers preset `asan`
 make bench          # Google Benchmark: risk gate, normalizer
-make e2e            # Playwright against dev stack with SimBroker
-make lint           # clang-tidy, clang-format --dry-run, golangci-lint, ruff, mypy, eslint, tsc
+make e2e            # Playwright (Chromium) against a throwaway gateway + database (scripts/e2e.sh; needs `make up`)
+make lint           # buf, clang-tidy, clang-format --dry-run, gofmt, golangci-lint, ruff, mypy, tsc (web: strict tsc only)
 make verify         # lint + test + e2e + invariants check (run before declaring a task done)
 ```
 

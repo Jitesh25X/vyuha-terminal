@@ -32,3 +32,7 @@ data/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# web test output
+web/test-results/
+web/playwright-report/

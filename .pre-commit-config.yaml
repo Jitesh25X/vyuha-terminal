@@ -40,8 +40,3 @@ repos:
         language: system
         files: ^(quant|intel)/.*\.py$
 
-      - id: prettier
-        name: prettier
-        entry: scripts/precommit-tool.sh prettier --log-level warn -w --
-        language: system
-        files: ^web/.*\.(ts|tsx|css|json)$

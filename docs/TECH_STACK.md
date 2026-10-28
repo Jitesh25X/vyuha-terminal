@@ -104,7 +104,7 @@ versions in this file's lock table (§6), and keep them pinned in lockfiles (`vc
 | Styling | Tailwind CSS v4 + CSS variables design tokens; Radix primitives for dialogs/menus |
 | Hotkeys | `tinykeys` |
 | Tests | Vitest + Testing Library; Playwright (E2E + perf traces) |
-| Lint | ESLint (typescript-eslint strict), Prettier |
+| Lint | `tsc --noEmit` strict (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`). ESLint/Prettier not installed at M0.9 (owner choice 2026-10-28); adding them later needs owner approval |
 
 ## 4. Infrastructure
 | Component | Choice | Floor | Why |
@@ -156,6 +156,7 @@ Toolchains are installed one component at a time by `scripts/bootstrap.sh <core|
 | NATS image digest | `nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927` (nats-server 2.10.29) | 2026-10-28 |
 | Neo4j image digest | at M6.1 | |
 | buf | 1.75.0 (`bootstrap.sh proto`; same version in `.github/workflows/proto.yml`) | 2026-10-28 |
-| React / Vite / Dockview / AG Grid / Lightweight Charts | at M0.9 / M1.9 (`web/pnpm-lock.yaml`) | |
+| Web (M0.9) | `web/package.json` exact + `pnpm-lock.yaml`; pnpm `minimumReleaseAge` 7 days. react/react-dom 19.3.1, vite 8.3.5, typescript 7.0.2, dockview 8.6.1 (core DOM API, no `dockview-react`), cmdk 1.1.1, zustand 5.0.15, @tanstack/react-query 5.104.5, tailwindcss + @tailwindcss/vite 4.3.3, tinykeys 4.0.1, vitest 5.0.5, @playwright/test 1.64.1 (Chromium 156 only), @types/react(-dom) 19.3.0 | 2026-10-28 |
+| AG Grid / Lightweight Charts / @bufbuild/protobuf | at M1.9 (`web/pnpm-lock.yaml`) | |
 | anthropic / mcp / sentence-transformers | at M6.4 / M7.1 / M6.2 (`intel/uv.lock`) | |
 | LLM model IDs (`LLM_MODEL_FAST`, `LLM_MODEL_SMART`) | at M6.4 / M7.2 | |

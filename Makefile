@@ -62,7 +62,7 @@ migrate-neo4j:
 proto: proto-lint
 	$(call maybe,gateway/go.mod,cd proto && buf generate --template buf.gen.go.yaml)
 	$(call maybe,quant/pyproject.toml,cd proto && buf generate --template buf.gen.python.yaml)
-	$(call maybe,web/package.json,cd proto && buf generate --template buf.gen.ts.yaml)
+	$(call maybe,web/node_modules/@bufbuild/protobuf/package.json,cd proto && buf generate --template buf.gen.ts.yaml)
 
 proto-lint:
 	@command -v buf >/dev/null || { echo "✖ buf not found: make bootstrap C=proto"; exit 1; }
@@ -111,7 +111,7 @@ bench:
 	$(call maybe,engine/CMakeLists.txt,cd engine && cmake --preset release && cmake --build --preset release && ./build/release/bench/vyuha_bench --benchmark_min_time=2s)
 
 e2e:
-	$(call maybe,web/package.json,cd web && pnpm exec playwright test)
+	$(call maybe,web/package.json,scripts/e2e.sh)
 
 lint: proto-lint
 	$(call maybe,engine/CMakeLists.txt,cd engine && clang-format --dry-run --Werror $$(git ls-files '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA) '/engine/(src|tests|bench|bindings|fuzz)/')
@@ -119,7 +119,7 @@ lint: proto-lint
 	  command -v golangci-lint >/dev/null || { echo "✖ golangci-lint not found: make bootstrap C=go"; exit 1; }; golangci-lint run)
 	$(call maybe,quant/pyproject.toml,cd quant && uv run ruff check && uv run mypy --strict src sdk)
 	$(call maybe,intel/pyproject.toml,cd intel && uv run ruff check && uv run mypy --strict src)
-	$(call maybe,web/package.json,cd web && pnpm lint && pnpm tsc --noEmit)
+	$(call maybe,web/package.json,cd web && pnpm lint)
 
 clean-space:
 	@echo "Before:"; du -sh . 2>/dev/null || true
