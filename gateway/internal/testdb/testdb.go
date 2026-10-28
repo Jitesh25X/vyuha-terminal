@@ -20,6 +20,8 @@ import (
 	"github.com/jiteshraj/vyuha/gateway/internal/store"
 )
 
+const migrateLockKey int64 = 0x7679756861_7464 // "vyuha" "td"
+
 // New returns the URL and a pool for a new database migrated to the latest version.
 // It skips the test unless VYUHA_TEST_POSTGRES_URL (an account allowed to CREATE DATABASE) is set.
 func New(t testing.TB) (string, *pgxpool.Pool) {
@@ -28,7 +30,7 @@ func New(t testing.TB) (string, *pgxpool.Pool) {
 	if admin == "" {
 		t.Skip("VYUHA_TEST_POSTGRES_URL not set")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	var b [6]byte
@@ -49,8 +51,17 @@ func New(t testing.TB) (string, *pgxpool.Pool) {
 	}
 	u.Path = "/" + name
 	dbURL := u.String()
-	if _, err := store.MigrateUp(migrationsDir(), dbURL); err != nil {
-		t.Fatalf("testdb: migrate: %v", err)
+	// Test packages run in parallel processes, and 000001 creates the cluster-wide role vyuha_app
+	// (check-then-create): migrate one database at a time, under a lock held on the admin database.
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrateLockKey); err != nil {
+		t.Fatalf("testdb: lock: %v", err)
+	}
+	_, merr := store.MigrateUp(migrationsDir(), dbURL)
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", migrateLockKey); err != nil {
+		t.Fatalf("testdb: unlock: %v", err)
+	}
+	if merr != nil {
+		t.Fatalf("testdb: migrate: %v", merr)
 	}
 	pool, err := store.NewPool(ctx, dbURL)
 	if err != nil {

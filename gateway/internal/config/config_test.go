@@ -89,7 +89,7 @@ func TestLoad(t *testing.T) {
 
 func TestLogValueHidesCredentials(t *testing.T) {
 	c, err := Load(func(k string) string {
-		return map[string]string{"POSTGRES_URL": "postgres://vyuha:s3cret-pw@db.internal:5432/vyuha", "VYUHA_MASTER_KEY": "TUFTVEVSLUtFWS1TRUNSRVQ="}[k]
+		return map[string]string{"POSTGRES_URL": "postgres://vyuha:s3cret-pw@db.internal:5432/vyuha", "VYUHA_MASTER_KEY": "TUFTVEVSLUtFWS1TRUNSRVQ="}[k] // gitleaks:allow (fake key: base64 "MASTER-KEY-SECRET")
 	})
 	if err != nil {
 		t.Fatal(err)

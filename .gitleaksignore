@@ -1,0 +1,3 @@
+# Reviewed false positives (gitleaks fingerprint: commit:file:rule:line). Add only after review.
+# Fake VYUHA_MASTER_KEY (base64 "MASTER-KEY-SECRET") in the test proving the config never logs it.
+5bff0d73d9d76ee9c522432bb94bb48c61e8036d:gateway/internal/config/config_test.go:generic-api-key:74
