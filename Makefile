@@ -131,7 +131,7 @@ lint-engine:
 	$(call maybe,engine/CMakeLists.txt,cd engine && { test -f build/debug/compile_commands.json || cmake --preset debug >/dev/null; } && clang-format --dry-run --Werror $$(git ls-files --cached --others --exclude-standard '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA) '/engine/(src|tests|bench|bindings|fuzz)/')
 
 lint-gateway:
-	$(call maybe,gateway/go.mod,cd gateway && test -z "$$(gofmt -l $$(git ls-files '*.go'))" || { gofmt -l $$(git ls-files '*.go'); echo "✖ gofmt"; exit 1; }; \
+	$(call maybe,gateway/go.mod,cd gateway && test -z "$$(gofmt -l $$(git ls-files --cached --others --exclude-standard '*.go'))" || { gofmt -l $$(git ls-files --cached --others --exclude-standard '*.go'); echo "✖ gofmt"; exit 1; }; \
 	  command -v golangci-lint >/dev/null || { echo "✖ golangci-lint not found: make bootstrap C=go"; exit 1; }; golangci-lint run)
 
 lint-quant:
