@@ -40,7 +40,7 @@ jobs:
           curl -fsSL -o "$tmp/gl.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           echo "${GITLEAKS_SHA256}  $tmp/gl.tgz" | sha256sum -c -
           tar -C "$tmp" -xzf "$tmp/gl.tgz" gitleaks
-          "$tmp/gitleaks" git --redact --no-banner .
+          "$tmp/gitleaks" git --redact --no-banner --verbose .
 
   engine:
     name: engine (${{ matrix.preset }})

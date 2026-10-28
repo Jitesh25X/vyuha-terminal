@@ -11,6 +11,10 @@ export VCPKG_ROOT ?= $(VYUHA_TOOLS_DIR)/vcpkg
 # Use the pinned Go from VYUHA_TOOLS_DIR; never let `go` download another toolchain on its own.
 export GOTOOLCHAIN := local
 # clang-tidy 18 cannot parse the newer libc++ in current macOS SDKs: analyse against LLVM 18's own libc++ headers.
+# On Linux it reads GCC 14's libstdc++, whose <expected> is gated on __cpp_concepts >= 202002L, which clang 18 doesn't report.
+ifeq ($(shell uname -s),Linux)
+  TIDY_EXTRA := -extra-arg=-Wno-builtin-macro-redefined -extra-arg=-D__cpp_concepts=202002L
+endif
 ifeq ($(shell uname -s),Darwin)
   TIDY_EXTRA := -extra-arg=-nostdinc++ -extra-arg=-isystem$(shell brew --prefix llvm@18 2>/dev/null)/include/c++/v1
 endif
