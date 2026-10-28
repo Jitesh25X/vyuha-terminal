@@ -35,6 +35,15 @@ std::vector<std::uint8_t> fixture(const char* name) {
   return {std::istreambuf_iterator<char>(f), {}};
 }
 
+// Wakes a server thread blocked in accept() so it can see its stop flag (Asio objects must not be
+// closed from another thread while in use).
+void wake(std::uint16_t port) {
+  asio::io_context io;
+  tcp::socket s(io);
+  boost::system::error_code ec;
+  s.connect({asio::ip::make_address("127.0.0.1"), port}, ec);
+}
+
 // Accepts connections one at a time on 127.0.0.1. Each connection: read the expected number of
 // subscription text frames, record them and the client's source address, send the fixture frames;
 // the first connection is then dropped, later ones stay open until the test ends.
@@ -45,22 +54,23 @@ class FixtureServer {
     acceptor_.set_option(asio::socket_base::reuse_address(true));
     acceptor_.bind({asio::ip::make_address("127.0.0.1"), 0});
     acceptor_.listen();
+    port_ = acceptor_.local_endpoint().port();
     thread_ = std::thread([this] { serve(); });
   }
   FixtureServer(const FixtureServer&) = delete;
   FixtureServer& operator=(const FixtureServer&) = delete;
   FixtureServer(FixtureServer&&) = delete;
   FixtureServer& operator=(FixtureServer&&) = delete;
+  // NOLINTNEXTLINE(bugprone-exception-escape): test fixture; a throwing join should abort the test
   ~FixtureServer() {
     stop_ = true;
-    boost::system::error_code ec;
-    acceptor_.close(ec);
+    wake(port_);
     if (thread_.joinable()) {
       thread_.join();
     }
   }
 
-  [[nodiscard]] std::uint16_t port() const { return acceptor_.local_endpoint().port(); }
+  [[nodiscard]] std::uint16_t port() const { return port_; }
   [[nodiscard]] std::vector<std::vector<std::string>> subscriptions() {
     const std::scoped_lock lock(mu_);
     return subs_;
@@ -79,7 +89,7 @@ class FixtureServer {
       boost::system::error_code ec;
       tcp::socket sock(io_);
       acceptor_.accept(sock, ec);
-      if (ec) {
+      if (ec || stop_) {
         return;
       }
       beast::websocket::stream<tcp::socket> ws(std::move(sock));
@@ -125,6 +135,7 @@ class FixtureServer {
   asio::io_context io_;
   tcp::acceptor acceptor_{io_};
   std::size_t expected_;
+  std::uint16_t port_{0};
   std::atomic<bool> stop_{false};
   std::mutex mu_;
   std::vector<std::vector<std::string>> subs_;

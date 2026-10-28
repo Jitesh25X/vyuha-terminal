@@ -1,5 +1,6 @@
 #include "vyuha/core/price.h"
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -54,6 +55,16 @@ TEST(Price, ParseRejects) {
 TEST(Price, FormatsExtremes) {
   EXPECT_EQ(Price::from_units(std::numeric_limits<std::int64_t>::min()).to_string(), "-922337203685477.5808");
   EXPECT_EQ(Price::from_units(-1).to_string(), "-0.0001");
+}
+
+// Broker wire formats that send binary doubles (Upstox) convert here, once.
+TEST(Price, FromWireRupeesRoundsToTheUnit) {
+  EXPECT_EQ(Price::from_wire_rupees(219.3).value_or(Price{}).units(), 2'193'000);
+  EXPECT_EQ(Price::from_wire_rupees(0.05).value_or(Price{}).units(), 500);
+  EXPECT_EQ(Price::from_wire_rupees(24450.05).value_or(Price{}).to_string(), "24450.0500");
+  for (const double bad : {-0.05, std::numeric_limits<double>::infinity(), std::nan(""), 1e12}) {
+    EXPECT_FALSE(Price::from_wire_rupees(bad).has_value()) << bad;
+  }
 }
 
 TEST(Price, ArithmeticAndOrdering) {

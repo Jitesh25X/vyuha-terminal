@@ -49,17 +49,35 @@ target_include_directories(vyuha_core_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inc
 target_link_libraries(vyuha_core_lib PUBLIC quill::quill PRIVATE vyuha_warnings)
 
 # Kite Connect adapter (market data now; orders in M3). Kept out of core so core stays Boost-free.
+# Broker-neutral WebSocket feed runner shared by the adapters.
+add_library(vyuha_feed STATIC src/broker/common/feed_client.cc)
+target_link_libraries(vyuha_feed
+  PUBLIC vyuha::core Boost::asio Boost::beast OpenSSL::SSL OpenSSL::Crypto
+  PRIVATE vyuha_warnings)
+target_compile_definitions(vyuha_feed PUBLIC BOOST_ASIO_NO_DEPRECATED)
+
 add_library(vyuha_kite
   src/broker/kite/ticker.cc
   src/broker/kite/ticker_parser.cc
   src/broker/kite/ticker_shards.cc
 )
 add_library(vyuha::kite ALIAS vyuha_kite)
+
+# Upstox adapter (market data now; orders in M3).
+add_library(vyuha_upstox
+  src/broker/upstox/feed.cc
+  src/broker/upstox/feed_parser.cc
+  src/broker/upstox/subscriptions.cc
+)
+add_library(vyuha::upstox ALIAS vyuha_upstox)
+target_link_libraries(vyuha_upstox
+  PUBLIC vyuha::core
+  PRIVATE vyuha_warnings vyuha_feed simdjson::simdjson)
 # Non-deprecated Asio: synchronous ops taking an error_code return void (nothing to ignore).
 target_compile_definitions(vyuha_kite PUBLIC BOOST_ASIO_NO_DEPRECATED)
 target_link_libraries(vyuha_kite
   PUBLIC vyuha::core
-  PRIVATE vyuha_warnings Boost::asio Boost::beast OpenSSL::SSL OpenSSL::Crypto simdjson::simdjson)
+  PRIVATE vyuha_warnings vyuha_feed simdjson::simdjson)
 
 if(VYUHA_BUILD_TESTS)
   enable_testing()

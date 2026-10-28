@@ -1,5 +1,6 @@
 #include "vyuha/core/price.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -63,6 +64,14 @@ std::expected<Price, Error> Price::parse(std::string_view rupees) noexcept {
     }
   }
   return Price{negative ? -units : units};
+}
+
+std::optional<Price> Price::from_wire_rupees(double rupees) noexcept {
+  constexpr double kMaxRupees = 1e11;  // keeps units well inside int64
+  if (!std::isfinite(rupees) || rupees < 0 || rupees > kMaxRupees) {
+    return std::nullopt;
+  }
+  return Price{std::llround(rupees * static_cast<double>(kUnitsPerRupee))};
 }
 
 std::string Price::to_string() const {

@@ -3,6 +3,7 @@
 #include <compare>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -25,6 +26,10 @@ class Price {
   [[nodiscard]] static constexpr Price from_paise(std::int64_t paise) noexcept {
     return Price{paise * kUnitsPerPaisa};
   }
+  // The one place a binary floating-point rupee value becomes a Price: for broker wire formats that
+  // send IEEE-754 doubles (Upstox feed). Rounds to the nearest unit (1/10 000 rupee, far below any
+  // tick size). nullopt for NaN, ±inf, negative or > 10^11 rupees. Never use for computed values.
+  [[nodiscard]] static std::optional<Price> from_wire_rupees(double rupees) noexcept;
   // Exact decimal rupees, e.g. "2450.05", "-0.0025", "100". At most 4 decimal places; no exponent.
   [[nodiscard]] static std::expected<Price, Error> parse(std::string_view rupees) noexcept;
 

@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "vyuha/broker/feed.h"
 #include "vyuha/broker/kite/ticker_parser.h"
 #include "vyuha/broker/kite/ticker_shards.h"
 #include "vyuha/core/clock.h"
@@ -33,13 +34,7 @@ struct TickerConfig {
   std::uint64_t jitter_seed{0};              // 0: random
 };
 
-// A market-data outage on one shard, from the last frame received to the first frame after the
-// reconnect (F-MD-2 AC2: gaps are logged with start/end timestamps).
-struct Gap {
-  std::size_t shard{0};
-  Nanos start{0};
-  Nanos end{0};
-};
+using broker::Gap;
 
 struct TickerStats {
   std::uint64_t connects{0};
