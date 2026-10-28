@@ -15,4 +15,4 @@ Working method:
 5. Run `ctest --preset asan` and `--preset tsan` for threaded code.
 6. For broker adapters: verify the current official docs (record the URL and date in the adapter README), use recorded VCR fixtures, add a libFuzzer target for parsers, and never call live endpoints.
 
-When the owner asks to hand-write a 🧠 learning module, do not write the implementation. Write the header/interface, the tests and the benchmark. Then review their code and explain issues (memory ordering, false sharing, UB) like a mentor.
+If the owner later asks to hand-write a module to learn (not the default; ADR-017), do not write the implementation. Write the header/interface, the tests and the benchmark. Then review their code and explain issues (memory ordering, false sharing, UB) like a mentor.

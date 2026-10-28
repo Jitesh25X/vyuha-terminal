@@ -104,7 +104,7 @@ versions in this file's lock table (§6), and keep them pinned in lockfiles (`vc
 | Styling | Tailwind CSS v4 + CSS variables design tokens; Radix primitives for dialogs/menus |
 | Hotkeys | `tinykeys` |
 | Tests | Vitest + Testing Library; Playwright (E2E + perf traces) |
-| Lint | ESLint (typescript-eslint strict), Prettier |
+| Lint | `tsc --noEmit` strict (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`). ESLint/Prettier not installed at M0.9 (owner choice 2026-10-28); adding them later needs owner approval |
 
 ## 4. Infrastructure
 | Component | Choice | Floor | Why |
@@ -135,18 +135,28 @@ versions in this file's lock table (§6), and keep them pinned in lockfiles (`vc
 | LangChain/LangGraph | A thin tool loop on the Anthropic SDK + MCP is simpler to audit |
 
 ## 6. Pinned versions (fill at M0)
+Toolchains are installed one component at a time by `scripts/bootstrap.sh <core|cpp|go|py|web>` (Ubuntu 24.04 via apt, macOS via Homebrew). Go, Node, uv and buf are official release archives checked against the sha256 pinned in the script, unpacked into `$VYUHA_TOOLS_DIR` (default `~/.local/share/vyuha-tools`, no sudo), and the Makefile puts `$VYUHA_TOOLS_DIR/bin` first on `PATH`. **Change a version here and in `scripts/bootstrap.sh` together.** Rows marked "at Mx.y" are pinned by the task that first pulls or adds them (lockfiles / image digests), not before.
+
+**Core list** (`bootstrap.sh core`, the only thing M0 installs): git, jq, make, curl, ca-certificates, xz-utils, Docker Engine + Compose v2 (Ubuntu: `docker.io`, `docker-compose-v2` from the Ubuntu archive, skipped if Docker is already present; macOS: Docker Desktop must already be installed).
+
 | Component | Version | Pinned on |
 |---|---|---|
-| GCC / Clang | | |
-| CMake | | |
-| vcpkg baseline commit | | |
-| Go | | |
-| Python | | |
-| Node / pnpm | | |
-| PostgreSQL image digest | | |
-| ClickHouse image digest | | |
-| NATS image digest | | |
-| Neo4j image digest | | |
-| React / Vite / Dockview / AG Grid / Lightweight Charts | | |
-| anthropic / mcp / sentence-transformers | | |
-| LLM model IDs (`LLM_MODEL_FAST`, `LLM_MODEL_SMART`) | | |
+| GCC / Clang | Ubuntu: GCC 14 (`g++-14`, CI reference). macOS: Apple Clang from Xcode Command Line Tools (≥ 16 for `std::expected`). clang-format / clang-tidy / libFuzzer: **LLVM 18** on both (`clang-*-18` apt, `llvm@18` brew) so formatting is identical everywhere | 2026-10-28 |
+| CMake | ≥ 3.28 (Ubuntu 24.04 apt 3.28.3; macOS Homebrew current), Ninja from the same source | 2026-10-28 |
+| vcpkg baseline commit | `19c330612911442c9939e4a89f85c97603089389` (vcpkg tool 2026-09-26; `engine/vcpkg.json` `builtin-baseline`, bootstrap fetches only that commit, depth 1). Ports: gtest 1.18.0, benchmark 1.9.5, nanobind 3.1.0 (overlay without `python3`, see `engine/vcpkg-overlays/README.md`), robin-map 1.4.1 | 2026-10-28 |
+| Go | 1.27.3 | 2026-10-28 |
+| Python | 3.13.14 (via uv 0.13.6) | 2026-10-28 |
+| Node / pnpm | Node 22.23.4 (22 LTS) / pnpm 10.34.9 via corepack | 2026-10-28 |
+| sqlc | 1.31.1 (`bootstrap.sh go`, pinned + sha256) | 2026-10-28 |
+| golangci-lint | 2.15.0 (`bootstrap.sh go`, pinned + sha256; config `gateway/.golangci.yml`: standard + gosec, errorlint, bodyclose, noctx, misspell, unconvert) | 2026-10-28 |
+| Gateway Go modules | `gateway/go.mod` + `go.sum`: pgx 5.11.0, golang-migrate 4.20.1 (pgx/v5 driver), OTel 1.47.0 (+ otelhttp 0.72.0), protobuf 1.36.12, grpc 1.83.2 (via OTel exporter); oapi-codegen 2.8.1 as a `tool` directive. Buf Go plugins pinned to match in `proto/buf.gen.go.yaml` | 2026-10-28 |
+| Gateway auth modules | alexedwards/argon2id 1.0.0 (m=64 MiB, t=2, p=2), pquerna/otp 1.5.0 (SHA1, 6 digits, 30 s, ±1 step), golang-jwt/jwt/v5 5.3.1 (EdDSA only); oapi-codegen/runtime 1.8.0 | 2026-10-28 |
+| PostgreSQL image digest | `pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d` (PostgreSQL 17.11, pgvector 0.8.7) | 2026-10-28 |
+| ClickHouse image digest | at M1.7 | |
+| NATS image digest | `nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927` (nats-server 2.10.29) | 2026-10-28 |
+| Neo4j image digest | at M6.1 | |
+| buf | 1.75.0 (`bootstrap.sh proto`; same version in `.github/workflows/proto.yml`) | 2026-10-28 |
+| Web (M0.9) | `web/package.json` exact + `pnpm-lock.yaml`; pnpm `minimumReleaseAge` 7 days. react/react-dom 19.3.1, vite 8.3.5, typescript 7.0.2, dockview 8.6.1 (core DOM API, no `dockview-react`), cmdk 1.1.1, zustand 5.0.15, @tanstack/react-query 5.104.5, tailwindcss + @tailwindcss/vite 4.3.3, tinykeys 4.0.1, vitest 5.0.5, @playwright/test 1.64.1 (Chromium 156 only), @types/react(-dom) 19.3.0 | 2026-10-28 |
+| AG Grid / Lightweight Charts / @bufbuild/protobuf | at M1.9 (`web/pnpm-lock.yaml`) | |
+| anthropic / mcp / sentence-transformers | at M6.4 / M7.1 / M6.2 (`intel/uv.lock`) | |
+| LLM model IDs (`LLM_MODEL_FAST`, `LLM_MODEL_SMART`) | at M6.4 / M7.2 | |

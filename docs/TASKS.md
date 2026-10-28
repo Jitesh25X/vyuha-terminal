@@ -10,58 +10,62 @@ This file is the **single source of truth for what to build next**. Claude Code 
 5. Run the `done` check plus `make verify`. If the task touches risk/OMS/broker/auth/RBAC/MCP/agents, run the `risk-reviewer` subagent and fix every P0/P1.
 6. Mark the box `[x]`, append the date and a short note (`— 2026-11-02: done; PR #12; deviation: …`), and commit (Conventional Commit with the task ID).
 7. At the end of a milestone, run `/milestone-exit` before starting the next milestone's first task.
-8. Tasks marked 🧠 are hand-written by the owner. Claude Code only writes the interface, tests and benchmark, then stops.
+8. Claude Code writes all code (ADR-017). The owner reviews each task's result before saying "continue".
 
 Legend: `deps` = tasks that must be `[x]` first · `needs` = the **only** things you may install or download for this task · `done` = completion check.
 
-Current milestone: **M0**
+Current milestone: **M1**
 
 
 ## M0 — Foundations
 
-- [ ] **M0.1** Monorepo skeleton per PRD §9; `Makefile` targets; `.editorconfig`; pre-commit (gitleaks, clang-format, ruff, gofmt, prettier)
+- [x] **M0.1** Monorepo skeleton per PRD §9; `Makefile` targets; `.editorconfig`; pre-commit (gitleaks, clang-format, ruff, gofmt, prettier) — 2026-10-28: done; skeleton dirs per PRD §9 (.gitkeep), .editorconfig, pre-commit via local system hooks (skip until each tool is installed), `make lint` skips buf until M0.4
   - deps: —
   - needs: nothing (text files only; write `.pre-commit-config.yaml` but don't install hooks until the tools arrive in their own tasks)
   - done: `make invariants` green; `make test` skips cleanly for unscaffolded services
-- [ ] **M0.2** Pin toolchains & versions (fill `TECH_STACK.md §6`); devcontainer/VM setup script
+- [x] **M0.2** Pin toolchains & versions (fill `TECH_STACK.md §6`); devcontainer/VM setup script — 2026-10-28: done; `scripts/bootstrap.sh` auto-detects macOS (Homebrew) / Ubuntu 24.04 (apt), pins Go/Node/uv with sha256, `--check` mode; macOS core run installed nothing; devcontainer not added
   - deps: M0.1
   - needs: nothing yet. Write `scripts/bootstrap.sh <component>` (core|cpp|go|py|web) but run only `core` (git, jq, docker present?)
-  - done: `make bootstrap C=core` on fresh Ubuntu 24.04 succeeds and installs nothing beyond the core list
-- [ ] **M0.3** `deploy/docker-compose.dev.yml` with profiles: `core` (Postgres, NATS) now; `md` (ClickHouse), `graph` (Neo4j), `obs` (Grafana/Prometheus/Loki/OTel) started only at their milestones
+  - done: `make bootstrap C=core` works on macOS (dev machine) and installs nothing beyond the core list; Ubuntu 24.04 verification is deferred to M1.12 on the staging VM.
+- [x] **M0.3** `deploy/docker-compose.dev.yml` with profiles: `core` (Postgres, NATS) now; `md` (ClickHouse), `graph` (Neo4j), `obs` (Grafana/Prometheus/Loki/OTel) started only at their milestones — 2026-10-28: done; core digests pinned, NATS JetStream healthcheck, `make up` healthy, `make migrate` → schema version 2 (37 tables), idempotent; audit hash bug found (see notes)
   - deps: M0.2
   - needs: Docker images: `pgvector/pgvector:pg17`, `nats:2.10-alpine` only (profile `core`)
   - done: `make up` (core) healthy; `make migrate` applies Postgres DDL
-- [ ] **M0.4** Buf setup; CI `buf lint` + `buf breaking`; codegen wired into each service when it is scaffolded (M0.5 C++, M0.6 Go, M0.9 TS, M1.1 Python)
+- [x] **M0.4** Buf setup; CI `buf lint` + `buf breaking`; codegen wired into each service when it is scaffolded (M0.5 C++, M0.6 Go, M0.9 TS, M1.1 Python) — 2026-10-28: done; buf 1.75.0 via `bootstrap.sh proto`; `buf lint` + format green; `make proto-breaking` vs main green; `.github/workflows/proto.yml`; per-language `buf.gen.<lang>.yaml`, `make proto` generates only for scaffolded services; negative tests (bad field name, deleted field) caught
   - deps: M0.3
   - needs: `buf` CLI (single binary). No language plugins until each service exists (remote plugins, nothing installed locally)
   - done: `buf lint` green; each later scaffold task proves its generated code compiles
-- [ ] **M0.5** Engine CMake skeleton (presets: debug, release, asan, tsan), vcpkg manifest, GoogleTest/Benchmark, nanobind hello module
+- [x] **M0.5** Engine CMake skeleton (presets: debug, release, asan, tsan), vcpkg manifest, GoogleTest/Benchmark, nanobind hello module — 2026-10-28: done; `make test-engine` green (debug 3/3 incl. `python.import_vyuha_core`, asan 2/2), tsan green, `make bench` runs, clang-format + clang-tidy clean; vcpkg baseline 19c33061; nanobind via overlay port (owner choice)
   - deps: M0.4
   - needs: `bootstrap.sh cpp`: compiler, CMake, Ninja, vcpkg (shallow clone). vcpkg ports: `gtest`, `benchmark`, `nanobind` only
   - done: `make test-engine` green; `import vyuha_core` works
-- [ ] **M0.6** Gateway skeleton: config, health, OpenAPI codegen, pgx/sqlc, migrations runner, structured logging + OTel
+- [x] **M0.6** Gateway skeleton: config, health, OpenAPI codegen, pgx/sqlc, migrations runner, structured logging + OTel — 2026-10-28: done; `GET /api/v1/health` 200 on the real binary (503 + generic reason with Postgres stopped); `vyuhactl migrate` (golang-migrate) took over schema v2 with no re-apply; Go protobuf codegen compiles; unit + Postgres integration tests green
   - deps: M0.5
   - needs: `bootstrap.sh go`: Go toolchain. Modules: pgx, sqlc (binary), oapi-codegen, golang-migrate, OTel SDK
   - done: `GET /api/v1/health` 200
-- [ ] **M0.7** Auth: users, argon2id, TOTP enroll/verify, JWT EdDSA, refresh rotation + reuse detection, lockout, `vyuhactl user create`
+- [x] **M0.7** Auth: users, argon2id, TOTP enroll/verify, JWT EdDSA, refresh rotation + reuse detection, lockout, `vyuhactl user create` — 2026-10-28: done; auth suite green with `-race` (unit: tokens/alg-none/audience confusion, TOTP window, password policy; integration: enrollment, replay, lockout incl. 20 concurrent guesses → exactly 5 evaluated, refresh rotation + reuse revokes family, expiry, logout, reauth; HTTP e2e over a real cookie jar); mutation-checked; risk-reviewer BLOCK (2×P1) → fixed → APPROVE
   - deps: M0.6
   - needs: Go modules: argon2id, pquerna/otp, golang-jwt
   - done: Auth test suite (incl. reuse detection) green
-- [ ] **M0.8** Audit writer + `audit verify` CLI
+- [x] **M0.8** Audit writer + `audit verify` CLI — 2026-10-28: done; tamper suite green (payload/actor kind/actor id/ts/ip modified, text shifted across fields, middle row deleted, forged row, newest row deleted via anchor), append-only trigger, `vyuha_app` INSERT-only (42501), 50 concurrent writers, READ COMMITTED guard; auth events audited in-transaction; risk-reviewer BLOCK (P1: password-as-username stored) → fixed → APPROVE
   - deps: M0.7
   - needs: nothing new
   - done: Tamper test detects modified row
-- [ ] **M0.9** Web skeleton: Vite/React/TS strict, design tokens, top bar, status bar, Dockview workspace, command bar with function registry (stub panels), login + MFA screens
+- [x] **M0.8a** Auth hardening (added 2026-10-28, owner-approved): per-IP rate limits on `/auth/*` (429 + `Retry-After`, trusted-proxy aware client IP), bounded concurrent credential checks + row-lock timeout (risk-reviewer P2s from M0.7/M0.8)
   - deps: M0.8
-  - needs: `bootstrap.sh web`: Node LTS + pnpm. npm: react, react-dom, vite, typescript, dockview, cmdk, zustand, @tanstack/react-query, tailwindcss, tinykeys, vitest, @playwright/test (+ Chromium only: `playwright install chromium`)
+  - needs: nothing new (Go stdlib)
+  - done: limiter + middleware tests (burst, refill, per-IP, X-Forwarded-For only from trusted proxies); a burst of logins for one user can't take more than the attempt cap of DB connections; risk-reviewer APPROVE — 2026-10-28: done; 20-login burst peaks at 2 pooled connections with cap 2 (8 without — mutation-checked); risk-reviewer BLOCK (P1: empty TRUSTED_PROXIES made the limit global behind Caddy) → fixed → APPROVE
+- [x] **M0.9** Web skeleton: Vite/React/TS strict, design tokens, top bar, status bar, Dockview workspace, command bar with function registry (stub panels), login + MFA screens — 2026-10-28: done; `make e2e` green (Chromium, keyboard only: first login → TOTP enrollment via QR → workspace → `` ` `` + `HELP` Enter → help panel; `HELP CH`; `F1`; reload restores the session from the refresh cookie; enrolled sign-in rejects a bad code, then signs in; sign-out revokes); vitest 31 green (command grammar, IST clock, refresh single-flight — mutation-checked); `tsc` strict clean; 36 MVP functions registered (HELP real, others stub)
+  - deps: M0.8a
+  - needs: `bootstrap.sh web`: Node LTS + pnpm. npm: react, react-dom, vite, typescript, dockview, cmdk, zustand, @tanstack/react-query, tailwindcss, tinykeys, vitest, @playwright/test (+ Chromium only: `playwright install chromium`); owner-approved 2026-10-28: @types/react, @types/react-dom, @tailwindcss/vite
   - done: Playwright: login → workspace → `HELP` opens via keyboard only
-- [ ] **M0.10** CI (GitHub Actions): matrix build/test for all services, sanitizers job, artifact cache
+- [x] **M0.10** CI (GitHub Actions): matrix build/test for all services, sanitizers job, artifact cache — 2026-10-28: done; `.github/workflows/ci.yml` green on PR #1 (engine debug + clang-tidy/format, asan, tsan; gateway `-race` with Postgres + golangci-lint + codegen drift; web tsc/vitest/build/e2e; invariants + gitleaks; `ci-ok` aggregate); caches for tools, vcpkg binaries, Go, pnpm, Playwright; actions pinned by SHA. **Not enforced as required** (private repo on GitHub Free — owner choice, see deviations)
   - deps: M0.9
   - needs: nothing locally (CI caches keyed by lockfiles)
   - done: PR checks required on `main`
 
 **M0 exit:** login with TOTP works end-to-end in the browser; CI green; DB migrations apply cleanly.
-- [ ] M0 exit verified (`/milestone-exit`)
+- [x] M0 exit verified (`/milestone-exit`) — 2026-10-28: TOTP login end-to-end in Chromium (`make e2e`: enroll via QR → workspace → HELP; enrolled sign-in; reload restore; sign-out); CI green on PR #1 (all jobs + `ci-ok`; advisory, not required — M0.10 deviation); migrations 000001–000005 apply to a fresh DB and re-apply as a no-op (v5, not dirty; dev DB v5 clean); `make verify` green; `make clean-space` run (repo 213M → 162M; Docker build cache 10.7 GB pruned; free disk 24 → 34 GiB)
 
 
 ## M1 — Instruments & market data
@@ -70,7 +74,7 @@ Current milestone: **M0**
   - deps: M0 exit
   - needs: `bootstrap.sh py`: Python + uv. quant group `core`: polars, httpx, pydantic, sqlalchemy, asyncpg, exchange_calendars. Broker instrument files are fetched at runtime (not committed)
   - done: F-MD-1 ACs
-- [ ] **M1.2** 🧠 `SpscRing<T,N>` + benchmarks
+- [ ] **M1.2** `SpscRing<T,N>` + benchmarks
   - deps: M1.1
   - needs: nothing new
   - done: p99 push/pop < 50 ns; TSan clean
@@ -113,7 +117,7 @@ Current milestone: **M0**
 - [ ] **M1.12** **Staging:** VM with 2 static IPs, real Kite + Upstox sessions streaming Nifty 50 + NIFTY options
   - deps: M1.11
   - needs: Staging VM only; record only Nifty 50 + NIFTY options near expiries
-  - done: Tick→screen p95 < 400 ms measured
+  - done: Tick→screen p95 < 400 ms measured; `make bootstrap C=core` passes on the staging Ubuntu VM
 
 **M1 exit:** live data from both brokers on staging; benchmarks meet NFRs.
 - [ ] M1 exit verified (`/milestone-exit`)
@@ -125,7 +129,7 @@ Current milestone: **M0**
   - deps: M1 exit
   - needs: vcpkg: `rapidcheck`
   - done: Property tests: only legal transitions
-- [ ] **M2.2** 🧠 RiskGate framework (`ApprovedOrder` construct-only-by-gate, rule table, GateContext)
+- [ ] **M2.2** RiskGate framework (`ApprovedOrder` construct-only-by-gate, rule table, GateContext)
   - deps: M2.1
   - needs: nothing new
   - done: Compile-time test that adapters can't receive raw intents
@@ -429,3 +433,16 @@ Current milestone: **M0**
 
 ## Notes / deviations log
 - (append here: date — task — what changed vs spec and why)
+- 2026-10-28 — M0.1 — pre-commit uses `local`/`system` hooks through `scripts/precommit-tool.sh` instead of upstream hook repos, so pre-commit never downloads its own tool environments (PRD §10.1). gitleaks is enforced in CI (M0.10); locally it runs only once installed.
+- 2026-10-28 — M0.2 — done check changed from "fresh Ubuntu 24.04" to the macOS dev machine (owner develops on macOS; no `ubuntu:24.04` image download). The script still supports both OSes; Ubuntu verification moved to M1.12 on the staging VM. Devcontainer not added (task `needs:` only asks for `bootstrap.sh`).
+- 2026-10-28 — M0.3 — `make migrate` uses `scripts/migrate-pg.sh` (psql inside the postgres container) instead of the golang-migrate CLI, which is not on M0.3's `needs:` list (it arrives with Go in M0.6). It uses golang-migrate's own `schema_migrations(version, dirty)` table and dirty-flag protocol, so the M0.6 runner takes over without re-applying. `make up` falls back to `.env.example` when `.env` does not exist (dev compose has no secrets).
+- 2026-10-28 — M0.3 — **[DECISION NEEDED: audit hash chain]** In `000001_init.up.sql` `audit_chain()`, the `-- session-TZ independent` comment shares a line with `coalesce(NEW.actor_id::text,'') || '|' || NEW.actor_kind || '|' ||`, so actor_id and actor_kind are excluded from the hash (confirmed on the dev DB in a rolled-back transaction). Invariant #6 is weakened: rewriting who did an action is not detected. Recommended: fix in place in 000001 (not yet applied outside this disposable dev DB; owner must lift the settings.json edit deny), then `make down` + drop volume + `make migrate`; otherwise add migration 000003 with `CREATE OR REPLACE FUNCTION audit_chain()`. Must be settled before M0.8 (audit writer + tamper test, which must cover actor fields).
+- 2026-10-28 — M0.4 — `bootstrap.sh` gained a `proto` component (buf only, pinned + sha256) so buf installs like the other toolchains; `proto/buf.gen.yaml` split into `buf.gen.{go,python,ts}.yaml` so `make proto` generates only for services that exist; `buf format -w` applied to all protos (comment alignment only, `git diff -w` empty) and `make lint` now checks format; `make lint` requires buf from here on. Remote plugin versions get pinned when each service is scaffolded.
+- 2026-10-28 — M0.5 — nanobind comes from an overlay port (`engine/vcpkg-overlays/nanobind`) identical to the official one minus its `python3` dependency, which would have built CPython + OpenSSL/zlib/libffi/sqlite from source (owner chose this option). `robin-map` (header-only) is pulled in transitively. `vyuha_core` builds against `find_package(Python 3.13)`: on the dev Mac the python.org 3.13 framework; override with `-DPython_EXECUTABLE` (uv's 3.13 from M1.1). The Python module is built in debug/release only; asan/tsan presets turn it off because a sanitized extension cannot load into an uninstrumented interpreter. On macOS, clang-tidy 18 cannot parse the macOS 27 SDK's newer libc++, so `make lint` points it at LLVM 18's own libc++ headers (`TIDY_EXTRA`), and clang-tidy is scoped to engine sources so nanobind's compiled-in sources aren't linted. Makefile selects GCC 14 on Linux (Ubuntu 24.04 defaults to 13).
+- 2026-10-28 — M0.6 — `make migrate` now runs `vyuhactl migrate up` (golang-migrate library, pgx/v5 driver); `scripts/migrate-pg.sh` removed after confirming the takeover (version 2, not dirty, nothing re-applied). `make gen` added (proto + oapi-codegen + sqlc). sqlc binary installed by `bootstrap.sh go`; oapi-codegen is a `tool` directive in go.mod. `api/openapi.yaml` holds only `/health` + shared `Problem` schema; other endpoints are added contract-first by the task that implements them (API.md said to generate the whole file at M0). Health check added to API.md §0. `go mod tidy` downloads golang-migrate's own test deps (dktest, docker client, lib/pq) into the module cache for go.sum; `go list -deps ./cmd/...` confirms none are linked. Store integration tests run against the dev Postgres when it is up (testcontainers-go isn't on M0.6's `needs:`). **golangci-lint is not on M0.6's `needs:`**: `make lint` falls back to gofmt + go vet until the owner approves adding it.
+- 2026-10-28 — M0.7 — Migration 000003 adds `app_user.totp_last_step` (TOTP replay protection, RFC 6238 §5.2 / ASVS 2.8.4) and an index on `refresh_token(family_id)`; if the audit-hash fix goes into a new migration it becomes 000004. Choices where the spec was silent: argon2id m=64 MiB t=2 p=2; password 12–128 chars; TOTP SHA1/6/30 s ±1 step; wrong **and** replayed TOTP codes count towards the 5-failure lockout, as do reauth failures; the counter resets only after a full password + TOTP success; every attempt runs under `SELECT … FOR UPDATE` on the user row so the lockout holds under concurrency; lockout blocks new logins but does not end existing sessions (risk-reviewer P1); `/auth/mfa/enroll` and `/confirm` take the `mfa_token` in the body and confirm returns a session; `/auth/refresh` also returns `user`; every non-public route is default-deny bearer auth. `vyuhactl secrets init` (`make dev-secrets`) creates the JWT key and `VYUHA_MASTER_KEY` (0600, never printed or overwritten); `make dev-gateway` runs the gateway with `.env`. `.env.example` OTLP endpoint now empty until the obs profile (M3.8). Makefile sets `GOTOOLCHAIN=local` after an ad-hoc `go run` with the older system Go auto-downloaded a duplicate 1.27.3 toolchain (243 MB, removed). Known, accepted: audit events for auth actions arrive with the audit writer (M0.8); 423 + `locked_until` reveals that a username exists (mandated by API.md); access JWTs stay valid until expiry (≤ 15 min) after logout; the web client must serialise refresh calls (M0.9). **Open P2 (risk-reviewer), fix before M0.9:** a burst of logins for one known username queues on the row lock while each holds a pooled DB connection, which can starve other requests for seconds; fix with a small attempt semaphore or `SET LOCAL lock_timeout` mapped to 429 (needs a 429 in the contract), together with per-IP rate limiting.
+- 2026-10-28 — M0.8 — Audit hash bug fixed by option B (owner continued without choosing; ADR-018): `000004_audit_hash_v2` hashes every column length-prefixed and assigns ids under the chain lock; `000005_audit_read_committed` refuses audit inserts outside READ COMMITTED (snapshot isolation could fork the chain). `vyuhactl audit verify [-anchor id:hash]` recomputes the chain in Go independently of the DB function; `vyuhactl audit head` prints the anchor to keep off-database (a chain alone can't see its newest rows deleted). Auth events (user.create, login success/failure, mfa enroll begin/enrolled, reauth success/failure, refresh reuse, session revoked, logout) are written in the same transaction as the change; routine refresh rotation isn't audited. Unknown-user login failures store no attempted username (risk-reviewer P1: passwords typed into the username box would be kept forever). Payload keys that look like secrets are rejected. Integration tests now use `internal/testdb` (fresh migrated DB per test, force-dropped) — the M0.7 HTTP test had leaked 4 users into the dev DB (removed). `scripts/check-invariants.sh` now also flags `TRUNCATE audit_event`. Dev services still connect as the `vyuha` superuser; INSERT-only is proven for `vyuha_app` via `SET ROLE` — deploy must create login roles in `vyuha_app` (M1.12/M3.8). No `POST /audit/verify` endpoint yet (needs RBAC, M3.7). **Open P2 (risk-reviewer), with the rate-limiting work before M0.9:** unauthenticated unknown-user logins each add an audit row (unbounded growth).
+- 2026-10-28 — tooling — Owner approved golangci-lint (2.15.0, pinned + sha256 in `bootstrap.sh go`); `make lint` now requires it. First run: 14 findings fixed (unchecked Close on the JWT key write, errors.Is for ErrAbortHandler, %w wrapping, constant stty args with context, usage text out of error strings) or suppressed with a reason (operator-supplied CLI/config paths; dev-only compose credentials).
+- 2026-10-28 — M0.8a — Closes the M0.7/M0.8 P2s. Per-client limits (IPv4 address / IPv6 /64): login, mfa, enroll, confirm 30/min; refresh, logout 30/min; reauth 5/min per signed-in user → 429 `RATE_LIMITED` + `Retry-After`. Anonymous credential checks capped at max(1, pool/4) concurrent with a 2 s wait; reauth has a reserved slot; per-user row lock has a 2 s `lock_timeout`; both give 429 `AUTH_BUSY` without counting a failure. `TRUSTED_PROXIES` (new): defaults to loopback in dev, required in staging/prod ("none" = no proxy) — without it every request behind Caddy shared one bucket (risk-reviewer P1). Accepted: limits are per gateway process (one gateway in MVP); a many-IP attacker can still add unknown-user audit rows at ≤ 30/min per IP; BeginEnroll is rate-limited but outside the check cap.
+- 2026-10-28 — M0.9 — (1) Resolved versions were newer majors than the docs assumed: TypeScript 7.0 (native compiler), Vite 8 (Rolldown/Oxc, so no React plugin is needed for JSX). (2) Dockview 8 moved its React components to `dockview-react`, which is not on the approved list: the workspace uses dockview-core's DOM API (`createDockview`) and React portals instead of adding a package. (3) Not installed (owner choice): ESLint, Prettier, Testing Library/jsdom, `@vitejs/plugin-react`, `@types/node`. `make lint` for web = strict `tsc --noEmit`; the prettier pre-commit hook was removed; vitest runs in the node environment (logic only, UI covered by Playwright); config files declare `process` in `web/config.d.ts`. (4) Deferred: `openapi-typescript` (REST types hand-mirrored in `src/lib/api/types.ts`) and TS protobuf codegen (`make proto` runs `buf.gen.ts.yaml` once `@bufbuild/protobuf` arrives at M1.9). (5) `make e2e` = `scripts/e2e.sh`: fresh database, ephemeral JWT key + master key in a temp dir, gateway on 127.0.0.1:18080, Vite on 5174; dropped afterwards; the dev DB and `.env` are never touched. (6) Refresh is serialized per browser (shared promise + Web Lock `vyuha-auth-refresh`) as API.md §1 requires; tokens stay in memory. The enrollment screen shows the QR only (no plain-text seed) — invariant 5. (7) Playwright's `install chromium` also fetched its headless shell (~200 MB, same browser); no other browsers. (8) Not yet: Alt+Enter pop-out, Ctrl+W/Ctrl+Tab, link groups, layout save (later UI tasks).
+- 2026-10-28 — M0.10 — Done check "PR checks required on `main`" not met by owner choice: the repo is private on GitHub Free, where branch protection/rulesets are unavailable; `ci-ok` (single aggregate check) is advisory until the repo goes public or the plan changes — then require `ci-ok` on `main`. CI runs on Ubuntu 24.04 only (no macOS job; macOS is the dev machine). quant/intel jobs arrive with their scaffolds (M1.1, M6.x). Fixes found by the first CI run: CMake module scanning disabled (`CMAKE_CXX_SCAN_FOR_MODULES OFF`; GCC scan flags broke clang-tidy), Linux clang-tidy defines `__cpp_concepts=202002L` so clang 18 sees libstdc++ 14's `std::expected`, `internal/testdb` migrates under an advisory lock (parallel packages raced creating the cluster-wide `vyuha_app` role on a fresh Postgres), `.gitleaksignore` for one reviewed fake test key. Makefile gained per-service `lint-*` targets and `ENGINE_PRESETS`.

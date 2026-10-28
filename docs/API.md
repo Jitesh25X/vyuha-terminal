@@ -14,6 +14,9 @@
 - Timestamps: RFC 3339 UTC.
 - RBAC scoping: `scoped` means traders see their mapped accounts and own strategies, while risk_manager/admin see everything.
 
+## 0. System
+### `GET /health` — no auth → `{ status: "ok"|"degraded", version, env, checks: { postgres: { status: "ok"|"fail", latency_ms, error? } } }`. 200 when all checks pass, 503 otherwise; `error` is a generic reason, never a driver message.
+
 ## 1. Auth
 ### `POST /auth/login` — no auth
 Req `{ "username": "meera", "password": "…" }` → 200 `{ "mfa_token": "…", "mfa_enrolled": true }` (the mfa_token is valid for 5 minutes).
@@ -21,9 +24,13 @@ Errors: 401 `AUTH_INVALID` (generic message), 423 `AUTH_LOCKED` (`locked_until`)
 
 ### `POST /auth/mfa` — mfa_token in body
 Req `{ "mfa_token": "…", "totp": "123456" }` → 200 `{ "access_token": "…", "expires_in": 900, "user": {id, username, display_name, role} }` + Set-Cookie refresh.
-### `POST /auth/mfa/enroll` (first login) → `{ "otpauth_url": "…", "qr_png_base64": "…" }`; `POST /auth/mfa/enroll/confirm {totp}`.
-### `POST /auth/refresh` — cookie → new access token, rotated cookie. Reuse detected → 401 + family revoked.
-### `POST /auth/logout` — revoke current refresh token.
+### `POST /auth/mfa/enroll` (first login) `{ mfa_token }` → `{ "otpauth_url": "…", "qr_png_base64": "…" }`; `POST /auth/mfa/enroll/confirm { mfa_token, totp }` → same response as `/auth/mfa` (session + cookie). 409 `AUTH_MFA_ALREADY_ENROLLED` / `AUTH_MFA_ENROLL_NOT_STARTED`; `/auth/mfa` for a not-enrolled user → 409 `AUTH_MFA_NOT_ENROLLED`.
+### `POST /auth/refresh` — cookie → new access token + `user`, rotated cookie. Reuse detected → 401 `AUTH_REFRESH_REUSED` + family revoked; invalid/expired → 401 `AUTH_REFRESH_INVALID`; both clear the cookie. Clients must serialise refresh calls (one in flight per browser), or the second call trips reuse detection.
+### `POST /auth/logout` — revoke the current session (refresh family) → 204, cookie cleared.
+- Lockout: 5 consecutive failures (wrong password **or** wrong/replayed TOTP, including on `/auth/reauth`) → 423 `AUTH_LOCKED` with `locked_until` for 15 min. The counter resets only after a full password + TOTP success. Each TOTP code is accepted once (replay → `AUTH_INVALID`).
+- Every non-public route requires `Authorization: Bearer`; otherwise 401 `AUTH_UNAUTHENTICATED`.
+- Rate limits: login / mfa / enroll / confirm share 30 per minute per client; refresh / logout 30 per minute per client; reauth 5 per minute per signed-in user → 429 `RATE_LIMITED` with `Retry-After`. A client is its IPv4 address or IPv6 /64. The client IP is the direct peer unless the peer is in `TRUSTED_PROXIES` (default loopback; required in staging/prod), in which case the right-most untrusted `X-Forwarded-For` hop is used.
+- Anonymous credential checks (argon2 + row lock) run at most N at a time (N = a quarter of the DB pool); reauth has its own reserved slot. A request that can't get a slot within 2 s, or whose user row stays locked over 2 s, gets 429 `AUTH_BUSY` with `Retry-After: 2` and is not counted as a failure.
 ### `POST /auth/reauth` — `{ password, totp }` → `{ "reauth_token": "…", "expires_in": 300 }`. Required header `X-Reauth` for sensitive endpoints (marked 🔐).
 
 ## 2. Instruments & market data

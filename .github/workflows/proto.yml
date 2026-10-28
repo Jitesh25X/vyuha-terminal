@@ -1,0 +1,31 @@
+# Protobuf contracts: buf lint + format on every change; buf breaking against the PR base.
+# Codegen is checked by each service's own job once it is scaffolded (M0.10 CI matrix).
+name: proto
+
+on:
+  push:
+    branches: [main]
+    paths: ["proto/**", ".github/workflows/proto.yml"]
+  pull_request:
+    paths: ["proto/**", ".github/workflows/proto.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  buf:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: bufbuild/buf-action@85aebf73123b5c15fd5528aaecbf9129cddf7fa7 # v1.6.0
+        with:
+          version: 1.75.0 # keep in sync with scripts/bootstrap.sh BUF_VERSION
+          input: proto
+          lint: true
+          format: true
+          breaking: ${{ github.event_name == 'pull_request' }}
+          breaking_against: ${{ github.event.repository.clone_url }}#format=git,commit=${{ github.event.pull_request.base.sha }},subdir=proto
+          push: false
+          pr_comment: false

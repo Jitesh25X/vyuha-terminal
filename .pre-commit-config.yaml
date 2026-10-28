@@ -1,0 +1,42 @@
+# Pre-commit hooks. All hooks are `local`/`system`: they use toolchains installed by each
+# component's own task and skip cleanly until then (PRD §10.1). Nothing is downloaded by pre-commit.
+# Install the git hook once pre-commit itself is available: `pre-commit install`.
+repos:
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (secrets scan)
+        entry: scripts/precommit-tool.sh gitleaks protect --staged --redact --no-banner --
+        language: system
+        pass_filenames: false
+
+      - id: invariants
+        name: CLAUDE.md invariants
+        entry: scripts/check-invariants.sh
+        language: system
+        pass_filenames: false
+
+      - id: clang-format
+        name: clang-format
+        entry: scripts/precommit-tool.sh clang-format -i --
+        language: system
+        files: ^engine/.*\.(cc|cpp|h|hpp)$
+
+      - id: gofmt
+        name: gofmt
+        entry: scripts/precommit-tool.sh gofmt -w --
+        language: system
+        files: ^gateway/.*\.go$
+
+      - id: ruff-format
+        name: ruff format
+        entry: scripts/precommit-tool.sh ruff format --
+        language: system
+        files: ^(quant|intel)/.*\.py$
+
+      - id: ruff-check
+        name: ruff check
+        entry: scripts/precommit-tool.sh ruff check --fix --
+        language: system
+        files: ^(quant|intel)/.*\.py$
+

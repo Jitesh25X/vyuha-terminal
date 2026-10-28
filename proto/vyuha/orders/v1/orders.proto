@@ -35,8 +35,8 @@ enum Source {
   SOURCE_UNSPECIFIED = 0;
   SOURCE_MANUAL = 1;
   SOURCE_STRATEGY = 2;
-  SOURCE_AI_DRAFT = 3;   // human-submitted ticket that originated as a copilot draft
-  SOURCE_SYSTEM = 4;     // kill-switch flatten, bracket legs, auto-slice children
+  SOURCE_AI_DRAFT = 3; // human-submitted ticket that originated as a copilot draft
+  SOURCE_SYSTEM = 4; // kill-switch flatten, bracket legs, auto-slice children
 }
 
 enum OrderStatus {
@@ -56,24 +56,24 @@ enum OrderStatus {
 }
 
 message Bracket {
-  int64 stop_trigger = 1;  // price units
-  int64 stop_price = 2;    // 0 => SL-M
-  int64 target_price = 3;  // 0 => no target
+  int64 stop_trigger = 1; // price units
+  int64 stop_price = 2; // 0 => SL-M
+  int64 target_price = 3; // 0 => no target
 }
 
 message OrderIntent {
   string client_order_id = 1;
-  string account_id = 2;       // uuid or "paper"
+  string account_id = 2; // uuid or "paper"
   string user_id = 3;
-  string strategy_id = 4;      // empty for manual
+  string strategy_id = 4; // empty for manual
   Source source = 5;
   uint64 instrument_id = 6;
   Side side = 7;
-  int64 qty = 8;               // units
+  int64 qty = 8; // units
   OrderType order_type = 9;
   Product product = 10;
   Validity validity = 11;
-  int64 price = 12;            // price units, 0 if not applicable
+  int64 price = 12; // price units, 0 if not applicable
   int64 trigger_price = 13;
   double market_protection_pct = 14;
   optional Bracket bracket = 15;
@@ -82,10 +82,10 @@ message OrderIntent {
 }
 
 message RiskReason {
-  string code = 1;      // R-*
+  string code = 1; // R-*
   string message = 2;
-  string limit = 3;     // decimal string
-  string current = 4;   // decimal string
+  string limit = 3; // decimal string
+  string current = 4; // decimal string
   bool hard = 5;
 }
 
@@ -98,8 +98,8 @@ message GateStamp {
 message IntentResult {
   string order_id = 1;
   OrderStatus status = 2;
-  repeated RiskReason reasons = 3;   // hard failures
-  repeated RiskReason warnings = 4;  // soft limits
+  repeated RiskReason reasons = 3; // hard failures
+  repeated RiskReason warnings = 4; // soft limits
   repeated string child_order_ids = 5;
   GateStamp stamp = 6;
 }

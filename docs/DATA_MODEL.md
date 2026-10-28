@@ -44,7 +44,7 @@ Four stores, each with one job:
 | `feed_source`, `story` | Ingestion | `exchange` feeds can't be enabled until `tos_reviewed` |
 | `context_alert` | Position-impact alerts | Unique per (story, user) |
 | `copilot_session`, `copilot_message` | AI conversations + tool calls | Token usage per message |
-| `audit_event` | Hash-chained append-only audit | Trigger computes chain; UPDATE/DELETE raise |
+| `audit_event` | Hash-chained append-only audit | Trigger assigns id under the chain lock and computes hash v2 (all columns, length-prefixed; `000004`); UPDATE/DELETE raise; `vyuha_app` INSERT-only |
 
 ### 2.1 Projections (computed, not stored as truth)
 - **Intraday position** per `(account, instrument, product)` = Σ signed fills (today) + previous EOD `net_qty` for carry-forward products (NRML/CNC). Average price uses the weighted-average-cost method; realised P&L is recognised on reducing trades.

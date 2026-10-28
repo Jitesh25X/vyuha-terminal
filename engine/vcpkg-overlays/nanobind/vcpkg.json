@@ -1,0 +1,14 @@
+{
+  "name": "nanobind",
+  "version-semver": "3.1.0",
+  "description": "Tiny and efficient C++/Python bindings. Vyuha overlay: identical to the official port at the builtin-baseline, minus the python3 dependency (that port builds CPython from source); the module builds against the Python that imports it. See README.md.",
+  "homepage": "https://nanobind.readthedocs.io/en/latest/",
+  "license": "BSD-3-Clause",
+  "dependencies": [
+    "robin-map",
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    }
+  ]
+}

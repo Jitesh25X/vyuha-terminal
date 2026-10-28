@@ -57,17 +57,32 @@ Claude Code: you may add **Proposed** entries. Only the owner moves them to Acce
 ### ADR-014 — Lean footprint, just-in-time downloads — Accepted — 2026-10-27
 **Decision:** Each task in `TASKS.md` declares a `needs:` allow-list; nothing else is installed or downloaded. Compose profiles start services only when their milestone needs them. CPU-only ML wheels; one embedding model; market data only per job spec. `make clean-space` at each milestone exit.
 
+### ADR-015 — Personal use first — Accepted — 2026-10-28
+**Decision:** For now Vyuha is developed and used **only by the owner, on the owner's own broker accounts**. Multi-user/desk features (roles, account mapping, per-account static IPs) stay in the design and get built as specified. But no other person's account is connected and no other user trades live until the legal/account-structure question (D-2) is answered with a lawyer.
+**Consequences:** M3 live pilot and M9 burn-in run with the owner only. The D-2 lawyer check moves from "before M3" to "before onboarding anyone else".
+
+### ADR-016 — Private repo until licensed — Accepted — 2026-10-28
+**Decision:** Keep the repository **private**. Choose and add a license (LICENSE, NOTICE, DISCLAIMER) **before** making it public on GitHub. AGPL-3.0 remains the recommendation. No LICENSE file until then.
+
+### ADR-017 — Build mode: Claude Code writes all code — Accepted — 2026-10-28
+**Decision:** Claude Code implements every task, including the former hand-written learning modules (M1.2 SPSC ring, M2.2 RiskGate framework). The owner reviews each task before continuing.
+
+### ADR-018 — Audit hash chain v2 via a new migration — Accepted (default; owner may revisit) — 2026-10-28
+**Context:** `000001_init.up.sql`'s `audit_chain()` left `actor_id`/`actor_kind` out of the hash (a `--` comment swallowed that line), joined fields with `|` (text could shift between fields without changing the hash) and assigned ids before taking the chain lock (concurrent inserts could chain out of id order). `000001` is protected from edits in `.claude/settings.json`; the owner was offered (A) fixing 000001 in place or (B) a new migration, and continued without choosing.
+**Decision:** (B) `000004_audit_hash_v2` replaces `audit_chain()`: every column incl. `ip` is hashed, each field length-prefixed (`len:value`, NULL = `-`), ids assigned inside the trigger after the advisory lock. It refuses to run if `audit_event` already has rows. `gateway/internal/audit/verify.go` recomputes the same canonical form independently in Go. A chain cannot reveal deletion of its newest rows, so `vyuhactl audit head` prints an `id:hash` anchor to keep outside the database and `audit verify -anchor` checks it.
+**Consequences:** 000001 still contains the v1 function text (superseded). If the owner later prefers (A), fold 000004 into 000001 before any non-dev database exists.
+
 ---
 
 ## Open (owner to decide) — mirrored from PRD §13
 | # | Topic | Default in code until decided |
 |---|---|---|
 | D-1 | Product name | "Vyuha" |
-| D-2 | Legal/account structure, operator empanelment | One account per holder; live limited to owner's account until resolved |
-| D-3 | License | AGPL-3.0 (LICENSE file not added until decided) |
-| D-5 | Build mode / hand-written modules | Claude Code writes; 🧠 modules in ROADMAP for owner |
+| D-2 | Legal/account structure, operator empanelment | **Deferred** (ADR-015): personal use only; resolve with a lawyer before onboarding anyone else |
+| D-3 | License | **Deferred** (ADR-016): repo private; pick before going public (AGPL-3.0 recommended) |
+| D-5 | Build mode | **Resolved** (ADR-017): Claude Code writes all |
 | D-6 | LLM provider & privacy | Anthropic API; aggregated data only |
-| D-7 | Exchange announcements / ban list source | Disabled scraping; official daily files where terms allow |
+| D-7 | Exchange announcements / ban list source | **Still open, needed before M1.1**. Default: scraping disabled; official daily exchange files where terms allow |
 | D-8 | MARKET order handling | Allowed with market protection 2% |
 | D-9 | Hosting provider | Any Mumbai-region VM with multiple static IPs |
 | D-10 | Auto-flatten | Off |

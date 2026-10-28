@@ -44,8 +44,8 @@ enum Channel {
 
 message Subscribe {
   Channel channel = 1;
-  repeated string keys = 2;   // instrument ids or scope ids as strings
-  uint32 conflate_ms = 3;     // 50..1000, default 250
+  repeated string keys = 2; // instrument ids or scope ids as strings
+  uint32 conflate_ms = 3; // 50..1000, default 250
 }
 
 message Unsubscribe {
@@ -62,7 +62,7 @@ message TokenRefresh {
 }
 
 message ServerMsg {
-  uint32 req_id = 1;   // echoes request where applicable
+  uint32 req_id = 1; // echoes request where applicable
   oneof body {
     Welcome welcome = 10;
     Snapshot snapshot = 11;
@@ -101,12 +101,12 @@ message Item {
     vyuha.risk.v1.RiskSummary risk = 6;
     vyuha.risk.v1.KillSwitchState kill = 7;
     SystemStatus system = 8;
-    string json = 9;   // ctx alerts / pnl series (small, infrequent)
+    string json = 9; // ctx alerts / pnl series (small, infrequent)
   }
 }
 
 message SystemStatus {
-  string market_state = 1;  // pre_open | open | closed | holiday
+  string market_state = 1; // pre_open | open | closed | holiday
   repeated vyuha.marketdata.v1.FeedStatus feeds = 2;
   bool engine_ok = 3;
   int64 data_latency_ms = 4;
@@ -114,19 +114,19 @@ message SystemStatus {
 
 message Alert {
   string id = 1;
-  string severity = 2;   // info | warn | critical
+  string severity = 2; // info | warn | critical
   string title = 3;
   string body_json = 4;
   int64 ts_ms = 5;
 }
 
 message UiCommand {
-  string kind = 1;          // "open_ticket" | "open_panel"
-  string payload_json = 2;  // e.g. ticket draft
+  string kind = 1; // "open_ticket" | "open_panel"
+  string payload_json = 2; // e.g. ticket draft
 }
 
 message Error {
-  string code = 1;   // MD_NOT_ENTITLED | SLOW_CONSUMER | AUTH_EXPIRED | BAD_REQUEST
+  string code = 1; // MD_NOT_ENTITLED | SLOW_CONSUMER | AUTH_EXPIRED | BAD_REQUEST
   string message = 2;
 }
 

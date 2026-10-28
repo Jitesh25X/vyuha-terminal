@@ -1,5 +1,5 @@
 # Dev infrastructure. Application services run on the host during development (make dev-*).
-# Pin image digests at M0 (TECH_STACK.md §6); tags below are floors.
+# Image digests are pinned when a profile is first used (TECH_STACK.md §6); unpinned tags are floors.
 # LEAN: services are grouped into profiles and pulled/started only when their milestone needs them:
 #   core  = postgres, nats            (M0+)
 #   md    = clickhouse                 (M1+)
@@ -11,7 +11,7 @@ name: vyuha-dev
 services:
   postgres:
     profiles: ["core"]
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
     environment:
       POSTGRES_USER: vyuha
       POSTGRES_PASSWORD: vyuha
@@ -37,10 +37,14 @@ services:
 
   nats:
     profiles: ["core"]
-    image: nats:2.10-alpine
+    image: nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
     command: ["-js", "-sd", "/data", "-m", "8222"]
     ports: ["4222:4222", "8222:8222"]
     volumes: [natsdata:/data]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 5s
+      retries: 20
 
   neo4j:
     profiles: ["graph"]

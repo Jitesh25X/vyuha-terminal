@@ -1,0 +1,169 @@
+# CI: one job per service plus sanitizers, all through the same `make` targets used locally.
+# Toolchains come from scripts/bootstrap.sh (pinned + sha256) so CI and dev machines match.
+# Branch protection requires the single `ci-ok` check, so jobs can be added or renamed freely.
+# quant/ and intel/ jobs are added by the tasks that scaffold them (M1.1, M6.x).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  VYUHA_TOOLS_DIR: /home/runner/.local/share/vyuha-tools
+  VCPKG_ROOT: /home/runner/.local/share/vyuha-tools/vcpkg
+
+jobs:
+  hygiene:
+    name: invariants + secrets scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: scripts/check-invariants.sh
+      - name: gitleaks (pinned + sha256)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          tmp="$(mktemp -d)"
+          curl -fsSL -o "$tmp/gl.tgz" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $tmp/gl.tgz" | sha256sum -c -
+          tar -C "$tmp" -xzf "$tmp/gl.tgz" gitleaks
+          "$tmp/gitleaks" git --redact --no-banner --verbose .
+
+  engine:
+    name: engine (${{ matrix.preset }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, asan, tsan]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VYUHA_TOOLS_DIR }}
+          key: tools-cpp-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'engine/vcpkg.json') }}
+      # vcpkg binary cache: ports (gtest, benchmark, nanobind) build once per manifest change.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-gcc14-${{ hashFiles('engine/vcpkg.json', 'engine/vcpkg-configuration.json', 'engine/vcpkg-overlays/**') }}
+      - run: |
+          scripts/bootstrap.sh cpp
+          echo "$VYUHA_TOOLS_DIR/bin" >> "$GITHUB_PATH"
+      # Ubuntu 24.04 runners use 32-bit mmap ASLR, which TSan's shadow memory layout can't handle.
+      - if: matrix.preset == 'tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - run: make test-engine ENGINE_PRESETS=${{ matrix.preset }}
+      - if: matrix.preset == 'debug'
+        run: make lint-engine
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: engine-${{ matrix.preset }}-logs
+          path: |
+            engine/build/${{ matrix.preset }}/Testing/
+            engine/build/${{ matrix.preset }}/vcpkg-manifest-install.log
+          retention-days: 7
+
+  gateway:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOFLAGS: -race
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VYUHA_TOOLS_DIR }}
+          key: tools-go-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh') }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('gateway/go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+      - run: |
+          scripts/bootstrap.sh proto
+          scripts/bootstrap.sh go
+          echo "$VYUHA_TOOLS_DIR/bin" >> "$GITHUB_PATH"
+      - run: make up # postgres + nats (pinned digests); store/auth integration tests need Postgres
+      - run: make test-gateway
+      - run: make lint-gateway
+      - name: generated code is up to date (oapi-codegen, sqlc)
+        run: |
+          make gen
+          git diff --exit-code -- gateway
+
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VYUHA_TOOLS_DIR }}
+          key: tools-web-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh') }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('gateway/go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+      # The e2e builds the gateway, so this job needs Go and buf as well as Node.
+      - run: |
+          scripts/bootstrap.sh proto
+          scripts/bootstrap.sh go
+          scripts/bootstrap.sh web
+          echo "$VYUHA_TOOLS_DIR/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('web/pnpm-lock.yaml') }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('web/pnpm-lock.yaml') }}
+      - working-directory: web
+        run: |
+          pnpm config set store-dir ~/.local/share/pnpm/store
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps --only-shell chromium
+      - run: make lint-web test-web
+      - working-directory: web
+        run: pnpm build
+      - run: make up
+      - run: make e2e
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright
+          path: web/test-results/
+          retention-days: 7
+
+  # The one required status check on main.
+  ci-ok:
+    if: always()
+    needs: [hygiene, engine, gateway, web]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = false ]
