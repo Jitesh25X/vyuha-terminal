@@ -13,6 +13,7 @@ security:
 tags:
   - name: system
   - name: auth
+  - name: brokers
 paths:
   /health:
     get:
@@ -159,6 +160,61 @@ paths:
               schema: { $ref: "#/components/schemas/ReauthResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "423": { $ref: "#/components/responses/Locked" }
+  /brokers/{account_id}/login-url:
+    get:
+      operationId: getBrokerLoginUrl
+      summary: Daily broker login URL (Kite Connect login / Upstox OAuth dialog)
+      description: |
+        Admin, or a trader mapped to the account with can_trade. The URL carries a signed, single-use
+        `state` (10 minutes) that the callback checks; the broker's own 2FA happens on its site.
+      tags: [brokers]
+      parameters:
+        - name: account_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Login URL
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BrokerLoginUrl" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: The account has no broker login (BROKER_NO_LOGIN, e.g. a sim account)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+  /brokers/callback/zerodha:
+    get:
+      operationId: brokerCallbackZerodha
+      summary: Kite Connect redirect; exchanges request_token and starts the engine session
+      description: |
+        Browser redirect from Kite (no bearer token: the signed `state` identifies the user). Always
+        redirects to `/terminal?broker_login=ok&account=<id>` or `/terminal?broker_login=error&code=<CODE>`.
+      tags: [brokers]
+      security: []
+      parameters:
+        - { name: request_token, in: query, required: false, schema: { type: string, maxLength: 128 } }
+        - { name: status, in: query, required: false, schema: { type: string, maxLength: 32 } }
+        - { name: action, in: query, required: false, schema: { type: string, maxLength: 32 } }
+        - { name: state, in: query, required: false, schema: { type: string, maxLength: 512 } }
+      responses:
+        "302": { $ref: "#/components/responses/BrokerLoginRedirect" }
+  /brokers/callback/upstox:
+    get:
+      operationId: brokerCallbackUpstox
+      summary: Upstox OAuth redirect; exchanges the code and starts the engine session
+      description: Same contract as the Kite callback.
+      tags: [brokers]
+      security: []
+      parameters:
+        - { name: code, in: query, required: false, schema: { type: string, maxLength: 128 } }
+        - { name: state, in: query, required: false, schema: { type: string, maxLength: 512 } }
+      responses:
+        "302": { $ref: "#/components/responses/BrokerLoginRedirect" }
 components:
   parameters:
     RefreshCookie:
@@ -171,6 +227,21 @@ components:
       description: "vyuha_rt refresh cookie (HttpOnly; Secure; SameSite=Strict; Path=/api/v1/auth)"
       schema: { type: string }
   responses:
+    BrokerLoginRedirect:
+      description: Back to the terminal with the outcome (never carries tokens)
+      headers:
+        Location:
+          schema: { type: string }
+    Forbidden:
+      description: Not allowed for this user or account (FORBIDDEN)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: No such resource (NOT_FOUND)
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
     SessionStarted:
       description: Session started or refreshed; sets the rotated refresh cookie
       headers:
@@ -294,6 +365,11 @@ components:
       properties:
         reauth_token: { type: string }
         expires_in: { type: integer, description: "Seconds" }
+    BrokerLoginUrl:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, format: uri }
     Problem:
       type: object
       description: RFC 9457 problem details.

@@ -34,6 +34,9 @@ var publicRoutes = map[string]bool{
 	"POST " + BaseURL + "/auth/mfa/enroll/confirm": true,
 	"POST " + BaseURL + "/auth/refresh":            true,
 	"POST " + BaseURL + "/auth/logout":             true,
+	// Broker redirects: top-level navigations without a bearer token; the signed state identifies the user.
+	"GET " + BaseURL + "/brokers/callback/zerodha": true,
+	"GET " + BaseURL + "/brokers/callback/upstox":  true,
 }
 
 // ClaimsFrom returns the authenticated user's access-token claims, or nil on public routes.
@@ -112,7 +115,7 @@ func isTrusted(a netip.Addr, trusted []netip.Prefix) bool {
 // allow a desk behind one NAT to log in together at market open.
 const (
 	credentialBurst = 30 // login, mfa, enroll, confirm: 30 per minute per client
-	sessionBurst    = 30 // refresh, logout: 30 per minute per client
+	sessionBurst    = 30 // refresh, logout, broker callbacks: 30 per minute per client
 	reauthBurst     = 5  // reauth: 5 per minute per signed-in user (keyed by token subject, not IP)
 )
 
@@ -121,7 +124,10 @@ var (
 		"POST " + BaseURL + "/auth/login": true, "POST " + BaseURL + "/auth/mfa": true,
 		"POST " + BaseURL + "/auth/mfa/enroll": true, "POST " + BaseURL + "/auth/mfa/enroll/confirm": true,
 	}
-	sessionRoutes = map[string]bool{"POST " + BaseURL + "/auth/refresh": true, "POST " + BaseURL + "/auth/logout": true}
+	sessionRoutes = map[string]bool{
+		"POST " + BaseURL + "/auth/refresh": true, "POST " + BaseURL + "/auth/logout": true,
+		"GET " + BaseURL + "/brokers/callback/zerodha": true, "GET " + BaseURL + "/brokers/callback/upstox": true,
+	}
 )
 
 // rateLimitAuth applies the per-IP limits; it must run after captureClient.

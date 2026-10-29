@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -96,6 +97,11 @@ func (e UserRole) Valid() bool {
 	default:
 		return false
 	}
+}
+
+// BrokerLoginUrl defines model for BrokerLoginUrl.
+type BrokerLoginUrl struct {
+	Url string `json:"url"`
 }
 
 // Check defines model for Check.
@@ -217,8 +223,14 @@ type RefreshCookie = string
 // Conflict RFC 9457 problem details.
 type Conflict = Problem
 
+// Forbidden RFC 9457 problem details.
+type Forbidden = Problem
+
 // Locked RFC 9457 problem details.
 type Locked = Problem
+
+// NotFound RFC 9457 problem details.
+type NotFound = Problem
 
 // SessionStarted defines model for SessionStarted.
 type SessionStarted = SessionResponse
@@ -237,6 +249,20 @@ type LogoutParams struct {
 // RefreshSessionParams defines parameters for RefreshSession.
 type RefreshSessionParams struct {
 	VyuhaRt *RefreshCookie `form:"vyuha_rt,omitempty" json:"vyuha_rt,omitempty"`
+}
+
+// BrokerCallbackUpstoxParams defines parameters for BrokerCallbackUpstox.
+type BrokerCallbackUpstoxParams struct {
+	Code  *string `form:"code,omitempty" json:"code,omitempty"`
+	State *string `form:"state,omitempty" json:"state,omitempty"`
+}
+
+// BrokerCallbackZerodhaParams defines parameters for BrokerCallbackZerodha.
+type BrokerCallbackZerodhaParams struct {
+	RequestToken *string `form:"request_token,omitempty" json:"request_token,omitempty"`
+	Status       *string `form:"status,omitempty" json:"status,omitempty"`
+	Action       *string `form:"action,omitempty" json:"action,omitempty"`
+	State        *string `form:"state,omitempty" json:"state,omitempty"`
 }
 
 // LoginJSONRequestBody defines body for Login for application/json ContentType.
@@ -277,6 +303,15 @@ type ServerInterface interface {
 	// RefreshSession Rotates the refresh cookie and returns a new access token
 	// (POST /auth/refresh)
 	RefreshSession(w http.ResponseWriter, r *http.Request, params RefreshSessionParams)
+	// BrokerCallbackUpstox Upstox OAuth redirect; exchanges the code and starts the engine session
+	// (GET /brokers/callback/upstox)
+	BrokerCallbackUpstox(w http.ResponseWriter, r *http.Request, params BrokerCallbackUpstoxParams)
+	// BrokerCallbackZerodha Kite Connect redirect; exchanges request_token and starts the engine session
+	// (GET /brokers/callback/zerodha)
+	BrokerCallbackZerodha(w http.ResponseWriter, r *http.Request, params BrokerCallbackZerodhaParams)
+	// GetBrokerLoginUrl Daily broker login URL (Kite Connect login / Upstox OAuth dialog)
+	// (GET /brokers/{account_id}/login-url)
+	GetBrokerLoginUrl(w http.ResponseWriter, r *http.Request, accountId openapi_types.UUID)
 	// GetHealth Gateway health with dependency checks
 	// (GET /health)
 	GetHealth(w http.ResponseWriter, r *http.Request)
@@ -431,6 +466,150 @@ func (siw *ServerInterfaceWrapper) RefreshSession(w http.ResponseWriter, r *http
 	handler.ServeHTTP(w, r)
 }
 
+// BrokerCallbackUpstox operation middleware
+func (siw *ServerInterfaceWrapper) BrokerCallbackUpstox(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params BrokerCallbackUpstoxParams
+
+	// ------------- Optional query parameter "code" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "code", r.URL.Query(), &params.Code, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "code"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "code", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "state", r.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "state"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.BrokerCallbackUpstox(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// BrokerCallbackZerodha operation middleware
+func (siw *ServerInterfaceWrapper) BrokerCallbackZerodha(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params BrokerCallbackZerodhaParams
+
+	// ------------- Optional query parameter "request_token" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "request_token", r.URL.Query(), &params.RequestToken, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "request_token"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "request_token", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "action" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "action", r.URL.Query(), &params.Action, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "action"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "action", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "state", r.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "state"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.BrokerCallbackZerodha(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetBrokerLoginUrl operation middleware
+func (siw *ServerInterfaceWrapper) GetBrokerLoginUrl(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "account_id" -------------
+	var accountId openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "account_id", r.PathValue("account_id"), &accountId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "account_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBrokerLoginUrl(w, r, accountId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetHealth operation middleware
 func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Request) {
 
@@ -573,13 +752,27 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/refresh", wrapper.RefreshSession)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/logout", wrapper.Logout)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/reauth", wrapper.Reauth)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/brokers/{account_id}/login-url", wrapper.GetBrokerLoginUrl)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/brokers/callback/zerodha", wrapper.BrokerCallbackZerodha)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/brokers/callback/upstox", wrapper.BrokerCallbackUpstox)
 
 	return m
 }
 
+type BrokerLoginRedirectResponseHeaders struct {
+	Location *string
+}
+type BrokerLoginRedirectResponse struct {
+	Headers BrokerLoginRedirectResponseHeaders
+}
+
 type ConflictApplicationProblemPlusJSONResponse Problem
 
+type ForbiddenApplicationProblemPlusJSONResponse Problem
+
 type LockedApplicationProblemPlusJSONResponse Problem
+
+type NotFoundApplicationProblemPlusJSONResponse Problem
 
 type SessionStartedResponseHeaders struct {
 	SetCookie *string
@@ -1131,6 +1324,126 @@ func (response RefreshSession429ApplicationProblemPlusJSONResponse) VisitRefresh
 	return err
 }
 
+type BrokerCallbackUpstoxRequestObject struct {
+	Params BrokerCallbackUpstoxParams
+}
+
+type BrokerCallbackUpstoxResponseObject interface {
+	VisitBrokerCallbackUpstoxResponse(w http.ResponseWriter) error
+}
+
+type BrokerCallbackUpstox302Response = BrokerLoginRedirectResponse
+
+func (response BrokerCallbackUpstox302Response) VisitBrokerCallbackUpstoxResponse(w http.ResponseWriter) error {
+	if response.Headers.Location != nil {
+		w.Header().Set("Location", fmt.Sprint(*response.Headers.Location))
+	}
+	w.WriteHeader(302)
+	return nil
+}
+
+type BrokerCallbackZerodhaRequestObject struct {
+	Params BrokerCallbackZerodhaParams
+}
+
+type BrokerCallbackZerodhaResponseObject interface {
+	VisitBrokerCallbackZerodhaResponse(w http.ResponseWriter) error
+}
+
+type BrokerCallbackZerodha302Response = BrokerLoginRedirectResponse
+
+func (response BrokerCallbackZerodha302Response) VisitBrokerCallbackZerodhaResponse(w http.ResponseWriter) error {
+	if response.Headers.Location != nil {
+		w.Header().Set("Location", fmt.Sprint(*response.Headers.Location))
+	}
+	w.WriteHeader(302)
+	return nil
+}
+
+type GetBrokerLoginUrlRequestObject struct {
+	AccountId openapi_types.UUID `json:"account_id"`
+}
+
+type GetBrokerLoginUrlResponseObject interface {
+	VisitGetBrokerLoginUrlResponse(w http.ResponseWriter) error
+}
+
+type GetBrokerLoginUrl200JSONResponse BrokerLoginUrl
+
+func (response GetBrokerLoginUrl200JSONResponse) VisitGetBrokerLoginUrlResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBrokerLoginUrl401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response GetBrokerLoginUrl401ApplicationProblemPlusJSONResponse) VisitGetBrokerLoginUrlResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBrokerLoginUrl403ApplicationProblemPlusJSONResponse struct {
+	ForbiddenApplicationProblemPlusJSONResponse
+}
+
+func (response GetBrokerLoginUrl403ApplicationProblemPlusJSONResponse) VisitGetBrokerLoginUrlResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBrokerLoginUrl404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response GetBrokerLoginUrl404ApplicationProblemPlusJSONResponse) VisitGetBrokerLoginUrlResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBrokerLoginUrl409ApplicationProblemPlusJSONResponse Problem
+
+func (response GetBrokerLoginUrl409ApplicationProblemPlusJSONResponse) VisitGetBrokerLoginUrlResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetHealthRequestObject struct {
 }
 
@@ -1189,6 +1502,15 @@ type StrictServerInterface interface {
 	// RefreshSession Rotates the refresh cookie and returns a new access token
 	// (POST /auth/refresh)
 	RefreshSession(ctx context.Context, request RefreshSessionRequestObject) (RefreshSessionResponseObject, error)
+	// BrokerCallbackUpstox Upstox OAuth redirect; exchanges the code and starts the engine session
+	// (GET /brokers/callback/upstox)
+	BrokerCallbackUpstox(ctx context.Context, request BrokerCallbackUpstoxRequestObject) (BrokerCallbackUpstoxResponseObject, error)
+	// BrokerCallbackZerodha Kite Connect redirect; exchanges request_token and starts the engine session
+	// (GET /brokers/callback/zerodha)
+	BrokerCallbackZerodha(ctx context.Context, request BrokerCallbackZerodhaRequestObject) (BrokerCallbackZerodhaResponseObject, error)
+	// GetBrokerLoginUrl Daily broker login URL (Kite Connect login / Upstox OAuth dialog)
+	// (GET /brokers/{account_id}/login-url)
+	GetBrokerLoginUrl(ctx context.Context, request GetBrokerLoginUrlRequestObject) (GetBrokerLoginUrlResponseObject, error)
 	// GetHealth Gateway health with dependency checks
 	// (GET /health)
 	GetHealth(ctx context.Context, request GetHealthRequestObject) (GetHealthResponseObject, error)
@@ -1433,6 +1755,84 @@ func (sh *strictHandler) RefreshSession(w http.ResponseWriter, r *http.Request, 
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(RefreshSessionResponseObject); ok {
 		if err := validResponse.VisitRefreshSessionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// BrokerCallbackUpstox operation middleware
+func (sh *strictHandler) BrokerCallbackUpstox(w http.ResponseWriter, r *http.Request, params BrokerCallbackUpstoxParams) {
+	var request BrokerCallbackUpstoxRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.BrokerCallbackUpstox(ctx, request.(BrokerCallbackUpstoxRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "BrokerCallbackUpstox")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(BrokerCallbackUpstoxResponseObject); ok {
+		if err := validResponse.VisitBrokerCallbackUpstoxResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// BrokerCallbackZerodha operation middleware
+func (sh *strictHandler) BrokerCallbackZerodha(w http.ResponseWriter, r *http.Request, params BrokerCallbackZerodhaParams) {
+	var request BrokerCallbackZerodhaRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.BrokerCallbackZerodha(ctx, request.(BrokerCallbackZerodhaRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "BrokerCallbackZerodha")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(BrokerCallbackZerodhaResponseObject); ok {
+		if err := validResponse.VisitBrokerCallbackZerodhaResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetBrokerLoginUrl operation middleware
+func (sh *strictHandler) GetBrokerLoginUrl(w http.ResponseWriter, r *http.Request, accountId openapi_types.UUID) {
+	var request GetBrokerLoginUrlRequestObject
+
+	request.AccountId = accountId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetBrokerLoginUrl(ctx, request.(GetBrokerLoginUrlRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBrokerLoginUrl")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBrokerLoginUrlResponseObject); ok {
+		if err := validResponse.VisitGetBrokerLoginUrlResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

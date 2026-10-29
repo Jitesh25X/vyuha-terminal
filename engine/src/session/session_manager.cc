@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <span>
 #include <stop_token>
 #include <string>
@@ -69,8 +70,16 @@ FeedMode max_mode(const Requesters& by) noexcept {
   return mode;
 }
 
+// Feed ids start at a random point in [1, 2^31] each process, so ids from a previous run (still in
+// md_last or in the gateway's feed map) are not handed out again.
+std::uint32_t random_feed_seed() {
+  std::random_device rd;
+  return std::uniform_int_distribution<std::uint32_t>(1, 1U << 31)(rd);
+}
+
 struct Session {
   SessionRequest req;
+  std::uint32_t feed_id{0};
   SessionState state{SessionState::kDisconnected};
   std::string detail;
   TickRing* ring{nullptr};
@@ -93,6 +102,9 @@ struct SessionManager::Impl {
   const IClock& clock;
   mutable std::mutex mu;
   std::vector<TickRing*> free_rings;
+  // Seeded randomly per process: ids must not repeat across engine restarts either, because ticks in
+  // md_last (and the gateway's feed map) outlive a restart (ADR-020).
+  std::uint32_t next_feed_id{random_feed_seed()};
   std::map<std::string, Session, std::less<>> sessions;
   std::condition_variable_any cv;
   std::jthread applier;
@@ -109,6 +121,7 @@ struct SessionManager::Impl {
 
   static SessionStatus status_of(const Session& s) {
     SessionStatus st{.account_id = s.req.account_id,
+                     .feed_id = s.feed_id,
                      .broker = s.req.broker,
                      .state = s.state,
                      .detail = s.detail,
@@ -169,6 +182,7 @@ struct SessionManager::Impl {
       tc.access_token = SecretRef(s.req.access_token.reveal());
       tc.source_ip = s.req.source_ip;
       tc.backoff = cfg.backoff;
+      tc.feed_id = s.feed_id;
       s.kite_feed = std::make_unique<kite::KiteTicker>(std::move(tc), kite::TokenMap(std::move(tokens)),
                                                        *s.ring, clock);
       s.subscribed = subs.size();
@@ -194,6 +208,7 @@ struct SessionManager::Impl {
       fc.source_ip = s.req.source_ip;
       fc.plan = s.req.upstox_plan;
       fc.backoff = cfg.backoff;
+      fc.feed_id = s.feed_id;
       s.upstox_feed = std::make_unique<upstox::UpstoxFeed>(std::move(fc), upstox::KeyMap(std::move(keys)),
                                                            *s.ring, clock);
       s.subscribed = subs.size();
@@ -303,6 +318,7 @@ std::expected<SessionStatus, Error> SessionManager::start(SessionRequest req) {
   }
   Session s;
   s.req = std::move(req);
+  s.feed_id = ++impl_->next_feed_id;  // unique: a stale id can't attribute ticks to a new session
   const std::string account = s.req.account_id;
   if (auto ok = Impl::preflight(s); !ok) {
     if (s.state == SessionState::kError) {  // keep the refusal visible (status bar) and alert

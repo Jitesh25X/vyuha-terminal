@@ -46,6 +46,9 @@ message Tick {
   optional double theta = 23;
   optional double vega = 24;
   uint64 seq = 25; // engine sequence for gap detection
+  // Engine session (broker account) whose feed received this tick; see SessionInfo.feed_id.
+  // The gateway shows a tick only to users entitled through that account (ADR-009).
+  uint32 feed_id = 26;
 }
 
 message Bar {

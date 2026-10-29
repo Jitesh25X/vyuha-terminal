@@ -169,4 +169,29 @@ TEST(SessionManager, RingPoolBoundsDataSessionsAndIsReturnedOnStop) {
   EXPECT_TRUE(f.mgr->start(Fixture::broker("a2", BrokerKind::kUpstox, "127.0.0.1")).has_value());
 }
 
+TEST(SessionManager, FeedIdsAreUniquePerStartAndNeverReused) {
+  Fixture f;
+  const auto a = f.mgr->start(Fixture::broker("a1", BrokerKind::kZerodha, "127.0.0.1"));
+  const auto b = f.mgr->start(Fixture::broker("a2", BrokerKind::kUpstox, "127.0.0.1"));
+  ASSERT_TRUE(a.has_value() && b.has_value());
+  EXPECT_NE(a->feed_id, 0U);
+  EXPECT_NE(a->feed_id, b->feed_id);
+  // The daily re-login restarts the session: ticks still in flight from the old feed must not be
+  // attributed to the new one, so the id changes.
+  ASSERT_TRUE(f.mgr->stop("a1").has_value());
+  const auto again = f.mgr->start(Fixture::broker("a1", BrokerKind::kZerodha, "127.0.0.1"));
+  ASSERT_TRUE(again.has_value());
+  EXPECT_NE(again->feed_id, a->feed_id);
+  EXPECT_NE(again->feed_id, b->feed_id);
+  EXPECT_EQ(f.status("a1").feed_id, again->feed_id);
+
+  // A restarted engine (new SessionManager) doesn't start from the same id again (ADR-020: md_last
+  // ticks outlive the process). Random seeds collide with probability ~2^-31.
+  Fixture restarted;
+  const auto r = restarted.mgr->start(Fixture::broker("a2", BrokerKind::kUpstox, "127.0.0.1"));
+  ASSERT_TRUE(r.has_value());
+  EXPECT_NE(r->feed_id, a->feed_id);
+  EXPECT_NE(r->feed_id, b->feed_id);
+}
+
 }  // namespace

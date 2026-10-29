@@ -20,6 +20,7 @@ vyuha::md::Tick sample_tick() {
   t.exchange_ts = 1'793'190'900'000'000'000;
   t.recv_ts = 1'793'190'900'000'123'456;
   t.seq = 42;
+  t.feed_id = 3;
   t.source = vyuha::md::Source::kUpstox;
   t.ltp = *Price::parse("24450.05");
   t.ltq = 75;
@@ -58,6 +59,7 @@ void expect_same(const vyuha::md::Tick& t, const pb::Tick& p) {
   EXPECT_EQ(p.bid(), t.bid.units());
   EXPECT_EQ(p.ask_qty(), t.ask_qty);
   EXPECT_EQ(p.seq(), t.seq);
+  EXPECT_EQ(p.feed_id(), t.feed_id);
   ASSERT_EQ(p.bids_size(), 5);
   ASSERT_EQ(p.asks_size(), 5);
   EXPECT_EQ(p.bids(4).price(), t.bids[4].price.units());
@@ -87,6 +89,36 @@ TEST(MdEncodeReference, NegativeAndExtremeValues) {
   EXPECT_EQ(p.exchange_ts_ns(), -1);
   std::array<std::uint8_t, 10> tiny{};
   EXPECT_EQ(vyuha::bus::encode_tick(t, tiny), 0U);  // too small: refused, never truncated
+}
+
+TEST(MdEncodeReference, WorstCaseTickFitsTheBuffer) {
+  constexpr auto kMin = std::numeric_limits<std::int64_t>::min();  // negative int64: 10-byte varints
+  constexpr auto kU32 = std::numeric_limits<std::uint32_t>::max();
+  constexpr auto kU64 = std::numeric_limits<std::uint64_t>::max();
+  vyuha::md::Tick t;
+  t.instrument_id = kU64;
+  t.exchange_ts = t.recv_ts = kMin;
+  t.seq = kU64;
+  t.source = vyuha::md::Source::kUpstox;
+  t.feed_id = kU32;
+  for (Price* p : {&t.ltp, &t.open, &t.high, &t.low, &t.prev_close, &t.avg_price, &t.bid, &t.ask}) {
+    *p = Price::from_units(kMin);
+  }
+  t.ltq = t.bid_qty = t.ask_qty = kU32;
+  t.volume = t.oi = kU64;
+  for (auto* side : {&t.bids, &t.asks}) {
+    for (auto& l : *side) {
+      l = {.price = Price::from_units(kMin), .qty = kU32, .orders = kU32};
+    }
+  }
+  std::array<std::uint8_t, vyuha::bus::kMaxTickBytes> buf{};
+  const std::size_t n = vyuha::bus::encode_tick(t, buf);
+  ASSERT_GT(n, 0U);
+  pb::Tick p;
+  ASSERT_TRUE(p.ParseFromArray(buf.data(), static_cast<int>(n)));
+  EXPECT_EQ(p.feed_id(), kU32);
+  std::array<std::uint8_t, vyuha::bus::kMaxSnapshotBytes> sbuf{};
+  EXPECT_GT(vyuha::bus::encode_snapshot(t, true, sbuf), 0U);
 }
 
 TEST(MdEncodeReference, BarAndSnapshot) {

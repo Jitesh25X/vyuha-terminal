@@ -142,7 +142,7 @@ class ApprovedOrder {            // only RiskGate can construct
 ## 6. Data flows
 
 ### 6.1 Tick path
-Broker WS → IO decode → SPSC ring → core normalize (canonical `Tick`, int64 prices) → update LastValue + bars + MTM → MPSC ring → NATS `md.tick.<exch>.<instrument_id>` (protobuf) and NATS KV `md_last` (latest snapshot) → gateway subscribes (only instruments some client wants, filtered by entitlement) → per-client conflation (default 250 ms) → WS protobuf frame → Web Worker decode → Zustand store → React (rAF-batched).
+Broker WS → IO decode → SPSC ring → core normalize (canonical `Tick`, int64 prices) → update LastValue + bars + MTM → MPSC ring → NATS `md.tick.<exch>.<instrument_id>` (protobuf) and NATS KV `md_last` (latest snapshot) → gateway subscribes (only instruments some client wants, filtered by entitlement: each tick carries the `feed_id` of the session that received it, and goes only to users entitled through that account — ADR-020) → per-client conflation (default 250 ms) → WS protobuf frame → Web Worker decode → Zustand store → React (rAF-batched).
 Recorder subscribes `md.>` → batches of 10k rows or 1 s → ClickHouse.
 
 ### 6.2 Order path

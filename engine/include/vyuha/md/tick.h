@@ -30,6 +30,7 @@ struct Tick {
   Nanos recv_ts{0};
   std::uint64_t seq{0};
   Source source{Source::kUnknown};
+  std::uint32_t feed_id{0};  // session whose feed received it (entitlement routing, ADR-009)
   Price ltp;
   std::uint32_t ltq{0};
   std::uint64_t volume{0};

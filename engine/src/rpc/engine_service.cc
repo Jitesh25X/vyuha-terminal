@@ -59,6 +59,7 @@ void fill(const session::SessionStatus& s, pb::SessionInfo& out) {
   out.set_state(std::string(session::to_string(s.state)));
   out.set_detail(s.detail);
   out.set_ops_cap(s.ops_cap);
+  out.set_feed_id(s.feed_id);
   if (s.data_entitled && s.broker != session::BrokerKind::kSim) {
     auto* f = out.add_feeds();
     f->set_account_id(s.account_id);

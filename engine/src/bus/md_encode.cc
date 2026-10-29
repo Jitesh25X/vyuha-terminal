@@ -146,6 +146,7 @@ void write_tick(Writer& w, const md::Tick& t) noexcept {
     write_depth(w, 19, d);
   }
   w.u64(25, t.seq);
+  w.u64(26, t.feed_id);
 }
 
 }  // namespace

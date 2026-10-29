@@ -32,6 +32,7 @@ struct TickerConfig {
   Nanos idle_timeout{10 * kNanosPerSecond};  // Kite heartbeats every ~2 s when quiet
   std::string ca_file;                       // empty: probe the usual system bundles
   std::uint64_t jitter_seed{0};              // 0: random
+  std::uint32_t feed_id{0};                  // stamped on every tick
 };
 
 using broker::Gap;

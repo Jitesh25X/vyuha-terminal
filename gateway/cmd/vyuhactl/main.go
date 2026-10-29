@@ -1,5 +1,5 @@
-// Command vyuhactl is the admin CLI: migrations, users and dev secrets
-// (audit verify / kill / sessions arrive with their tasks).
+// Command vyuhactl is the admin CLI: migrations, users, broker accounts, dev secrets and audit
+// verification (kill / sessions arrive with their tasks).
 package main
 
 import (
@@ -37,6 +37,10 @@ const usage = `usage:
       (recomputes the audit hash chain; exit 1 on tampering. Anchors from 'audit head' catch deleted newest rows)
   vyuhactl audit head
       (prints the newest ID:HEXHASH; store it outside the database, e.g. in the daily compliance report)
+  vyuhactl account create -broker zerodha|upstox|sim -client-code ID -holder NAME -static-ip IP
+      [-public-ip IP] [-backup-ip IP] [-data-entitled] [-ops-cap 8]
+      (API key and secret are read from the terminal with echo off, or two lines of piped stdin; stored encrypted)
+  vyuhactl account map -account ID|broker:client_code -user USERNAME [-trade] [-default]
 Reads POSTGRES_URL etc. from the environment (VYUHA_ENV=dev defaults apply).`
 
 // errUsage makes main print the usage text.
@@ -65,6 +69,10 @@ func run(args []string) error {
 		return runSecretsInit(args[2:])
 	case "audit verify", "audit head":
 		return runAudit(args[1], args[2:])
+	case "account create":
+		return runAccountCreate(args[2:])
+	case "account map":
+		return runAccountMap(args[2:])
 	}
 	return errUsage
 }

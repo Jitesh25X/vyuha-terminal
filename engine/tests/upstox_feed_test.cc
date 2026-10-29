@@ -2,6 +2,7 @@
 // single-use ws:// URLs; a local WebSocket server rejects reused codes, records the binary
 // subscription requests, sends market_info + live_feed frames and drops the first connection.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -182,6 +183,7 @@ up::FeedConfig config(std::uint16_t http_port) {
   cfg.source_ip = "127.0.0.1";
   cfg.backoff = {.initial = 20'000'000, .cap = 200'000'000};
   cfg.jitter_seed = 3;
+  cfg.feed_id = 9;
   return cfg;
 }
 
@@ -208,6 +210,7 @@ TEST(UpstoxFeed, AuthorizesEachConnectionResubscribesAndLogsTheGap) {
   }
   feed.stop();
   ASSERT_EQ(got.size(), 6U);  // 3 instruments × 2 connections
+  EXPECT_TRUE(std::ranges::all_of(got, [](const auto& t) { return t.feed_id == 9U; }));  // ADR-009 routing
 
   const auto stats = feed.stats();
   EXPECT_EQ(stats.connects, 2U);

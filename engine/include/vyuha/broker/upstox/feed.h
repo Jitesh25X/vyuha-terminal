@@ -32,6 +32,7 @@ struct FeedConfig {
   Nanos idle_timeout{30 * kNanosPerSecond};  // Upstox sends WebSocket pings when idle
   std::string ca_file;
   std::uint64_t jitter_seed{0};
+  std::uint32_t feed_id{0};  // stamped on every tick
 };
 
 struct FeedStats {

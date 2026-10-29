@@ -2,6 +2,7 @@
 // first connection, and the ticker reconnects from the bound source IP, resubscribes everything,
 // keeps decoding into the core's ring and logs the gap. No live network (invariant 3).
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -157,6 +158,7 @@ kite::TickerConfig config(std::uint16_t port) {
   cfg.source_ip = "127.0.0.1";
   cfg.backoff = {.initial = 20'000'000, .cap = 200'000'000};  // 20 ms → 200 ms for the test
   cfg.jitter_seed = 1;
+  cfg.feed_id = 7;
   return cfg;
 }
 
@@ -185,6 +187,7 @@ TEST(KiteTicker, ReconnectsResubscribesAndLogsTheGap) {
   ASSERT_EQ(got.size(), 10U);
   EXPECT_EQ(got[0].instrument_id, 1U);
   EXPECT_EQ(got[5].instrument_id, 1U);  // same stream again after the reconnect
+  EXPECT_TRUE(std::ranges::all_of(got, [](const auto& t) { return t.feed_id == 7U; }));  // ADR-009 routing
 
   const auto stats = ticker.stats();
   EXPECT_EQ(stats.connects, 2U);

@@ -108,6 +108,7 @@ message SessionInfo {
   repeated vyuha.marketdata.v1.FeedStatus feeds = 5;
   uint32 ops_cap = 6;
   double ops_max_1m = 7;
+  uint32 feed_id = 8; // stamped on this session's ticks; unique per session start, never reused
 }
 
 message SessionList {

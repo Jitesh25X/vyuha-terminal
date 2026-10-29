@@ -39,6 +39,12 @@ type Config struct {
 	JWTKeyPath     string
 	AccessTokenTTL time.Duration
 	RefreshTTL     time.Duration
+
+	// Brokers, engine and market data (M1.8).
+	PublicBaseURL    string   // external origin; broker redirect URLs are built from it
+	EngineGRPCAddr   string   // vyuha_engine gRPC (loopback)
+	NATSURL          string   // engine market data
+	WSAllowedOrigins []string // extra browser origins allowed on /ws (same-origin always is)
 }
 
 // Load reads the configuration through getenv (os.Getenv in production, a map in tests).
@@ -125,6 +131,34 @@ func Load(getenv func(string) string) (Config, error) {
 		*d.dst = v
 	}
 
+	cfg.PublicBaseURL = strings.TrimRight(get("PUBLIC_BASE_URL", ""), "/")
+	switch u, err := url.Parse(cfg.PublicBaseURL); {
+	case cfg.PublicBaseURL == "" && cfg.Env == EnvDev:
+		cfg.PublicBaseURL = "https://localhost:8443"
+	case cfg.PublicBaseURL == "":
+		errs = append(errs, errors.New("PUBLIC_BASE_URL is required outside dev (broker login redirects)"))
+	case err != nil || u.Host == "" || u.Path != "" || (u.Scheme != "https" && (cfg.Env != EnvDev || u.Scheme != "http")):
+		errs = append(errs, errors.New("PUBLIC_BASE_URL must be an origin like https://desk.example.in (https outside dev)"))
+	}
+	cfg.EngineGRPCAddr = get("ENGINE_GRPC_ADDR", "127.0.0.1:7443")
+	// StartSession carries broker secrets and the channel has no TLS yet: loopback only until mTLS.
+	if ap, err := netip.ParseAddrPort(cfg.EngineGRPCAddr); err != nil || !ap.Addr().IsLoopback() {
+		errs = append(errs, errors.New("ENGINE_GRPC_ADDR must be a loopback ip:port (no mTLS to the engine yet)"))
+	}
+	cfg.NATSURL = get("NATS_URL", "")
+	if cfg.NATSURL == "" {
+		if cfg.Env == EnvDev {
+			cfg.NATSURL = "nats://127.0.0.1:4222"
+		} else {
+			errs = append(errs, errors.New("NATS_URL is required outside dev"))
+		}
+	}
+	for _, o := range strings.Split(get("WS_ALLOWED_ORIGINS", ""), ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			cfg.WSAllowedOrigins = append(cfg.WSAllowedOrigins, o)
+		}
+	}
+
 	if err := cfg.LogLevel.UnmarshalText([]byte(get("LOG_LEVEL", "info"))); err != nil {
 		errs = append(errs, fmt.Errorf("LOG_LEVEL: %w", err))
 	}
@@ -159,6 +193,10 @@ func (c Config) LogValue() slog.Value {
 		slog.Bool("master_key_set", c.MasterKey != ""),
 		slog.Duration("access_token_ttl", c.AccessTokenTTL),
 		slog.Duration("refresh_token_ttl", c.RefreshTTL),
+		slog.String("public_base_url", c.PublicBaseURL),
+		slog.String("engine_grpc_addr", c.EngineGRPCAddr),
+		slog.String("nats", redactURL(c.NATSURL)),
+		slog.Int("ws_allowed_origins", len(c.WSAllowedOrigins)),
 	)
 }
 

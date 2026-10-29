@@ -43,6 +43,7 @@ struct SessionRequest {
 
 struct SessionStatus {
   std::string account_id;
+  std::uint32_t feed_id{0};  // stamped on this session's ticks; unique per start
   BrokerKind broker{BrokerKind::kSim};
   SessionState state{SessionState::kDisconnected};
   std::string detail;  // stable code, e.g. STATIC_IP_NOT_ON_HOST
