@@ -123,3 +123,23 @@ export interface OptionChain {
   /** every contract of the expiry: subscribed so PCR and max pain see the whole chain */
   contract_ids: number[];
 }
+
+// ── indices (openapi.yaml: IndexConstituents, Constituent) ───────────────────
+export interface Constituent {
+  instrument_id: number;
+  tradingsymbol: string;
+  name?: string;
+  sector?: string;
+  /** index weight, percent */
+  weight?: number;
+  avg_volume_20d?: number;
+  /** near-month stock future, for OI gainers */
+  future_id?: number;
+  future_prev_oi?: number;
+}
+
+export interface IndexConstituents {
+  index_id: number;
+  as_of: string;
+  constituents: Constituent[];
+}

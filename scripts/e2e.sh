@@ -51,7 +51,7 @@ user="e2e_trader"
 password="$(openssl rand -hex 16)"
 printf '%s\n' "$password" | "$tmp/vyuhactl" user create -username "$user" -display-name "E2E Trader" -role trader >/dev/null
 # Market panels (keyboard) and the perf test each enroll their own user (TOTP codes are single-use).
-for u in e2e_md e2e_perf e2e_oc; do
+for u in e2e_md e2e_perf e2e_oc e2e_mov; do
   printf '%s\n' "$password" | "$tmp/vyuhactl" user create -username "$u" -display-name "E2E ${u#e2e_}" -role trader >/dev/null
 done
 # A few instruments for the market panels to resolve (no broker account is mapped: no entitlement).
@@ -86,7 +86,7 @@ fi
 cd "$root/web"
 status=0
 VYUHA_GATEWAY_URL="http://$gw_addr" VYUHA_WEB_PORT="$web_port" VYUHA_E2E_USER="$user" VYUHA_E2E_PASSWORD="$password" \
-  VYUHA_E2E_MD_USER=e2e_md VYUHA_E2E_PERF_USER=e2e_perf VYUHA_E2E_OC_USER=e2e_oc VYUHA_E2E_FAKEFEED="$feed_addr" \
+  VYUHA_E2E_MD_USER=e2e_md VYUHA_E2E_PERF_USER=e2e_perf VYUHA_E2E_OC_USER=e2e_oc VYUHA_E2E_MOV_USER=e2e_mov VYUHA_E2E_FAKEFEED="$feed_addr" \
   pnpm exec playwright test "$@" || status=$?
 if [ $status -ne 0 ]; then
   echo "── gateway log ──" >&2

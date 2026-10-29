@@ -269,6 +269,26 @@ paths:
                 type: array
                 items: { type: string, format: date }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /indices/{id}/constituents:
+    get:
+      operationId: getIndexConstituents
+      summary: Members of an index with weight and sector (reference data for MOV and HM)
+      description: |
+        Reference data only (no prices): the terminal streams live quotes for the returned ids over the
+        WebSocket and ranks/colours them itself. Baselines for volume shockers (`avg_volume_20d`) and OI
+        gainers (`future_id` + `future_prev_oi`) are optional. Until the graph seed lands (M6.1) no source
+        is configured and every index answers 404 NO_CONSTITUENTS.
+      tags: [marketdata]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        "200":
+          description: Constituents
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IndexConstituents" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /optionchain/{underlying_id}:
     get:
       operationId: getOptionChain
@@ -511,6 +531,27 @@ components:
           items:
             type: array
             items: {}
+    IndexConstituents:
+      type: object
+      required: [index_id, as_of, constituents]
+      properties:
+        index_id: { type: integer, format: int64 }
+        as_of: { type: string, format: date, description: "Date of the constituent list / weights" }
+        constituents:
+          type: array
+          items: { $ref: "#/components/schemas/Constituent" }
+    Constituent:
+      type: object
+      required: [instrument_id, tradingsymbol]
+      properties:
+        instrument_id: { type: integer, format: int64 }
+        tradingsymbol: { type: string }
+        name: { type: string }
+        sector: { type: string }
+        weight: { type: number, format: double, description: "Index weight, percent" }
+        avg_volume_20d: { type: integer, format: int64, description: "Average daily volume over the last 20 sessions" }
+        future_id: { type: integer, format: int64, description: "Near-month stock future (OI gainers)" }
+        future_prev_oi: { type: integer, format: int64, description: "That future's OI at the previous session's close" }
     OptionChain:
       type: object
       required: [underlying, expiry, lot_size, analytics, as_of, rows, contract_ids]

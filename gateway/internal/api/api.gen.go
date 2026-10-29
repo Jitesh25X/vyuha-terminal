@@ -328,6 +328,25 @@ type Check struct {
 // CheckStatus defines model for Check.Status.
 type CheckStatus string
 
+// Constituent defines model for Constituent.
+type Constituent struct {
+	// AvgVolume20d Average daily volume over the last 20 sessions
+	AvgVolume20d *int64 `json:"avg_volume_20d,omitempty"`
+
+	// FutureId Near-month stock future (OI gainers)
+	FutureId *int64 `json:"future_id,omitempty"`
+
+	// FuturePrevOi That future's OI at the previous session's close
+	FuturePrevOi  *int64  `json:"future_prev_oi,omitempty"`
+	InstrumentId  int64   `json:"instrument_id"`
+	Name          *string `json:"name,omitempty"`
+	Sector        *string `json:"sector,omitempty"`
+	Tradingsymbol string  `json:"tradingsymbol"`
+
+	// Weight Index weight, percent
+	Weight *float64 `json:"weight,omitempty"`
+}
+
 // Health defines model for Health.
 type Health struct {
 	Checks map[string]Check `json:"checks"`
@@ -343,6 +362,14 @@ type HealthEnv string
 
 // HealthStatus defines model for Health.Status.
 type HealthStatus string
+
+// IndexConstituents defines model for IndexConstituents.
+type IndexConstituents struct {
+	// AsOf Date of the constituent list / weights
+	AsOf         openapi_types.Date `json:"as_of"`
+	Constituents []Constituent      `json:"constituents"`
+	IndexId      int64              `json:"index_id"`
+}
 
 // Instrument defines model for Instrument.
 type Instrument struct {
@@ -680,6 +707,9 @@ type ServerInterface interface {
 	// GetHealth Gateway health with dependency checks
 	// (GET /health)
 	GetHealth(w http.ResponseWriter, r *http.Request)
+	// GetIndexConstituents Members of an index with weight and sector (reference data for MOV and HM)
+	// (GET /indices/{id}/constituents)
+	GetIndexConstituents(w http.ResponseWriter, r *http.Request, id int64)
 	// SearchInstruments Active instruments whose trading symbol or underlying symbol starts with q
 	// (GET /instruments/search)
 	SearchInstruments(w http.ResponseWriter, r *http.Request, params SearchInstrumentsParams)
@@ -995,6 +1025,32 @@ func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetHealth(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetIndexConstituents operation middleware
+func (siw *ServerInterfaceWrapper) GetIndexConstituents(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id int64
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetIndexConstituents(w, r, id)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1376,6 +1432,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/instruments/search", wrapper.SearchInstruments)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/instruments/{id}", wrapper.GetInstrument)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/instruments/{id}/expiries", wrapper.GetExpiries)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/indices/{id}/constituents", wrapper.GetIndexConstituents)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/optionchain/{underlying_id}", wrapper.GetOptionChain)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/marketdata/candles", wrapper.GetCandles)
 
@@ -2102,6 +2159,60 @@ func (response GetHealth503JSONResponse) VisitGetHealthResponse(w http.ResponseW
 	return err
 }
 
+type GetIndexConstituentsRequestObject struct {
+	Id int64 `json:"id"`
+}
+
+type GetIndexConstituentsResponseObject interface {
+	VisitGetIndexConstituentsResponse(w http.ResponseWriter) error
+}
+
+type GetIndexConstituents200JSONResponse IndexConstituents
+
+func (response GetIndexConstituents200JSONResponse) VisitGetIndexConstituentsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetIndexConstituents401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response GetIndexConstituents401ApplicationProblemPlusJSONResponse) VisitGetIndexConstituentsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetIndexConstituents404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response GetIndexConstituents404ApplicationProblemPlusJSONResponse) VisitGetIndexConstituentsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type SearchInstrumentsRequestObject struct {
 	Params SearchInstrumentsParams
 }
@@ -2420,6 +2531,9 @@ type StrictServerInterface interface {
 	// GetHealth Gateway health with dependency checks
 	// (GET /health)
 	GetHealth(ctx context.Context, request GetHealthRequestObject) (GetHealthResponseObject, error)
+	// GetIndexConstituents Members of an index with weight and sector (reference data for MOV and HM)
+	// (GET /indices/{id}/constituents)
+	GetIndexConstituents(ctx context.Context, request GetIndexConstituentsRequestObject) (GetIndexConstituentsResponseObject, error)
 	// SearchInstruments Active instruments whose trading symbol or underlying symbol starts with q
 	// (GET /instruments/search)
 	SearchInstruments(ctx context.Context, request SearchInstrumentsRequestObject) (SearchInstrumentsResponseObject, error)
@@ -2778,6 +2892,32 @@ func (sh *strictHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetHealthResponseObject); ok {
 		if err := validResponse.VisitGetHealthResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetIndexConstituents operation middleware
+func (sh *strictHandler) GetIndexConstituents(w http.ResponseWriter, r *http.Request, id int64) {
+	var request GetIndexConstituentsRequestObject
+
+	request.Id = id
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetIndexConstituents(ctx, request.(GetIndexConstituentsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetIndexConstituents")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetIndexConstituentsResponseObject); ok {
+		if err := validResponse.VisitGetIndexConstituentsResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
