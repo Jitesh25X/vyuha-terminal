@@ -12,6 +12,94 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AccountStatus string
+
+const (
+	AccountStatusDisconnected  AccountStatus = "disconnected"
+	AccountStatusAwaitingLogin AccountStatus = "awaiting_login"
+	AccountStatusConnected     AccountStatus = "connected"
+	AccountStatusError         AccountStatus = "error"
+	AccountStatusDisabled      AccountStatus = "disabled"
+)
+
+func (e *AccountStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AccountStatus(s)
+	case string:
+		*e = AccountStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AccountStatus: %T", src)
+	}
+	return nil
+}
+
+type NullAccountStatus struct {
+	AccountStatus AccountStatus
+	Valid         bool // Valid is true if AccountStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAccountStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.AccountStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AccountStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAccountStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AccountStatus), nil
+}
+
+type BrokerKind string
+
+const (
+	BrokerKindZerodha BrokerKind = "zerodha"
+	BrokerKindUpstox  BrokerKind = "upstox"
+	BrokerKindSim     BrokerKind = "sim"
+)
+
+func (e *BrokerKind) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = BrokerKind(s)
+	case string:
+		*e = BrokerKind(s)
+	default:
+		return fmt.Errorf("unsupported scan type for BrokerKind: %T", src)
+	}
+	return nil
+}
+
+type NullBrokerKind struct {
+	BrokerKind BrokerKind
+	Valid      bool // Valid is true if BrokerKind is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullBrokerKind) Scan(value interface{}) error {
+	if value == nil {
+		ns.BrokerKind, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.BrokerKind.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullBrokerKind) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.BrokerKind), nil
+}
+
 type UserRole string
 
 const (
@@ -70,6 +158,25 @@ type AppUser struct {
 	CreatedAt     pgtype.Timestamptz
 	UpdatedAt     pgtype.Timestamptz
 	TotpLastStep  pgtype.Int8
+}
+
+type BrokerAccount struct {
+	ID             pgtype.UUID
+	Broker         BrokerKind
+	ClientCode     string
+	HolderName     string
+	ApiKeyEnc      []byte
+	ApiSecretEnc   []byte
+	AccessTokenEnc []byte
+	TokenExpiresAt pgtype.Timestamptz
+	StaticIp       *netip.Addr
+	PublicStaticIp *netip.Addr
+	BackupStaticIp *netip.Addr
+	DataEntitled   bool
+	Status         AccountStatus
+	OpsCap         int32
+	CreatedAt      pgtype.Timestamptz
+	UpdatedAt      pgtype.Timestamptz
 }
 
 type RefreshToken struct {

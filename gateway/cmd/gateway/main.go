@@ -1,4 +1,4 @@
-// Command gateway serves the Vyuha REST API (and, from M1.8, the WebSocket hub).
+// Command gateway serves the Vyuha REST API and the WebSocket hub (/ws).
 package main
 
 import (
@@ -12,12 +12,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/jiteshraj/vyuha/gateway/internal/api"
 	"github.com/jiteshraj/vyuha/gateway/internal/auth"
+	"github.com/jiteshraj/vyuha/gateway/internal/brokers"
 	"github.com/jiteshraj/vyuha/gateway/internal/config"
 	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
+	"github.com/jiteshraj/vyuha/gateway/internal/enginec"
 	"github.com/jiteshraj/vyuha/gateway/internal/store"
 	"github.com/jiteshraj/vyuha/gateway/internal/telemetry"
+	"github.com/jiteshraj/vyuha/gateway/internal/ws"
 )
 
 // version is overridden at build time with -ldflags "-X main.version=...".
@@ -71,10 +76,38 @@ func run() error {
 		return err
 	}
 
+	engine, err := enginec.Dial(cfg.EngineGRPCAddr) // lazy: the gateway starts without the engine
+	if err != nil {
+		return err
+	}
+	defer func() { _ = engine.Close() }()
+	// Market data is optional at startup: connect in the background and keep retrying.
+	nc, err := nats.Connect(cfg.NATSURL, nats.Name("vyuha-gateway"), nats.RetryOnFailedConnect(true), nats.MaxReconnects(-1))
+	if err != nil {
+		return fmt.Errorf("nats: %w", err)
+	}
+	defer nc.Close()
+
+	queries := store.New(pool)
+	hubCfg := ws.DefaultConfig()
+	hubCfg.OriginPatterns = cfg.WSAllowedOrigins
+	hub := ws.New(hubCfg, authSvc.VerifyAccess, ws.NewPGDirectory(queries), engine, ws.NewNATSSource(nc, "md_last"), logger, time.Now)
+	brokerSvc, err := brokers.NewService(queries, envelope, engine, brokers.DefaultConfig(cfg.PublicBaseURL), logger, time.Now, hub.ObserveSession)
+	if err != nil {
+		return err
+	}
+	hubCtx, stopHub := context.WithCancel(ctx)
+	hubDone := make(chan struct{})
+	go func() { hub.Run(hubCtx); close(hubDone) }()
+	defer func() { stopHub(); <-hubDone }()
+
+	mux := http.NewServeMux()
+	mux.Handle("/ws", hub)
+	mux.Handle("/", api.NewHandler(api.NewServer(version, cfg.Env, queries, authSvc, logger).
+		WithTrustedProxies(cfg.TrustedProxies).WithBrokers(brokerSvc), logger))
 	srv := &http.Server{
-		Addr: cfg.HTTPAddr,
-		Handler: api.NewHandler(api.NewServer(version, cfg.Env, store.New(pool), authSvc, logger).
-			WithTrustedProxies(cfg.TrustedProxies), logger),
+		Addr:              cfg.HTTPAddr,
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       120 * time.Second,

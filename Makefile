@@ -57,7 +57,7 @@ migrate:
 	cd gateway && go run ./cmd/vyuhactl migrate up
 
 migrate-ch:
-	for f in db/clickhouse/*.sql; do docker compose -f deploy/docker-compose.dev.yml exec -T clickhouse clickhouse-client --multiquery < $$f; done
+	for f in db/clickhouse/*.sql; do docker compose -f deploy/docker-compose.dev.yml exec -T clickhouse clickhouse-client --user vyuha --password vyuha --multiquery < $$f; done
 
 migrate-neo4j:
 	for f in db/neo4j/*.cypher; do docker compose -f deploy/docker-compose.dev.yml exec -T neo4j cypher-shell -u "$$NEO4J_USER" -p "$$NEO4J_PASSWORD" < $$f; done
@@ -94,16 +94,27 @@ proto-breaking:
 test: test-engine test-gateway test-quant test-intel test-web
 
 # ENGINE_PRESETS picks the CMake presets (CI runs debug, asan and tsan as separate jobs).
+# NATS/Postgres integration tests run when the dev stack is up (make up), like test-gateway.
 ENGINE_PRESETS ?= debug asan
 test-engine:
-	$(call maybe,engine/CMakeLists.txt,cd engine && for p in $(ENGINE_PRESETS); do cmake --preset $$p && cmake --build --preset $$p && ctest --preset $$p || exit 1; done)
+	$(call maybe,engine/CMakeLists.txt,cd engine && \
+	  if docker compose -f ../deploy/docker-compose.dev.yml ps --status running -q nats 2>/dev/null | grep -q .; then \
+	    export VYUHA_TEST_NATS_URL="$${VYUHA_TEST_NATS_URL:-nats://127.0.0.1:4222}"; fi; \
+	  if docker compose -f ../deploy/docker-compose.dev.yml ps --status running -q postgres 2>/dev/null | grep -q .; then \
+	    export VYUHA_TEST_POSTGRES_URL="$${VYUHA_TEST_POSTGRES_URL:-postgres://vyuha:vyuha@127.0.0.1:5432/vyuha?sslmode=disable}"; fi; \
+	  for p in $(ENGINE_PRESETS); do cmake --preset $$p && cmake --build --preset $$p && ctest --preset $$p || exit 1; done)
 
 # Go protobuf code is gitignored, so generate it first. Store integration tests run when the dev Postgres is up.
 test-gateway:
 	$(call maybe,gateway/go.mod,$(MAKE) --no-print-directory proto >/dev/null && cd gateway && go vet ./... && \
 	  if docker compose -f ../deploy/docker-compose.dev.yml ps --status running -q postgres 2>/dev/null | grep -q .; then \
 	    export VYUHA_TEST_POSTGRES_URL="$${VYUHA_TEST_POSTGRES_URL:-postgres://vyuha:vyuha@localhost:5432/vyuha?sslmode=disable}"; \
-	  else echo "· dev Postgres not running: store integration tests skip (make up)"; fi && go test ./...)
+	  else echo "· dev Postgres not running: store integration tests skip (make up)"; fi && \
+	  if docker compose -f ../deploy/docker-compose.dev.yml ps --status running -q nats 2>/dev/null | grep -q .; then \
+	    export VYUHA_TEST_NATS_URL="$${VYUHA_TEST_NATS_URL:-nats://127.0.0.1:4222}"; fi && \
+	  if docker compose -f ../deploy/docker-compose.dev.yml ps --status running -q clickhouse 2>/dev/null | grep -q .; then \
+	    export VYUHA_TEST_CLICKHOUSE_URL="$${VYUHA_TEST_CLICKHOUSE_URL:-clickhouse://vyuha:vyuha@127.0.0.1:9000/vyuha}"; \
+	  else echo "· ClickHouse not running: recorder integration test skips (make up PROFILES=\"core md\")"; fi && go test ./...)
 
 # Integration tests (fresh DB per test) run when the dev Postgres is up, like test-gateway.
 test-quant:
@@ -126,8 +137,9 @@ ifeq ($(shell uname -s),Darwin)
 else
   FUZZ_CXX ?= clang++-18
   FUZZ_SANITIZERS ?= fuzzer,address,undefined
-  # clang 18 can't use GCC 14's <expected>; LLVM's libc++ also brings the same hardening as macOS.
-  FUZZ_CXXFLAGS ?= -stdlib=libc++
+  # clang 18 doesn't report __cpp_concepts >= 202002L, so GCC 14's libstdc++ hides <expected> from it.
+  # (libc++ isn't an option: Ubuntu's libFuzzer runtime is built against libstdc++.)
+  FUZZ_CXXFLAGS ?= -D__cpp_concepts=202002L -Wno-builtin-macro-redefined
 endif
 # make fuzz-kite / fuzz-upstox (FUZZ_SECONDS each), or `make fuzz` for all parsers.
 define run_fuzz

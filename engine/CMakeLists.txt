@@ -32,6 +32,7 @@ find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_beast CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(simdjson CONFIG REQUIRED)
+find_package(cnats CONFIG REQUIRED)
 
 add_library(vyuha_core_lib
   src/core/core_loop.cc
@@ -70,6 +71,16 @@ add_library(vyuha_upstox
   src/broker/upstox/subscriptions.cc
 )
 add_library(vyuha::upstox ALIAS vyuha_upstox)
+
+# Market-data bus: protobuf encoders + NATS publisher (md.tick.*, md.bar.*, KV md_last).
+add_library(vyuha_bus src/bus/md_encode.cc src/bus/md_publisher.cc)
+add_library(vyuha::bus ALIAS vyuha_bus)
+target_link_libraries(vyuha_bus PUBLIC vyuha::core PRIVATE vyuha_warnings cnats::nats_static)
+
+# Broker session control plane (gRPC handlers call into it).
+add_library(vyuha_session src/session/session_manager.cc)
+add_library(vyuha::session ALIAS vyuha_session)
+target_link_libraries(vyuha_session PUBLIC vyuha::core vyuha::kite vyuha::upstox PRIVATE vyuha_warnings)
 target_link_libraries(vyuha_upstox
   PUBLIC vyuha::core
   PRIVATE vyuha_warnings vyuha_feed simdjson::simdjson)
@@ -78,6 +89,40 @@ target_compile_definitions(vyuha_kite PUBLIC BOOST_ASIO_NO_DEPRECATED)
 target_link_libraries(vyuha_kite
   PUBLIC vyuha::core
   PRIVATE vyuha_warnings vyuha_feed simdjson::simdjson)
+
+# gRPC control API (engine.v1.EngineService) and the engine binary. Built without sanitizers only:
+# vcpkg's gRPC/protobuf/abseil aren't instrumented, and abseil's layouts change under ASan. The
+# logic they call (SessionManager, feeds, core) is tested in every preset.
+if(NOT VYUHA_SANITIZER)
+  find_package(Protobuf CONFIG REQUIRED)
+  find_package(gRPC CONFIG REQUIRED)
+  set(VYUHA_PROTO_ROOT ${PROJECT_SOURCE_DIR}/../proto)
+  add_library(vyuha_engine_proto STATIC
+    ${VYUHA_PROTO_ROOT}/vyuha/common/v1/common.proto
+    ${VYUHA_PROTO_ROOT}/vyuha/marketdata/v1/marketdata.proto
+    ${VYUHA_PROTO_ROOT}/vyuha/orders/v1/orders.proto
+    ${VYUHA_PROTO_ROOT}/vyuha/risk/v1/risk.proto
+    ${VYUHA_PROTO_ROOT}/vyuha/engine/v1/engine.proto)
+  target_link_libraries(vyuha_engine_proto PUBLIC protobuf::libprotobuf gRPC::grpc++)
+  set(VYUHA_PROTO_OUT ${CMAKE_CURRENT_BINARY_DIR}/gen)
+  target_include_directories(vyuha_engine_proto PUBLIC ${VYUHA_PROTO_OUT})
+  protobuf_generate(TARGET vyuha_engine_proto LANGUAGE cpp IMPORT_DIRS ${VYUHA_PROTO_ROOT}
+                    PROTOC_OUT_DIR ${VYUHA_PROTO_OUT})
+  protobuf_generate(TARGET vyuha_engine_proto LANGUAGE grpc IMPORT_DIRS ${VYUHA_PROTO_ROOT}
+                    PROTOC_OUT_DIR ${VYUHA_PROTO_OUT}
+                    GENERATE_EXTENSIONS .grpc.pb.h .grpc.pb.cc
+                    PLUGIN "protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>")
+
+  find_package(libpqxx CONFIG REQUIRED)
+  add_library(vyuha_pg STATIC src/session/pg_instrument_directory.cc)
+  target_link_libraries(vyuha_pg PUBLIC vyuha::session PRIVATE vyuha_warnings libpqxx::pqxx)
+
+  add_library(vyuha_rpc STATIC src/rpc/engine_service.cc)
+  target_link_libraries(vyuha_rpc PUBLIC vyuha::session vyuha_engine_proto PRIVATE vyuha_warnings)
+
+  add_executable(vyuha_engine src/app/main.cc)
+  target_link_libraries(vyuha_engine PRIVATE vyuha_rpc vyuha_pg vyuha::bus vyuha_warnings)
+endif()
 
 if(VYUHA_BUILD_TESTS)
   enable_testing()

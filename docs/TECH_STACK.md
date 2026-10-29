@@ -143,17 +143,17 @@ Toolchains are installed one component at a time by `scripts/bootstrap.sh <core|
 |---|---|---|
 | GCC / Clang | Ubuntu: GCC 14 (`g++-14`, CI reference). macOS: Apple Clang from Xcode Command Line Tools (≥ 16 for `std::expected`). clang-format / clang-tidy / libFuzzer: **LLVM 18** on both (`clang-*-18` apt, `llvm@18` brew) so formatting is identical everywhere | 2026-10-28 |
 | CMake | ≥ 3.28 (Ubuntu 24.04 apt 3.28.3; macOS Homebrew current), Ninja from the same source | 2026-10-28 |
-| vcpkg baseline commit | `19c330612911442c9939e4a89f85c97603089389` (vcpkg tool 2026-09-26; `engine/vcpkg.json` `builtin-baseline`, bootstrap fetches only that commit, depth 1). Ports: protobuf 7.36.2 + abseil 20260107.1 (M1.5; tests only, see below), boost-asio/boost-beast 1.92.0, openssl 3.6.5, simdjson 5.0.5 (M1.4), quill 13.1.0 (M1.3; bundles fmt), gtest 1.18.0, benchmark 1.9.5, nanobind 3.1.0 (overlay without `python3`, see `engine/vcpkg-overlays/README.md`), robin-map 1.4.1 | 2026-10-28 |
+| vcpkg baseline commit | `19c330612911442c9939e4a89f85c97603089389` (vcpkg tool 2026-09-26; `engine/vcpkg.json` `builtin-baseline`, bootstrap fetches only that commit, depth 1). Ports: cnats 3.14.0, libpqxx 8.0.2 (M1.7), grpc 1.84.0 (M1.6; control API + binary, non-sanitizer builds only), protobuf 7.36.2 + abseil 20260107.1 (M1.5), boost-asio/boost-beast 1.92.0, openssl 3.6.5, simdjson 5.0.5 (M1.4), quill 13.1.0 (M1.3; bundles fmt), gtest 1.18.0, benchmark 1.9.5, nanobind 3.1.0 (overlay without `python3`, see `engine/vcpkg-overlays/README.md`), robin-map 1.4.1 | 2026-10-28 |
 | Go | 1.27.3 | 2026-10-28 |
 | Python | 3.13.14 (via uv 0.13.6) | 2026-10-28 |
 | quant (M1.1) | `quant/uv.lock` (`exclude-newer` 7 days): polars 2.0.0, httpx 0.28.1, pydantic 2.14.1, asyncpg 0.32.0, exchange-calendars 4.13.2 (pulls pandas transitively; not imported by library code); dev: pytest 9.1.1, mypy 2.4.0, ruff 0.17.1 | 2026-10-28 |
 | Node / pnpm | Node 22.23.4 (22 LTS) / pnpm 10.34.9 via corepack | 2026-10-28 |
 | sqlc | 1.31.1 (`bootstrap.sh go`, pinned + sha256) | 2026-10-28 |
 | golangci-lint | 2.15.0 (`bootstrap.sh go`, pinned + sha256; config `gateway/.golangci.yml`: standard + gosec, errorlint, bodyclose, noctx, misspell, unconvert) | 2026-10-28 |
-| Gateway Go modules | `gateway/go.mod` + `go.sum`: pgx 5.11.0, golang-migrate 4.20.1 (pgx/v5 driver), OTel 1.47.0 (+ otelhttp 0.72.0), protobuf 1.36.12, grpc 1.83.2 (via OTel exporter); oapi-codegen 2.8.1 as a `tool` directive. Buf Go plugins pinned to match in `proto/buf.gen.go.yaml` | 2026-10-28 |
+| Gateway Go modules | `gateway/go.mod` + `go.sum`: pgx 5.11.0, golang-migrate 4.20.1 (pgx/v5 driver), OTel 1.47.0 (+ otelhttp 0.72.0), protobuf 1.36.12, grpc 1.83.2 (OTel exporter; engine client from M1.8), nats.go 1.55.0 (+ jetstream KV, M1.8) + clickhouse-go v2.50.0 (recorder, M1.7), coder/websocket 1.8.15 (WebSocket hub, M1.8); oapi-codegen 2.8.1 as a `tool` directive. Buf Go plugins pinned to match in `proto/buf.gen.go.yaml` | 2026-10-28 |
 | Gateway auth modules | alexedwards/argon2id 1.0.0 (m=64 MiB, t=2, p=2), pquerna/otp 1.5.0 (SHA1, 6 digits, 30 s, ±1 step), golang-jwt/jwt/v5 5.3.1 (EdDSA only); oapi-codegen/runtime 1.8.0 | 2026-10-28 |
 | PostgreSQL image digest | `pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d` (PostgreSQL 17.11, pgvector 0.8.7) | 2026-10-28 |
-| ClickHouse image digest | at M1.7 | |
+| ClickHouse image digest | `clickhouse/clickhouse-server:24.8@sha256:1ffa82edee000a42c09313bd9f1293d94c570aee74babc1b3ca9983a35fa597b` (24.8.14.39) | 2026-10-29 |
 | NATS image digest | `nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927` (nats-server 2.10.29) | 2026-10-28 |
 | Neo4j image digest | at M6.1 | |
 | buf | 1.75.0 (`bootstrap.sh proto`; same version in `.github/workflows/proto.yml`) | 2026-10-28 |

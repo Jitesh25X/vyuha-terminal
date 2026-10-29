@@ -15,6 +15,7 @@
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "VCPKG_INSTALLED_DIR": "${sourceDir}/vcpkg_installed",
+        "VCPKG_INSTALL_OPTIONS": "--clean-after-build",
         "VCPKG_MANIFEST_FEATURES": "tests;python"
       }
     },

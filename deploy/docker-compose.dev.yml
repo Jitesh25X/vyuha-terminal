@@ -6,6 +6,7 @@
 #   obs   = prometheus, loki, otel, grafana (M3+)
 #   graph = neo4j                      (M6+)
 # Usage: make up PROFILES="core md"
+# Ports bind to 127.0.0.1 only: dev credentials are well known, never expose them on the LAN.
 name: vyuha-dev
 
 services:
@@ -16,7 +17,7 @@ services:
       POSTGRES_USER: vyuha
       POSTGRES_PASSWORD: vyuha
       POSTGRES_DB: vyuha
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U vyuha"]
@@ -25,13 +26,18 @@ services:
 
   clickhouse:
     profiles: ["md"]
-    image: clickhouse/clickhouse-server:24.8
-    ports: ["8123:8123", "9000:9000"]
+    image: clickhouse/clickhouse-server:24.8@sha256:1ffa82edee000a42c09313bd9f1293d94c570aee74babc1b3ca9983a35fa597b
+    ports: ["127.0.0.1:8123:8123", "127.0.0.1:9000:9000"]
+    environment:  # dev-only credentials (like postgres): ports are bound to localhost
+      CLICKHOUSE_USER: vyuha
+      CLICKHOUSE_PASSWORD: vyuha
+      CLICKHOUSE_DB: vyuha
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     volumes: [chdata:/var/lib/clickhouse]
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      test: ["CMD", "clickhouse-client", "--user", "vyuha", "--password", "vyuha", "--query", "SELECT 1"]
       interval: 5s
       retries: 20
 
@@ -39,7 +45,7 @@ services:
     profiles: ["core"]
     image: nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
     command: ["-js", "-sd", "/data", "-m", "8222"]
-    ports: ["4222:4222", "8222:8222"]
+    ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]
     volumes: [natsdata:/data]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8222/healthz?js-enabled-only=true"]
@@ -53,26 +59,26 @@ services:
       NEO4J_AUTH: neo4j/change-me-dev
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_server_memory_heap_max__size: 2G
-    ports: ["7474:7474", "7687:7687"]
+    ports: ["127.0.0.1:7474:7474", "127.0.0.1:7687:7687"]
     volumes: [neo4jdata:/data]
 
   prometheus:
     profiles: ["obs"]
     image: prom/prometheus:v3.1.0
     volumes: [./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro]
-    ports: ["9090:9090"]
+    ports: ["127.0.0.1:9090:9090"]
     extra_hosts: ["host.docker.internal:host-gateway"]
 
   loki:
     profiles: ["obs"]
     image: grafana/loki:3.3.2
-    ports: ["3100:3100"]
+    ports: ["127.0.0.1:3100:3100"]
 
   otel-collector:
     profiles: ["obs"]
     image: otel/opentelemetry-collector-contrib:0.116.0
     volumes: [./otel/collector.yaml:/etc/otelcol-contrib/config.yaml:ro]
-    ports: ["4317:4317", "4318:4318"]
+    ports: ["127.0.0.1:4317:4317", "127.0.0.1:4318:4318"]
 
   grafana:
     profiles: ["obs"]
@@ -80,7 +86,7 @@ services:
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-    ports: ["3000:3000"]
+    ports: ["127.0.0.1:3000:3000"]
     volumes: [./grafana/provisioning:/etc/grafana/provisioning:ro]
 
 volumes:

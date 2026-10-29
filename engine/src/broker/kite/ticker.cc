@@ -84,7 +84,9 @@ struct KiteTicker::Impl final : FeedProtocol {
     if (binary) {
       const ParseStats before = ps;
       parse_frame(bytes, tokens, now, ps, [this](const md::Tick& t) noexcept {
-        if (!out.try_push(t)) {
+        md::Tick stamped = t;
+        stamped.feed_id = cfg.feed_id;
+        if (!out.try_push(stamped)) {
           ring_full.fetch_add(1, std::memory_order_relaxed);
         }
       });

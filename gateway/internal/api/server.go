@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/jiteshraj/vyuha/gateway/internal/auth"
+	"github.com/jiteshraj/vyuha/gateway/internal/brokers"
 	"github.com/jiteshraj/vyuha/gateway/internal/config"
 	"github.com/jiteshraj/vyuha/gateway/internal/ratelimit"
 )
@@ -32,6 +33,7 @@ type Server struct {
 	env     config.Env
 	db      DB
 	auth    *auth.Service
+	brokers *brokers.Service
 	logger  *slog.Logger
 
 	trustedProxies []netip.Prefix
@@ -55,6 +57,12 @@ func NewServer(version string, env config.Env, db DB, authSvc *auth.Service, log
 // WithTrustedProxies sets the peers whose X-Forwarded-For is believed (config TRUSTED_PROXIES).
 func (s *Server) WithTrustedProxies(p []netip.Prefix) *Server {
 	s.trustedProxies = p
+	return s
+}
+
+// WithBrokers enables the broker login routes.
+func (s *Server) WithBrokers(b *brokers.Service) *Server {
+	s.brokers = b
 	return s
 }
 
@@ -84,6 +92,7 @@ func NewHandler(s *Server, logger *slog.Logger) http.Handler {
 
 	var h http.Handler = mux
 	h = recoverPanics(logger, h)
+	h = noStoreBrokerRoutes(h)
 	h = authenticate(verify, h)
 	h = rateLimitAuth(s.credLimiter, s.sessionLimiter, h)
 	h = captureClient(s.trustedProxies, h)

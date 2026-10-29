@@ -117,7 +117,9 @@ struct UpstoxFeed::Impl final : FeedProtocol {
     }
     const DecodeStats before = ds;
     decode_frame(bytes, keys, now, ds, [this](const md::Tick& t) noexcept {
-      if (!out.try_push(t)) {
+      md::Tick stamped = t;
+      stamped.feed_id = cfg.feed_id;
+      if (!out.try_push(stamped)) {
         ring_full.fetch_add(1, std::memory_order_relaxed);
       }
     });
