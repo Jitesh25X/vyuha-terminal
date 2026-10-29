@@ -41,7 +41,7 @@ func TestPGDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]Account{data: {ID: data, Broker: "zerodha", DataEntitled: true}, noData: {ID: noData, Broker: "upstox"}}
+	want := map[string]Account{data: {ID: data, Broker: "zerodha", DataEntitled: true, Label: "Z1"}, noData: {ID: noData, Broker: "upstox", Label: "U1"}}
 	if len(got) != len(want) {
 		t.Fatalf("accounts = %+v (can_view=false and disabled accounts must be excluded)", got)
 	}

@@ -159,8 +159,8 @@ type client struct {
 	mu         sync.Mutex
 	role       string
 	expires    time.Time
-	data       map[string]bool // data-entitled accounts (ADR-009)
-	visible    map[string]bool // accounts whose status the user may see
+	data       map[string]bool   // data-entitled accounts (ADR-009)
+	visible    map[string]string // accounts whose status the user may see → label
 	candidates map[string][]string
 	groups     map[groupKey]*group
 	member     map[wsv1.Channel]map[uint64]*group
@@ -180,10 +180,10 @@ func itemID(it *wsv1.Item) uint64 {
 }
 
 func (c *client) setAccounts(accounts []Account) {
-	data, visible := map[string]bool{}, map[string]bool{}
+	data, visible := map[string]bool{}, map[string]string{}
 	byBroker := map[string][]string{}
 	for _, a := range accounts {
-		visible[a.ID] = true
+		visible[a.ID] = a.Label
 		if rbac.CanReceiveMarketData(&rbac.Mapping{CanView: true}, a.DataEntitled) && a.Broker != "sim" {
 			data[a.ID] = true
 			byBroker[a.Broker] = append(byBroker[a.Broker], a.ID)

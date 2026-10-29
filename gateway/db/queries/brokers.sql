@@ -39,7 +39,7 @@ ON CONFLICT (account_id, user_id) DO UPDATE SET can_view = true, can_trade = EXC
 
 -- name: ListUserAccounts :many
 -- Accounts a user may view, with whether they carry a market-data entitlement (ADR-009).
-SELECT a.id, a.broker, a.data_entitled
+SELECT a.id, a.broker, a.data_entitled, a.client_code
 FROM account_user_map m
 JOIN broker_account a ON a.id = m.account_id
 JOIN app_user u ON u.id = m.user_id

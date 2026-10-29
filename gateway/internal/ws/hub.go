@@ -63,6 +63,7 @@ type Account struct {
 	ID           string
 	Broker       string // zerodha | upstox | sim
 	DataEntitled bool
+	Label        string // client code, shown in the status bar
 }
 
 // InstrumentMap says which brokers can stream an instrument.
@@ -574,18 +575,19 @@ func (h *Hub) pushSystem() {
 }
 
 // systemStatus builds the status bar view for a user: feeds of the accounts they can see.
-func (h *Hub) systemStatus(seeAll bool, visible map[string]bool) *wsv1.SystemStatus {
+func (h *Hub) systemStatus(seeAll bool, visible map[string]string) *wsv1.SystemStatus {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st := &wsv1.SystemStatus{MarketState: h.marketState, EngineOk: h.engineOK, DataLatencyMs: int64(h.latencyMS + 0.5)}
 	for id, s := range h.sessions {
-		if !seeAll && !visible[id] {
+		label, mapped := visible[id]
+		if !seeAll && !mapped {
 			continue
 		}
 		for _, f := range s.GetFeeds() {
 			fs := &marketdatav1.FeedStatus{
 				AccountId: f.GetAccountId(), Broker: f.GetBroker(), State: f.GetState(),
-				Subscribed: f.GetSubscribed(), LastTickNs: f.GetLastTickNs(), Detail: f.GetDetail(),
+				Subscribed: f.GetSubscribed(), LastTickNs: f.GetLastTickNs(), Detail: f.GetDetail(), Label: label,
 			}
 			if !h.engineOK {
 				fs.State = marketdatav1.FeedStatus_STATE_DOWN
@@ -633,3 +635,19 @@ func (h *Hub) computeMarketState(ctx context.Context) string {
 }
 
 var ist = time.FixedZone("IST", 5*3600+30*60)
+
+// EntitledVia lists the accounts through which a user may receive an instrument's market data
+// (ADR-009): mapped, data-entitled, non-sim accounts whose broker can stream it. REST endpoints
+// (candles) use the same rule as the hub.
+func EntitledVia(accounts []Account, m InstrumentMap) []string {
+	var out []string
+	for _, a := range accounts {
+		if !a.DataEntitled || a.Broker == "sim" {
+			continue
+		}
+		if (a.Broker == "zerodha" && m.Kite) || (a.Broker == "upstox" && m.Upstox) {
+			out = append(out, a.ID)
+		}
+	}
+	return out
+}

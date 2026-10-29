@@ -90,3 +90,11 @@ body,
   --dv-drag-over-border-color: var(--accent);
   font-family: var(--font-mono);
 }
+
+/* Watchlist sign colours (AG Grid cellClassRules) */
+.wl-up {
+  color: var(--up);
+}
+.wl-down {
+  color: var(--down);
+}

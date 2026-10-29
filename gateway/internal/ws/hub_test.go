@@ -682,7 +682,7 @@ func TestEngineInterestFollowsSubscriptionsAndFeedRestarts(t *testing.T) {
 
 func TestSystemChannelShowsOnlyVisibleAccounts(t *testing.T) {
 	dir := &fakeDir{accounts: map[string][]Account{
-		"alice": {{ID: "acct-z", Broker: "zerodha", DataEntitled: true}},
+		"alice": {{ID: "acct-z", Broker: "zerodha", DataEntitled: true, Label: "ZR1234"}},
 		"root":  nil,
 	}}
 	engine := &fakeEngine{sessions: []*enginev1.SessionInfo{session("acct-z", "zerodha", 11, true), session("acct-x", "upstox", 33, true)}}
@@ -694,6 +694,11 @@ func TestSystemChannelShowsOnlyVisibleAccounts(t *testing.T) {
 		st := c.next(func(m *wsv1.ServerMsg) bool { return m.GetSnapshot() != nil }).GetSnapshot().GetItems()[0].GetSystem()
 		if len(st.GetFeeds()) != want || !st.GetEngineOk() || st.GetMarketState() == "" {
 			t.Fatalf("%s: status = %v, want %d feeds", user, st, want)
+		}
+		for _, f := range st.GetFeeds() {
+			if wantLabel := map[string]string{"acct-z": "ZR1234"}[f.GetAccountId()]; user == "alice:trader" && f.GetLabel() != wantLabel {
+				t.Fatalf("label = %q, want %q", f.GetLabel(), wantLabel)
+			}
 		}
 		if u := c.next(func(m *wsv1.ServerMsg) bool { return m.GetUpdates() != nil }).GetUpdates(); u.GetChannel() != wsv1.Channel_CHANNEL_SYSTEM {
 			t.Fatalf("%s: periodic update = %v", user, u)

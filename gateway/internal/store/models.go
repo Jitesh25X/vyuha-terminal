@@ -100,6 +100,136 @@ func (ns NullBrokerKind) Value() (driver.Value, error) {
 	return string(ns.BrokerKind), nil
 }
 
+type ExchangeCode string
+
+const (
+	ExchangeCodeNSE ExchangeCode = "NSE"
+	ExchangeCodeBSE ExchangeCode = "BSE"
+	ExchangeCodeNFO ExchangeCode = "NFO"
+	ExchangeCodeBFO ExchangeCode = "BFO"
+)
+
+func (e *ExchangeCode) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ExchangeCode(s)
+	case string:
+		*e = ExchangeCode(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ExchangeCode: %T", src)
+	}
+	return nil
+}
+
+type NullExchangeCode struct {
+	ExchangeCode ExchangeCode
+	Valid        bool // Valid is true if ExchangeCode is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullExchangeCode) Scan(value interface{}) error {
+	if value == nil {
+		ns.ExchangeCode, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ExchangeCode.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullExchangeCode) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ExchangeCode), nil
+}
+
+type OptionType string
+
+const (
+	OptionTypeCE OptionType = "CE"
+	OptionTypePE OptionType = "PE"
+)
+
+func (e *OptionType) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = OptionType(s)
+	case string:
+		*e = OptionType(s)
+	default:
+		return fmt.Errorf("unsupported scan type for OptionType: %T", src)
+	}
+	return nil
+}
+
+type NullOptionType struct {
+	OptionType OptionType
+	Valid      bool // Valid is true if OptionType is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullOptionType) Scan(value interface{}) error {
+	if value == nil {
+		ns.OptionType, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.OptionType.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullOptionType) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.OptionType), nil
+}
+
+type SegmentCode string
+
+const (
+	SegmentCodeEQ  SegmentCode = "EQ"
+	SegmentCodeFUT SegmentCode = "FUT"
+	SegmentCodeOPT SegmentCode = "OPT"
+	SegmentCodeIDX SegmentCode = "IDX"
+)
+
+func (e *SegmentCode) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = SegmentCode(s)
+	case string:
+		*e = SegmentCode(s)
+	default:
+		return fmt.Errorf("unsupported scan type for SegmentCode: %T", src)
+	}
+	return nil
+}
+
+type NullSegmentCode struct {
+	SegmentCode SegmentCode
+	Valid       bool // Valid is true if SegmentCode is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullSegmentCode) Scan(value interface{}) error {
+	if value == nil {
+		ns.SegmentCode, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.SegmentCode.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullSegmentCode) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.SegmentCode), nil
+}
+
 type UserRole string
 
 const (

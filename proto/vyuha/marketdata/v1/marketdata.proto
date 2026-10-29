@@ -85,4 +85,5 @@ message FeedStatus {
   uint32 subscribed = 4;
   int64 last_tick_ns = 5;
   string detail = 6;
+  string label = 7; // account client code for the status bar, set by the gateway when the user can see it
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/jiteshraj/vyuha/gateway/internal/api"
 	"github.com/jiteshraj/vyuha/gateway/internal/auth"
 	"github.com/jiteshraj/vyuha/gateway/internal/brokers"
+	"github.com/jiteshraj/vyuha/gateway/internal/candles"
 	"github.com/jiteshraj/vyuha/gateway/internal/config"
 	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
 	"github.com/jiteshraj/vyuha/gateway/internal/enginec"
@@ -89,9 +90,15 @@ func run() error {
 	defer nc.Close()
 
 	queries := store.New(pool)
+	bars, err := candles.Open(cfg.ClickHouseURL) // lazy: connects on the first candles request
+	if err != nil {
+		return err
+	}
+	defer func() { _ = bars.Close() }()
+	directory := ws.NewPGDirectory(queries)
 	hubCfg := ws.DefaultConfig()
 	hubCfg.OriginPatterns = cfg.WSAllowedOrigins
-	hub := ws.New(hubCfg, authSvc.VerifyAccess, ws.NewPGDirectory(queries), engine, ws.NewNATSSource(nc, "md_last"), logger, time.Now)
+	hub := ws.New(hubCfg, authSvc.VerifyAccess, directory, engine, ws.NewNATSSource(nc, "md_last"), logger, time.Now)
 	brokerSvc, err := brokers.NewService(queries, envelope, engine, brokers.DefaultConfig(cfg.PublicBaseURL), logger, time.Now, hub.ObserveSession)
 	if err != nil {
 		return err
@@ -104,7 +111,8 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.Handle("/ws", hub)
 	mux.Handle("/", api.NewHandler(api.NewServer(version, cfg.Env, queries, authSvc, logger).
-		WithTrustedProxies(cfg.TrustedProxies).WithBrokers(brokerSvc), logger))
+		WithTrustedProxies(cfg.TrustedProxies).WithBrokers(brokerSvc).
+		WithMarketData(&api.MarketData{Instruments: queries, Candles: bars, Entitlement: directory}), logger))
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           mux,

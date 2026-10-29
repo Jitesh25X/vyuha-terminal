@@ -139,7 +139,7 @@ func (d *PGDirectory) UserAccounts(ctx context.Context, userID string) ([]Accoun
 	}
 	out := make([]Account, len(rows))
 	for i, r := range rows {
-		out[i] = Account{ID: r.ID.String(), Broker: string(r.Broker), DataEntitled: r.DataEntitled}
+		out[i] = Account{ID: r.ID.String(), Broker: string(r.Broker), DataEntitled: r.DataEntitled, Label: r.ClientCode}
 	}
 	return out, nil
 }

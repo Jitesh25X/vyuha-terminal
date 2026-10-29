@@ -57,8 +57,9 @@ func TestNATSSource(t *testing.T) {
 		t.Fatalf("last = %v, %v", last, err)
 	}
 
-	ticks := make(chan *marketdatav1.Tick, 1)
-	bars := make(chan *marketdatav1.Bar, 1)
+	// Buffered and never reassigned: the callbacks run on NATS goroutines.
+	ticks := make(chan *marketdatav1.Tick, 1024)
+	bars := make(chan *marketdatav1.Bar, 1024)
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	go func() {
@@ -67,7 +68,8 @@ func TestNATSSource(t *testing.T) {
 	tb, _ := proto.Marshal(&marketdatav1.Tick{InstrumentId: 900001, Ltp: 43, FeedId: 3})
 	bb, _ := proto.Marshal(&marketdatav1.Bar{InstrumentId: 900001, Interval: "1m", Close: 43})
 	deadline := time.After(5 * time.Second)
-	for got := 0; got < 2; {
+	gotTick, gotBar := false, false
+	for !gotTick || !gotBar {
 		_ = nc.Publish("md.tick.900001", tb) // repeat until the subscriptions are live
 		_ = nc.Publish("md.bar.1m.900001", bb)
 		select {
@@ -75,14 +77,12 @@ func TestNATSSource(t *testing.T) {
 			if tk.GetLtp() != 43 || tk.GetFeedId() != 3 {
 				t.Fatalf("tick %v", tk)
 			}
-			ticks = nil
-			got++
+			gotTick = true
 		case br := <-bars:
 			if br.GetClose() != 43 {
 				t.Fatalf("bar %v", br)
 			}
-			bars = nil
-			got++
+			gotBar = true
 		case <-time.After(50 * time.Millisecond):
 		case <-deadline:
 			t.Fatal("no tick/bar received")

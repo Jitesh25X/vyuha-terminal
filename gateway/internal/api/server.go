@@ -34,6 +34,7 @@ type Server struct {
 	db      DB
 	auth    *auth.Service
 	brokers *brokers.Service
+	md      *MarketData
 	logger  *slog.Logger
 
 	trustedProxies []netip.Prefix

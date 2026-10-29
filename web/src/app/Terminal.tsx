@@ -2,8 +2,10 @@ import { useEffect, useRef } from "react";
 import { tinykeys } from "tinykeys";
 import { parseCommand } from "../commands/parse";
 import { refreshSession } from "../lib/api/client";
+import { startMarketData, stopMarketData, subscribe } from "../lib/ws/client";
 import type { User } from "../lib/api/types";
 import { StatusBar } from "../shell/StatusBar";
+import { Toasts } from "../shell/Toasts";
 import { TopBar } from "../shell/TopBar";
 import { Workspace } from "../shell/Workspace";
 import { focusGroup, openFunction } from "../shell/layout";
@@ -18,6 +20,16 @@ export function Terminal({ user, expiresAt }: { user: User; expiresAt: number })
     const t = setTimeout(() => void refreshSession(), Math.max(5_000, expiresAt - Date.now() - REFRESH_LEAD_MS));
     return () => clearTimeout(t);
   }, [expiresAt]);
+
+  // Market-data stream for the session; the status bar's system channel is always on.
+  useEffect(() => {
+    startMarketData();
+    const release = subscribe("system", []);
+    return () => {
+      release();
+      stopMarketData();
+    };
+  }, []);
 
   // Global keyboard map (UI_SPEC §4).
   useEffect(() => {
@@ -55,6 +67,7 @@ export function Terminal({ user, expiresAt }: { user: User; expiresAt: number })
         <Workspace role={user.role} />
       </main>
       <StatusBar />
+      <Toasts />
     </div>
   );
 }

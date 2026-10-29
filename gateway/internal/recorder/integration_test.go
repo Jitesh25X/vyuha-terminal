@@ -5,17 +5,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 
 	mdv1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1"
+	"github.com/jiteshraj/vyuha/gateway/internal/chtest"
 )
 
 // F-MD-4 AC1 end to end on the dev stack (`make up PROFILES="core md"`): every published tick
@@ -26,22 +24,9 @@ func TestEveryPublishedTickIsRecorded(t *testing.T) {
 		t.Skip("VYUHA_TEST_NATS_URL / VYUHA_TEST_CLICKHOUSE_URL not set")
 	}
 	ctx := context.Background()
+	conn, db, _ := chtest.New(t)
 	var b [4]byte
 	_, _ = rand.Read(b[:])
-	db := "vyuha_rtest_" + hex.EncodeToString(b[:])
-	admin := openCH(t, chURL)
-	createSchema(t, admin, db)
-	t.Cleanup(func() { _ = admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+db); _ = admin.Close() })
-
-	opts, err := clickhouse.ParseDSN(chURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	opts.Auth.Database = db
-	conn, err := clickhouse.Open(opts)
-	if err != nil {
-		t.Fatal(err)
-	}
 	sink := &ClickHouse{conn: conn, database: db}
 	t.Cleanup(func() { _ = sink.Close() })
 
@@ -105,55 +90,4 @@ func TestEveryPublishedTickIsRecorded(t *testing.T) {
 	if ltp != 245_005_000+n-1 {
 		t.Fatalf("last ltp %d", ltp)
 	}
-}
-
-func openCH(t *testing.T, dsn string) clickhouse.Conn {
-	t.Helper()
-	opts, err := clickhouse.ParseDSN(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	opts.Auth.Database = "default"
-	conn, err := clickhouse.Open(opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return conn
-}
-
-// createSchema applies db/clickhouse/*.sql into `db` instead of `vyuha`.
-func createSchema(t *testing.T, conn clickhouse.Conn, db string) {
-	t.Helper()
-	_, file, _, _ := runtime.Caller(0)
-	files, _ := filepath.Glob(filepath.Join(filepath.Dir(file), "..", "..", "..", "db", "clickhouse", "*.sql"))
-	if len(files) == 0 {
-		t.Fatal("no ClickHouse DDL found")
-	}
-	for _, f := range files {
-		raw, err := os.ReadFile(f) //nolint:gosec // G304: repo-relative test fixture
-		if err != nil {
-			t.Fatal(err)
-		}
-		sql := strings.ReplaceAll(string(raw), "vyuha.", db+".")
-		sql = strings.ReplaceAll(sql, "DATABASE IF NOT EXISTS vyuha", "DATABASE IF NOT EXISTS "+db)
-		for _, stmt := range strings.Split(stripComments(sql), ";") {
-			if strings.TrimSpace(stmt) == "" {
-				continue
-			}
-			if err := conn.Exec(context.Background(), stmt); err != nil {
-				t.Fatalf("%s: %v", f, err)
-			}
-		}
-	}
-}
-
-func stripComments(sql string) string {
-	var out []string
-	for _, line := range strings.Split(sql, "\n") {
-		if i := strings.Index(line, "--"); i >= 0 {
-			line = line[:i]
-		}
-		out = append(out, line)
-	}
-	return strings.Join(out, "\n")
 }
