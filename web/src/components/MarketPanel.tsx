@@ -23,7 +23,8 @@ function useSecondTick(): number {
   return now;
 }
 
-function Tags({ id }: { id: number }) {
+/** MARKET CLOSED / STALE tags for an instrument (shared by single-security and chain panels). */
+export function MarketTags({ id }: { id: number }) {
   const market = useMd((s) => s.system?.marketState);
   const last = useMd((s) => s.lastQuoteAt[id]);
   const now = useSecondTick();
@@ -70,7 +71,7 @@ export function MarketPanel({ func, security, segment, channel, conflateMs = DEF
         <span className="text-amber font-semibold">{func}</span>
         <span>{inst ? instrumentLabel(inst) : (security ?? "")}</span>
         {inst?.fo_ban && <span className="border border-down text-down px-1">F&O BAN</span>}
-        {inst && <Tags id={inst.id} />}
+        {inst && <MarketTags id={inst.id} />}
         <span className="ml-auto flex items-center gap-2">{extra}</span>
       </header>
       <div className="flex-1 min-h-0 overflow-auto">{body}</div>

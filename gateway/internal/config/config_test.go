@@ -81,6 +81,8 @@ func TestLoad(t *testing.T) {
 		{name: "public base url must be https outside dev", env: map[string]string{"VYUHA_ENV": "staging", "PUBLIC_BASE_URL": "http://desk.example.in"}, wantErr: "https outside dev"},
 		{name: "public base url is an origin", env: map[string]string{"PUBLIC_BASE_URL": "https://desk.example.in/app"}, wantErr: "PUBLIC_BASE_URL must be an origin"},
 		{name: "engine must be on loopback", env: map[string]string{"ENGINE_GRPC_ADDR": "10.0.0.9:7443"}, wantErr: "ENGINE_GRPC_ADDR must be a loopback"},
+		{name: "quant must be on loopback", env: map[string]string{"QUANT_URL": "http://10.0.0.9:8090"}, wantErr: "QUANT_URL must be"},
+		{name: "quant url is an origin", env: map[string]string{"QUANT_URL": "http://127.0.0.1:8090/internal"}, wantErr: "QUANT_URL must be"},
 		{name: "access ttl capped", env: map[string]string{"ACCESS_TOKEN_TTL": "24h"}, wantErr: "ACCESS_TOKEN_TTL"},
 		{name: "bad trusted proxy", env: map[string]string{"TRUSTED_PROXIES": "caddy"}, wantErr: "TRUSTED_PROXIES"},
 		{name: "refresh ttl must parse", env: map[string]string{"REFRESH_TOKEN_TTL": "a week"}, wantErr: "REFRESH_TOKEN_TTL"},

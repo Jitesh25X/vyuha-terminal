@@ -22,6 +22,10 @@
   --link-cyan: #00e5ff;
   --link-magenta: #ff4fd8;
   --link-green: #00d26a;
+  /* Chart series for calls/puts (not up/down: those mean price direction). Validated with the dataviz
+     palette checker against --panel: lightness band, CVD ΔE 23.5, contrast ≥ 3:1. */
+  --series-ce: #2690d0;
+  --series-pe: #c07e00;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
   --font-label: "IBM Plex Sans Condensed", system-ui, sans-serif;
   --fs-base: 12px;
@@ -46,6 +50,8 @@
   --color-warn: var(--warn);
   --color-paper: var(--paper);
   --color-kill: var(--kill);
+  --color-series-ce: var(--series-ce);
+  --color-series-pe: var(--series-pe);
   --font-mono: var(--font-mono);
   --font-label: var(--font-label);
 }

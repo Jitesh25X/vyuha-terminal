@@ -45,6 +45,7 @@ type Config struct {
 	EngineGRPCAddr   string   // vyuha_engine gRPC (loopback)
 	NATSURL          string   // engine market data
 	ClickHouseURL    string   // historical bars (GET /marketdata/candles); a secret-bearing DSN
+	QuantURL         string   // quant internal API (option-chain analytics); loopback http
 	WSAllowedOrigins []string // extra browser origins allowed on /ws (same-origin always is)
 }
 
@@ -162,6 +163,11 @@ func Load(getenv func(string) string) (Config, error) {
 			errs = append(errs, errors.New("CLICKHOUSE_URL is required outside dev"))
 		}
 	}
+	cfg.QuantURL = get("QUANT_URL", "http://127.0.0.1:8090")
+	// The quant API has no authentication: it trusts that only the gateway can reach it.
+	if u, err := url.Parse(cfg.QuantURL); err != nil || u.Scheme != "http" || u.Path != "" || !isLoopbackHost(u.Hostname()) {
+		errs = append(errs, errors.New("QUANT_URL must be http://<loopback ip>:<port> (the quant API is unauthenticated)"))
+	}
 	for _, o := range strings.Split(get("WS_ALLOWED_ORIGINS", ""), ",") {
 		if o = strings.TrimSpace(o); o != "" {
 			cfg.WSAllowedOrigins = append(cfg.WSAllowedOrigins, o)
@@ -216,4 +222,9 @@ func redactURL(raw string) string {
 		return "<unparseable>"
 	}
 	return u.Host + u.Path
+}
+
+func isLoopbackHost(h string) bool {
+	a, err := netip.ParseAddr(h)
+	return err == nil && a.IsLoopback()
 }

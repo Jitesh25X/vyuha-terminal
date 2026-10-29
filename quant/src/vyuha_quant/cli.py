@@ -55,6 +55,10 @@ def _parser() -> argparse.ArgumentParser:
 
     hol = sub.add_parser("holidays", help="exchange holidays").add_subparsers(dest="action", required=True)
     hol.add_parser("seed", help="seed exchange_holiday from exchange_calendars (XBOM)")
+
+    sub.add_parser(
+        "serve", help="internal HTTP API for the gateway (QUANT_HTTP_ADDR, default 127.0.0.1:8090)"
+    )
     return p
 
 
@@ -80,11 +84,26 @@ async def _run(a: argparse.Namespace, settings: config.Settings) -> dict[str, An
     raise AssertionError(a)
 
 
+def _serve(settings: config.Settings) -> int:
+    """Runs the internal API until interrupted (a long-running service, not a job: no JSON report)."""
+    import uvicorn
+
+    from .api.app import create_app
+
+    host, _, port = settings.http_addr.rpartition(":")
+    uvicorn.run(
+        create_app(settings), host=host.strip("[]"), port=int(port), log_config=None, access_log=False
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(_JsonFormatter())
     logging.basicConfig(level=logging.INFO, handlers=[handler])
     a = _parser().parse_args(argv)
+    if a.cmd == "serve":
+        return _serve(config.load())
     try:
         report = asyncio.run(_run(a, config.load()))
     except Exception as e:

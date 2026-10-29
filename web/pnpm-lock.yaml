@@ -26,6 +26,9 @@ importers:
       dockview:
         specifier: 8.6.1
         version: 8.6.1
+      echarts:
+        specifier: 6.1.0
+        version: 6.1.0
       lightweight-charts:
         specifier: 5.2.1
         version: 5.2.1
@@ -663,6 +666,9 @@ packages:
   dockview@8.6.1:
     resolution: {integrity: sha512-2WZyTw+Wln7ZX7er4XhH6S9i3InfdbdQZZo/tK26GdQudKn913ctbRN2tkZgXCN9mToGSd5aj8ANp1Lid/MMEQ==}
 
+  echarts@6.1.0:
+    resolution: {integrity: sha512-q0yaFPggC9FUdsWH4blavRWFmxdrIodbkoKNAjJudAI6CA9gNPxHtV2RcZNEepZVlk4yvBYkOkbk6HIVpIyHZA==}
+
   enhanced-resolve@5.26.0:
     resolution: {integrity: sha512-9vhedylFonb2YGogzUKX6+Ja72gOJbN1QHAqdrvqLwhdl/QWbKopzoUC9EbQNVsAns/bx/4uyqalrQAoy1IByw==}
     engines: {node: '>=10.13.0'}
@@ -986,6 +992,9 @@ packages:
     resolution: {integrity: sha512-rClxhLQl+I5UMB5Ny7sfnZqDNa51u7h7h4gJV2UWslwADHEw75IuVPCnWrpO/otM7jHrHpwcZdRHd+//SiI55A==}
     engines: {node: '>=22'}
 
+  tslib@2.3.0:
+    resolution: {integrity: sha512-N82ooyxVNm6h1riLCoyS9e3fuJ3AMG2zIZs2Gd1ATcSFjSA23Q0fzjjZeh0jbJvWVDZ0cJT8yaNNaaXHzueNjg==}
+
   tslib@2.8.1:
     resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
 
@@ -1102,6 +1111,9 @@ packages:
     resolution: {integrity: sha512-Tb2FUhB4vUsGQlfSquQLYkApkuPAFQXGFzxWKHHumVz2dK+X1RUm/HnID4+TfIGYJ1kTcwOaCk/buYCEJr6YjQ==}
     engines: {node: '>=20.11'}
     hasBin: true
+
+  zrender@6.1.0:
+    resolution: {integrity: sha512-oEGMDB6pOP2S6OwRR4PdVv610zrjnA3Bh+JnSG12fYJlBKjtNAoEb5fSUoCOOINlH96I2fU38/A2UpRKs67xYQ==}
 
   zustand@5.0.15:
     resolution: {integrity: sha512-MpSEjRiBkA9crSYeOUH32rJC7SVqAbm0Fqcqge/bUi2PPoLcBWKOsG+C8mevmpr8TwXHBVkChbbJiyvkE+i/3A==}
@@ -1548,6 +1560,11 @@ snapshots:
     dependencies:
       dockview-core: 8.6.1
 
+  echarts@6.1.0:
+    dependencies:
+      tslib: 2.3.0
+      zrender: 6.1.0
+
   enhanced-resolve@5.26.0:
     dependencies:
       graceful-fs: 4.2.11
@@ -1798,6 +1815,8 @@ snapshots:
 
   tinykeys@4.0.1: {}
 
+  tslib@2.3.0: {}
+
   tslib@2.8.1: {}
 
   typescript@7.0.2:
@@ -1869,6 +1888,10 @@ snapshots:
       - msw
 
   why-is-node-running@3.2.1: {}
+
+  zrender@6.1.0:
+    dependencies:
+      tslib: 2.3.0
 
   zustand@5.0.15(@types/react@19.3.0)(react@19.3.1):
     optionalDependencies:

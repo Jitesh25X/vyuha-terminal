@@ -395,7 +395,22 @@ do_web() {
   "$BIN_DIR/corepack" enable --install-directory "$BIN_DIR" pnpm
   COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "$BIN_DIR/corepack" prepare "pnpm@$PNPM_VERSION" --activate
   ok "web ready: node $("$BIN_DIR/node" --version), pnpm $(COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "$BIN_DIR/pnpm" --version)"
+  check_shell_node
   path_hint
+}
+
+# web/package.json pins engines.node (engine-strict) and .nvmrc names the same version. make targets put
+# $BIN_DIR first; a plain `pnpm` in your shell uses whatever node is first on *your* PATH, so say so.
+check_shell_node() {
+  [ "$(cat .nvmrc 2>/dev/null)" = "$NODE_VERSION" ] || echo "⚠ .nvmrc does not say $NODE_VERSION (keep it in sync with NODE_VERSION)"
+  local active
+  active="$(PATH="$USER_PATH" command -v node 2>/dev/null || true)"
+  if [ -z "$active" ]; then
+    log "no node on your shell PATH: use make targets, or add $BIN_DIR to PATH"
+  elif [ "$(PATH="$USER_PATH" node --version)" != "v$NODE_VERSION" ]; then
+    echo "⚠ your shell's node is $(PATH="$USER_PATH" node --version) ($active), not v$NODE_VERSION: pnpm in web/ will refuse"
+    echo "  (engine-strict). Run 'nvm use' / 'fnm use' in the repo (.nvmrc), or put $BIN_DIR first on PATH."
+  fi
 }
 
 case "$component" in

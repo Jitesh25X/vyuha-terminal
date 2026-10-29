@@ -58,6 +58,148 @@ func (q *Queries) GetInstrument(ctx context.Context, id int64) (GetInstrumentRow
 	return i, err
 }
 
+const getSameExpiryFuture = `-- name: GetSameExpiryFuture :one
+SELECT id
+FROM instrument
+WHERE underlying_id = $1 AND segment = 'FUT' AND expiry = $2::date AND valid_to IS NULL
+ORDER BY id
+LIMIT 1
+`
+
+type GetSameExpiryFutureParams struct {
+	UnderlyingID pgtype.Int8
+	Expiry       pgtype.Date
+}
+
+func (q *Queries) GetSameExpiryFuture(ctx context.Context, arg GetSameExpiryFutureParams) (int64, error) {
+	row := q.db.QueryRow(ctx, getSameExpiryFuture, arg.UnderlyingID, arg.Expiry)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const listChainContracts = `-- name: ListChainContracts :many
+SELECT id, tradingsymbol, strike, option_type, lot_size, tick_size
+FROM instrument
+WHERE underlying_id = $1 AND segment = 'OPT' AND expiry = $2::date AND valid_to IS NULL
+ORDER BY strike, option_type
+`
+
+type ListChainContractsParams struct {
+	UnderlyingID pgtype.Int8
+	Expiry       pgtype.Date
+}
+
+type ListChainContractsRow struct {
+	ID            int64
+	Tradingsymbol string
+	Strike        pgtype.Numeric
+	OptionType    NullOptionType
+	LotSize       int32
+	TickSize      pgtype.Numeric
+}
+
+// Every active option of one expiry (instrument_chain index), strikes ascending, CE before PE.
+func (q *Queries) ListChainContracts(ctx context.Context, arg ListChainContractsParams) ([]ListChainContractsRow, error) {
+	rows, err := q.db.Query(ctx, listChainContracts, arg.UnderlyingID, arg.Expiry)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListChainContractsRow
+	for rows.Next() {
+		var i ListChainContractsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Tradingsymbol,
+			&i.Strike,
+			&i.OptionType,
+			&i.LotSize,
+			&i.TickSize,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOptionExpiries = `-- name: ListOptionExpiries :many
+SELECT DISTINCT expiry::date AS expiry
+FROM instrument
+WHERE underlying_id = $1 AND segment = 'OPT' AND valid_to IS NULL AND expiry >= $2::date
+ORDER BY expiry
+`
+
+type ListOptionExpiriesParams struct {
+	UnderlyingID pgtype.Int8
+	FromDay      pgtype.Date
+}
+
+// Active option expiries of an underlying from @from_day (today IST), nearest first.
+func (q *Queries) ListOptionExpiries(ctx context.Context, arg ListOptionExpiriesParams) ([]pgtype.Date, error) {
+	rows, err := q.db.Query(ctx, listOptionExpiries, arg.UnderlyingID, arg.FromDay)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.Date
+	for rows.Next() {
+		var expiry pgtype.Date
+		if err := rows.Scan(&expiry); err != nil {
+			return nil, err
+		}
+		items = append(items, expiry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUpcomingDividends = `-- name: ListUpcomingDividends :many
+SELECT ex_date, amount::numeric AS amount
+FROM corporate_action
+WHERE instrument_id = $1 AND kind = 'dividend' AND amount IS NOT NULL
+  AND ex_date > $2::date AND ex_date <= $3::date
+ORDER BY ex_date
+`
+
+type ListUpcomingDividendsParams struct {
+	InstrumentID int64
+	After        pgtype.Date
+	Until        pgtype.Date
+}
+
+type ListUpcomingDividendsRow struct {
+	ExDate pgtype.Date
+	Amount pgtype.Numeric
+}
+
+// Cash dividends going ex in (@after, @until] (escrowed-dividend BSM for stock options).
+func (q *Queries) ListUpcomingDividends(ctx context.Context, arg ListUpcomingDividendsParams) ([]ListUpcomingDividendsRow, error) {
+	rows, err := q.db.Query(ctx, listUpcomingDividends, arg.InstrumentID, arg.After, arg.Until)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUpcomingDividendsRow
+	for rows.Next() {
+		var i ListUpcomingDividendsRow
+		if err := rows.Scan(&i.ExDate, &i.Amount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const searchInstruments = `-- name: SearchInstruments :many
 SELECT id, exchange, segment, symbol, tradingsymbol, name, underlying_id, expiry, strike, option_type,
        lot_size, tick_size, freeze_qty, fo_ban, valid_to

@@ -36,11 +36,11 @@ Req `{ "mfa_token": "…", "totp": "123456" }` → 200 `{ "access_token": "…",
 ## 2. Instruments & market data
 ### `GET /instruments/search?q=relia&segment=EQ&limit=20` → `[{ id, exchange, segment, tradingsymbol, name, expiry, strike, option_type, lot_size, tick_size }]` (M1.9: prefix on trading symbol or underlying symbol, active contracts only; exact symbol first, then cash/index, nearer expiries; `segment` also accepts an exchange NSE/BSE/NFO/BFO; limit ≤ 50)
 ### `GET /instruments/{id}` → full instrument incl. `freeze_qty`, `fo_ban`, `underlying_id`.
-### `GET /instruments/{id}/expiries` → `["2026-10-28", …]`
+### `GET /instruments/{id}/expiries` → `["2026-10-28", …]` (M1.10: active option expiries from today IST, nearest first)
 ### `GET /marketdata/snapshot?ids=1,2,3` (entitled) → `[{ instrument_id, ltp, change_pct, bid, ask, volume, oi, ts, stale }]`
 ### `GET /marketdata/candles?instrument_id=&interval=1m&from=&to=&adjusted=true` (entitled) → `{ "bars": [[ts, o, h, l, c, v, oi], …] }`. Max 50,000 bars per call; 400 if exceeded. (M1.9: intervals 1m/5m/15m/1h/1d built from recorded 1-minute bars — intraday buckets UTC-aligned, 1d by IST day; ts RFC 3339 UTC, prices decimal strings; entitlement = same rule as the WebSocket hub, 403 `MD_NOT_ENTITLED`; 503 `MD_UNAVAILABLE` when ClickHouse is down; `adjusted` not implemented yet.)
 ### `GET /optionchain/{underlying_id}?expiry=2026-10-28&strikes=20` (entitled)
-→ `{ underlying: {ltp, fut_ltp}, expiry, pcr, max_pain, atm_strike, rows: [{ strike, ce: {instrument_id, ltp, oi, oi_chg, iv, delta, gamma, theta, vega, bid, ask, volume}, pe: {…} }] }`
+→ `{ underlying: {ltp, fut_ltp}, expiry, pcr, max_pain, atm_strike, rows: [{ strike, ce: {instrument_id, ltp, oi, oi_chg, iv, delta, gamma, theta, vega, bid, ask, volume}, pe: {…} }] }` (M1.10: rows = `strikes` ± N around ATM, 1–50; `expiry` defaults to the nearest; also `lot_size`, `analytics: ok|unavailable`, `model`, `forward`, `forward_source`, `rate`, `rate_as_of`, `t_years`, `as_of`, `contract_ids`, `oi_strikes`, per side `tradingsymbol`/`prev_close`/`iv_source` (mid|ltp); absent fields = unknown, e.g. `oi_chg` without a recorded baseline. Values only from the user's own feeds (ADR-020); the client subscribes `contract_ids` on the WebSocket to make the engine carry the whole expiry. PCR/max pain over every strike of the expiry with OI. IV from a tight mid (spread ≤ `IV_MID_MAX_SPREAD`), else an LTP that traded within `IV_LTP_MAX_AGE_S`, else absent. 403 `MD_NOT_ENTITLED`, 404 no listed options.)
 
 ## 3. Orders
 ### `POST /orders/preview` — trader+

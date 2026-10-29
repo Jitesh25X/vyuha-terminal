@@ -21,6 +21,7 @@ import (
 	"github.com/jiteshraj/vyuha/gateway/internal/config"
 	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
 	"github.com/jiteshraj/vyuha/gateway/internal/enginec"
+	"github.com/jiteshraj/vyuha/gateway/internal/quantc"
 	"github.com/jiteshraj/vyuha/gateway/internal/store"
 	"github.com/jiteshraj/vyuha/gateway/internal/telemetry"
 	"github.com/jiteshraj/vyuha/gateway/internal/ws"
@@ -112,7 +113,10 @@ func run() error {
 	mux.Handle("/ws", hub)
 	mux.Handle("/", api.NewHandler(api.NewServer(version, cfg.Env, queries, authSvc, logger).
 		WithTrustedProxies(cfg.TrustedProxies).WithBrokers(brokerSvc).
-		WithMarketData(&api.MarketData{Instruments: queries, Candles: bars, Entitlement: directory}), logger))
+		WithMarketData(&api.MarketData{Instruments: queries, Candles: bars, Entitlement: directory}).
+		WithOptionChains(&api.OptionChains{
+			Store: queries, Entitlement: directory, Latest: hub, OI: bars, Quant: quantc.New(cfg.QuantURL),
+		}), logger))
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           mux,

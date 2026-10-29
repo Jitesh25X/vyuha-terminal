@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http/httptest"
 	"slices"
 	"strconv"
@@ -787,5 +788,85 @@ func TestBarsOnlyThroughTheUsersCarryingAccount(t *testing.T) {
 	h.hub.onBar(&marketdatav1.Bar{InstrumentId: 101, Interval: "1m", TsNs: 3, Close: 7})
 	if m := alice.read(300 * time.Millisecond); m != nil && m.GetUpdates().GetChannel() == wsv1.Channel_CHANNEL_BAR_1M {
 		t.Fatalf("bar delivered through a feed that no longer carries the instrument: %v", m)
+	}
+}
+
+// Latest (REST reads, e.g. the option chain) applies the same feed rule as WebSocket snapshots
+// (ADR-020): a value is returned only when it came from one of the given accounts' feeds.
+func TestLatestOnlyFromTheUsersFeeds(t *testing.T) {
+	src := &fakeSource{ready: make(chan struct{}), last: map[uint64]*marketdatav1.Snapshot{
+		2: {Tick: &marketdatav1.Tick{InstrumentId: 2, FeedId: 22, Ltp: 200}}, // colleague's feed
+		3: {Tick: &marketdatav1.Tick{InstrumentId: 3, FeedId: 99, Ltp: 300}}, // feed no session reports
+		4: {Tick: &marketdatav1.Tick{InstrumentId: 4, FeedId: 11, Ltp: 400}}, // own feed, not cached
+	}}
+	h := New(DefaultConfig(), nil, &fakeDir{}, &fakeEngine{}, src, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Now)
+	h.feeds = map[uint32]string{11: "A", 22: "B"}
+	h.last[lastKey{1, "A"}] = &marketdatav1.Tick{InstrumentId: 1, FeedId: 11, Ltp: 100, RecvTsNs: 5}
+	h.last[lastKey{1, "B"}] = &marketdatav1.Tick{InstrumentId: 1, FeedId: 22, Ltp: 101, RecvTsNs: 9}
+
+	ltps := func(accounts map[string]bool) map[uint64]int64 {
+		out := map[uint64]int64{}
+		for id, v := range h.Latest(context.Background(), accounts, []uint64{1, 2, 3, 4, 5}) {
+			out[id] = v.Tick.GetLtp()
+		}
+		return out
+	}
+	for name, tc := range map[string]struct {
+		accounts map[string]bool
+		want     map[uint64]int64
+	}{
+		"own feed only: never the colleague's newer tick": {map[string]bool{"A": true}, map[uint64]int64{1: 100, 4: 400}},
+		"colleague only":          {map[string]bool{"B": true}, map[uint64]int64{1: 101, 2: 200}},
+		"both: newest of the two": {map[string]bool{"A": true, "B": true}, map[uint64]int64{1: 101, 2: 200, 4: 400}},
+		"no data accounts":        {map[string]bool{}, map[uint64]int64{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := ltps(tc.accounts); !maps.Equal(got, tc.want) {
+				t.Fatalf("Latest = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDataAccounts(t *testing.T) {
+	got := DataAccounts([]Account{
+		{ID: "a", Broker: "zerodha", DataEntitled: true}, {ID: "b", Broker: "upstox"}, {ID: "c", Broker: "sim", DataEntitled: true},
+		{ID: "d", Broker: "upstox", DataEntitled: true},
+	})
+	if !maps.Equal(got, map[string]bool{"a": true, "d": true}) {
+		t.Fatalf("DataAccounts = %v", got)
+	}
+}
+
+// A trade is inferred when a feed's cumulative day volume rises between two of its ticks; quote
+// refreshes without volume don't count, and the first tick seen has no baseline.
+func TestLatestTradedAtFromVolume(t *testing.T) {
+	now := time.Date(2026, 10, 29, 5, 30, 0, 0, time.UTC)
+	clock := now
+	h := New(DefaultConfig(), nil, &fakeDir{}, &fakeEngine{}, &fakeSource{ready: make(chan struct{})},
+		slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return clock })
+	h.feeds = map[uint32]string{11: "A"}
+	h.byInstrument[7] = map[*client]int{{}: 1} // someone is subscribed
+	traded := func() time.Time {
+		return h.Latest(context.Background(), map[string]bool{"A": true}, []uint64{7})[7].TradedAt
+	}
+	h.onTick(&marketdatav1.Tick{InstrumentId: 7, FeedId: 11, Volume: 100, Ltp: 1})
+	if !traded().IsZero() {
+		t.Fatal("first tick: no baseline, no trade time")
+	}
+	clock = now.Add(time.Second)
+	h.onTick(&marketdatav1.Tick{InstrumentId: 7, FeedId: 11, Volume: 100, Bid: 2}) // quote change only
+	if !traded().IsZero() {
+		t.Fatal("a quote refresh is not a trade")
+	}
+	clock = now.Add(2 * time.Second)
+	h.onTick(&marketdatav1.Tick{InstrumentId: 7, FeedId: 11, Volume: 175, Ltp: 3})
+	if got := traded(); !got.Equal(now.Add(2 * time.Second)) {
+		t.Fatalf("TradedAt = %v", got)
+	}
+	clock = now.Add(time.Minute)
+	h.onTick(&marketdatav1.Tick{InstrumentId: 7, FeedId: 11, Volume: 175, Bid: 4})
+	if got := traded(); !got.Equal(now.Add(2 * time.Second)) {
+		t.Fatalf("TradedAt moved without a trade: %v", got)
 	}
 }

@@ -253,6 +253,53 @@ paths:
               schema: { $ref: "#/components/schemas/Instrument" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /instruments/{id}/expiries:
+    get:
+      operationId: getExpiries
+      summary: Active option expiries of an underlying (today IST onwards), nearest first
+      tags: [marketdata]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        "200":
+          description: Expiry dates (empty when the instrument has no listed options)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string, format: date }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /optionchain/{underlying_id}:
+    get:
+      operationId: getOptionChain
+      summary: Option chain with IV, Greeks, PCR and max pain (F-MD-3)
+      description: |
+        Rows: strikes ± `strikes` around ATM (nearest strike to the underlying's LTP; the middle listed
+        strike before any price is known) for one expiry (default: nearest). Market fields come from the
+        latest tick of a feed the user may see (ADR-020); contracts with none are listed without them.
+        PCR and max pain cover every strike of the expiry with OI (`oi_strikes`), independent of the
+        rows. The gateway does not register engine interest: the terminal subscribes `contract_ids`
+        (the whole expiry) and the underlying/future over the WebSocket. IV/Greeks are computed by
+        quant (RISK_ENGINE §6.1: Black-76 on the same-expiry future or the put-call-parity forward for
+        index options, BSM on spot for stock options) from the mid when the spread is tight, else from
+        an LTP that traded within the last minute (`iv_source`), else not at all. When quant is
+        unreachable the chain is still returned with `analytics: unavailable`. `oi_chg` is OI minus the
+        last recorded OI before today's session (ClickHouse 1-minute bars); absent without one. 403
+        MD_NOT_ENTITLED when the user has no data-entitled account whose broker streams the chain.
+      tags: [marketdata]
+      parameters:
+        - { name: underlying_id, in: path, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+        - { name: expiry, in: query, required: false, schema: { type: string, format: date } }
+        - { name: strikes, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+      responses:
+        "200":
+          description: Chain, strikes ascending
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OptionChain" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /marketdata/candles:
     get:
       operationId: getCandles
@@ -464,6 +511,69 @@ components:
           items:
             type: array
             items: {}
+    OptionChain:
+      type: object
+      required: [underlying, expiry, lot_size, analytics, as_of, rows, contract_ids]
+      properties:
+        underlying:
+          type: object
+          required: [instrument_id]
+          properties:
+            instrument_id: { type: integer, format: int64 }
+            ltp: { type: string, description: "Decimal string; absent until a tick is seen" }
+            future_id: { type: integer, format: int64, description: "Same-expiry future, when listed" }
+            fut_ltp: { type: string }
+        expiry: { type: string, format: date }
+        lot_size: { type: integer }
+        analytics: { type: string, enum: [ok, unavailable] }
+        model: { type: string, enum: [black76, bsm] }
+        forward: { type: number, format: double, description: "Forward (Black-76) or dividend-adjusted spot (BSM), rupees" }
+        forward_source: { type: string, enum: [future, synthetic_mid, synthetic_ltp, spot] }
+        rate: { type: number, format: double }
+        rate_as_of: { type: string, format: date, description: "When the configured risk-free rate took effect" }
+        t_years: { type: number, format: double }
+        atm_strike: { type: string }
+        pcr: { type: number, format: double, description: "Put OI / call OI over every strike of the expiry with OI" }
+        max_pain: { type: string }
+        oi_strikes: { type: integer, description: "Strikes with OI behind pcr and max_pain" }
+        contract_ids:
+          type: array
+          description: Every contract of the expiry (subscribe them so PCR and max pain see the whole chain)
+          items: { type: integer, format: int64 }
+        as_of: { type: string, format: date-time }
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/OptionChainRow" }
+    OptionChainRow:
+      type: object
+      required: [strike]
+      properties:
+        strike: { type: string }
+        ce: { $ref: "#/components/schemas/OptionSide" }
+        pe: { $ref: "#/components/schemas/OptionSide" }
+    OptionSide:
+      type: object
+      description: |
+        One contract. Market fields are absent until a tick is seen; analytics are absent where undefined
+        (no forward, price below intrinsic − 1 tick, …). iv is a decimal (0.142 = 14.2 %); Greeks are per
+        unit with respect to the model's underlying: theta in ₹ per calendar day, vega in ₹ per vol point.
+      required: [instrument_id, tradingsymbol]
+      properties:
+        instrument_id: { type: integer, format: int64 }
+        tradingsymbol: { type: string }
+        ltp: { type: string }
+        prev_close: { type: string }
+        bid: { type: string }
+        ask: { type: string }
+        volume: { type: integer, format: int64 }
+        oi: { type: integer, format: int64 }
+        oi_chg: { type: integer, format: int64 }
+        iv: { type: number, format: double }
+        iv_source: { type: string, enum: [mid, ltp], description: "Price the IV was solved from" }
+        delta: { type: number, format: double }
+        gamma: { type: number, format: double }
+        theta: { type: number, format: double }
+        vega: { type: number, format: double }
     BrokerLoginUrl:
       type: object
       required: [url]

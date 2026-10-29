@@ -115,3 +115,41 @@ func (r *Reader) Bars(ctx context.Context, instrumentID uint64, interval string,
 	}
 	return out, nil
 }
+
+// oiLookback bounds the search for a previous close: long weekends and holiday runs stay inside it.
+const oiLookback = 10 * 24 * time.Hour
+
+// LastOI returns each instrument's last recorded open interest before `before` (pass today's session
+// open to get the previous session's closing OI, the baseline for ΔOI). Instruments with no recorded
+// OI in the 10 days before are absent.
+func (r *Reader) LastOI(ctx context.Context, ids []uint64, before time.Time) (map[uint64]uint64, error) {
+	out := make(map[uint64]uint64, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+	q := `SELECT instrument_id, argMax(oi, ts)
+	      FROM ` + r.database + `.bars FINAL
+	      WHERE instrument_id IN (?) AND interval = '1m' AND oi > 0 AND ts >= ? AND ts < ?
+	      GROUP BY instrument_id`
+	rows, err := r.conn.Query(ctx, q, ids, before.Add(-oiLookback).UTC(), before.UTC())
+	if err != nil {
+		return nil, fmt.Errorf("candles: last oi: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			id uint64
+			oi uint64
+		)
+		if err := rows.Scan(&id, &oi); err != nil {
+			return nil, fmt.Errorf("candles: last oi scan: %w", err)
+		}
+		out[id] = oi
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("candles: last oi rows: %w", err)
+	}
+	return out, nil
+}
