@@ -6,7 +6,9 @@
   "dependencies": [
     "boost-asio",
     "boost-beast",
+    "cnats",
     "grpc",
+    "libpqxx",
     "openssl",
     "protobuf",
     "quill",

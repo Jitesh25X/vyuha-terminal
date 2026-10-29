@@ -1,5 +1,6 @@
 // vyuha_engine: core loop + broker sessions + gRPC control API (engine.v1.EngineService).
-// Env: ENGINE_GRPC_ADDR (default 127.0.0.1:7443; private network + mTLS in prod, see README).
+// Env: ENGINE_GRPC_ADDR (default 127.0.0.1:7443; private network + mTLS in prod, see README),
+//      NATS_URL (market data out; empty = count only), POSTGRES_URL (instrument master; empty = none).
 
 #include <atomic>
 #include <csignal>
@@ -17,11 +18,13 @@
 
 #include "../rpc/engine_service.h"
 #include "quill/LogMacros.h"
+#include "vyuha/bus/md_publisher.h"
 #include "vyuha/core/clock.h"
 #include "vyuha/core/core_loop.h"
 #include "vyuha/core/version.h"
 #include "vyuha/md/tick.h"
 #include "vyuha/session/instrument_directory.h"
+#include "vyuha/session/pg_instrument_directory.h"
 #include "vyuha/session/session_manager.h"
 #include "vyuha/util/log.h"
 
@@ -55,7 +58,19 @@ int run() {
   const std::string addr = env_or("ENGINE_GRPC_ADDR", "127.0.0.1:7443");
 
   const vyuha::WallClock clock;
-  CountingSink sink;
+  CountingSink counting;
+  // Market data out: NATS when configured (M1.7), else just counted.
+  const std::string nats_url = env_or("NATS_URL", "");
+  std::unique_ptr<vyuha::bus::MdPublisher> publisher;
+  if (!nats_url.empty()) {
+    publisher =
+        std::make_unique<vyuha::bus::MdPublisher>(vyuha::bus::PublisherConfig{.url = nats_url}, clock);
+    if (auto ok = publisher->start(); !ok) {
+      LOG_ERROR(log, "engine: {}", ok.error().detail);
+      return 1;
+    }
+  }
+  vyuha::md::IMdSink& sink = publisher ? static_cast<vyuha::md::IMdSink&>(*publisher) : counting;
   vyuha::CoreLoop core(vyuha::CoreConfig{}, clock, sink);
   std::vector<std::unique_ptr<vyuha::TickRing>> rings;
   std::vector<vyuha::TickRing*> ring_ptrs;
@@ -64,8 +79,21 @@ int run() {
     ring_ptrs.push_back(rings.back().get());
     (void)core.add_input(*rings.back());
   }
-  // Instrument ids → broker ids come from Postgres from M1.7; until then no instrument resolves.
-  const vyuha::session::StaticInstrumentDirectory instruments({});
+  // Instrument ids → broker ids from the Postgres instrument master (quant sync, F-MD-1).
+  const std::string pg_url = env_or("POSTGRES_URL", "");
+  const vyuha::session::StaticInstrumentDirectory no_instruments({});
+  std::unique_ptr<vyuha::session::PgInstrumentDirectory> pg;
+  if (!pg_url.empty()) {
+    pg = std::make_unique<vyuha::session::PgInstrumentDirectory>(pg_url);
+    const auto n = pg->refresh();
+    if (!n) {
+      LOG_ERROR(log, "engine: {}", n.error().detail);
+      return 1;
+    }
+    LOG_INFO(log, "instrument master loaded: {} instruments with broker ids", *n);
+  }
+  const vyuha::session::InstrumentDirectory& instruments =
+      pg ? static_cast<const vyuha::session::InstrumentDirectory&>(*pg) : no_instruments;
   vyuha::session::SessionManager sessions(vyuha::session::SessionManagerConfig{}, instruments, ring_ptrs,
                                           clock);
   vyuha::rpc::EngineServiceImpl service(sessions);
@@ -92,6 +120,12 @@ int run() {
   server->Shutdown();
   core_thread.request_stop();
   core_thread.join();
+  if (publisher) {
+    const auto st = publisher->stats();
+    LOG_INFO(log, "md publisher: published_ticks={} published_bars={} dropped={} errors={}",
+             st.published_ticks, st.published_bars, st.dropped, st.publish_errors);
+    publisher->stop();
+  }
   log->flush_log();  // Quill formats on its backend thread: drain it before exit
   return 0;
 }

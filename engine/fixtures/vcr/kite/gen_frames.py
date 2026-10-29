@@ -19,7 +19,7 @@ NSE_EQ = (2885 << 8) | 1
 NIFTY_IDX = 256265  # 256265 & 0xff == 9 (indices)
 CDS = (1234 << 8) | 3  # currency: unsupported
 
-TS = 1_793_190_900  # 2026-10-28 09:25:00 IST, seconds
+TS = 1_793_190_900  # 2026-10-28 12:35:00 UTC (18:05 IST), seconds
 
 
 def ltp(token, paise):

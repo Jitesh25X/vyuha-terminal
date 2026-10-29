@@ -12,7 +12,7 @@ namespace vyuha::testing::upstox {
 
 namespace pb = com::upstox::marketdatafeederv3udapi::rpc::proto;
 
-constexpr std::int64_t kTsMs = 1'793'190'900'000;  // 2026-10-28 09:25:00 IST
+constexpr std::int64_t kTsMs = 1'793'190'900'000;  // 2026-10-28 12:35:00 UTC (18:05 IST)
 
 inline void set_ltpc(pb::LTPC* l, double ltp, std::int64_t ltt_ms, std::int64_t ltq, double cp) {
   l->set_ltp(ltp);

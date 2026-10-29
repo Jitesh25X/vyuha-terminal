@@ -32,6 +32,7 @@ find_package(boost_asio CONFIG REQUIRED)
 find_package(boost_beast CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(simdjson CONFIG REQUIRED)
+find_package(cnats CONFIG REQUIRED)
 
 add_library(vyuha_core_lib
   src/core/core_loop.cc
@@ -71,6 +72,11 @@ add_library(vyuha_upstox
 )
 add_library(vyuha::upstox ALIAS vyuha_upstox)
 
+# Market-data bus: protobuf encoders + NATS publisher (md.tick.*, md.bar.*, KV md_last).
+add_library(vyuha_bus src/bus/md_encode.cc src/bus/md_publisher.cc)
+add_library(vyuha::bus ALIAS vyuha_bus)
+target_link_libraries(vyuha_bus PUBLIC vyuha::core PRIVATE vyuha_warnings cnats::nats_static)
+
 # Broker session control plane (gRPC handlers call into it).
 add_library(vyuha_session src/session/session_manager.cc)
 add_library(vyuha::session ALIAS vyuha_session)
@@ -107,11 +113,15 @@ if(NOT VYUHA_SANITIZER)
                     GENERATE_EXTENSIONS .grpc.pb.h .grpc.pb.cc
                     PLUGIN "protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>")
 
+  find_package(libpqxx CONFIG REQUIRED)
+  add_library(vyuha_pg STATIC src/session/pg_instrument_directory.cc)
+  target_link_libraries(vyuha_pg PUBLIC vyuha::session PRIVATE vyuha_warnings libpqxx::pqxx)
+
   add_library(vyuha_rpc STATIC src/rpc/engine_service.cc)
   target_link_libraries(vyuha_rpc PUBLIC vyuha::session vyuha_engine_proto PRIVATE vyuha_warnings)
 
   add_executable(vyuha_engine src/app/main.cc)
-  target_link_libraries(vyuha_engine PRIVATE vyuha_rpc vyuha_warnings)
+  target_link_libraries(vyuha_engine PRIVATE vyuha_rpc vyuha_pg vyuha::bus vyuha_warnings)
 endif()
 
 if(VYUHA_BUILD_TESTS)

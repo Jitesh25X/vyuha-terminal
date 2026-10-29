@@ -42,10 +42,47 @@ jobs:
           tar -C "$tmp" -xzf "$tmp/gl.tgz" gitleaks
           "$tmp/gitleaks" git --redact --no-banner --verbose .
 
-  engine:
-    name: engine (${{ matrix.preset }})
+  # Builds the vcpkg manifest once into the binary cache so the preset jobs below restore it instead
+  # of each compiling gRPC/abseil/protobuf in parallel (which filled the runners' disks). Sanitizer
+  # flags live in our CMake, not the triplet, so all presets share one set of archives.
+  engine-deps:
+    name: engine deps (vcpkg)
     runs-on: ubuntu-24.04
     timeout-minutes: 150  # first build of a new vcpkg manifest (gRPC) is long; cached afterwards
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VYUHA_TOOLS_DIR }}
+          key: tools-cpp-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'engine/vcpkg.json') }}
+      - id: vcpkg-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-gcc14-${{ hashFiles('engine/vcpkg.json', 'engine/vcpkg-configuration.json', 'engine/vcpkg-overlays/**') }}
+      - if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        run: |
+          scripts/bootstrap.sh cpp
+          echo "$VYUHA_TOOLS_DIR/bin" >> "$GITHUB_PATH"
+      - if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        run: cd engine && cmake --preset debug # configure runs the manifest install
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: engine-deps-logs
+          path: engine/build/debug/vcpkg-manifest-install.log
+          retention-days: 7
+
+  engine:
+    name: engine (${{ matrix.preset }})
+    needs: engine-deps
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -59,17 +96,21 @@ jobs:
         with:
           path: ${{ env.VYUHA_TOOLS_DIR }}
           key: tools-cpp-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'engine/vcpkg.json') }}
-      # vcpkg binary cache: ports (gtest, benchmark, nanobind) build once per manifest change.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # vcpkg binary cache, saved by engine-deps; restore only.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/vcpkg/archives
           key: vcpkg-${{ runner.os }}-gcc14-${{ hashFiles('engine/vcpkg.json', 'engine/vcpkg-configuration.json', 'engine/vcpkg-overlays/**') }}
+          fail-on-cache-miss: true
+      - run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - run: |
           scripts/bootstrap.sh cpp
           echo "$VYUHA_TOOLS_DIR/bin" >> "$GITHUB_PATH"
       # Ubuntu 24.04 runners use 32-bit mmap ASLR, which TSan's shadow memory layout can't handle.
       - if: matrix.preset == 'tsan'
         run: sudo sysctl vm.mmap_rnd_bits=28
+      - if: matrix.preset == 'debug'
+        run: make up # NATS publisher + Postgres instrument-directory integration tests
       - run: make test-engine ENGINE_PRESETS=${{ matrix.preset }}
       - if: matrix.preset == 'debug'
         run: make lint-engine
@@ -122,7 +163,7 @@ jobs:
           scripts/bootstrap.sh proto
           scripts/bootstrap.sh go
           echo "$VYUHA_TOOLS_DIR/bin" >> "$GITHUB_PATH"
-      - run: make up # postgres + nats (pinned digests); store/auth integration tests need Postgres
+      - run: make up PROFILES="core md" # postgres + nats + clickhouse (pinned digests) for integration tests
       - run: make test-gateway
       - run: make lint-gateway
       - name: generated code is up to date (oapi-codegen, sqlc)
@@ -201,7 +242,7 @@ jobs:
   # The one required status check on main.
   ci-ok:
     if: always()
-    needs: [hygiene, engine, fuzz, gateway, quant, web]
+    needs: [hygiene, engine-deps, engine, fuzz, gateway, quant, web]
     runs-on: ubuntu-24.04
     steps:
       - run: |
