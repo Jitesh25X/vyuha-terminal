@@ -10,11 +10,11 @@ function fn(mnemonic: string, title: string, needs: Needs, help: string, load: F
 }
 
 export const FUNCTIONS: readonly FunctionDef[] = [
-  fn("Q", "Quote", "security", "LTP, change, OHLC, volume, OI, bid/ask, circuit band, 52w range"),
-  fn("CH", "Chart", "security", "Candles/line, intervals 1m…1M, volume, indicators, drawings, OI overlay for F&O"),
-  fn("DOM", "Depth", "security", "5-level book (30 with Upstox full_d30), click-to-ticket"),
-  fn("TS", "Time & sales", "security", "Tick prints from stream"),
-  fn("WL", "Watchlist", "none", "Multiple named lists; columns configurable"),
+  fn("Q", "Quote", "security", "LTP, change, OHLC, volume, OI, bid/ask, last trade. e.g. RELIANCE Q", () => import("../panels/Q")),
+  fn("CH", "Chart", "security", "Candles + volume from history, live 1-minute bars. CH interval=1m|5m|15m|1h|1d", () => import("../panels/CH")),
+  fn("DOM", "Depth", "security", "5-level book (30 with Upstox full_d30)", () => import("../panels/DOM")),
+  fn("TS", "Time & sales", "security", "Trade prints from the stream (at 50 ms conflation)", () => import("../panels/TS")),
+  fn("WL", "Watchlist", "none", "Named lists (WL name=fno). Type a symbol in the box + Enter to add; Delete removes the focused row", () => import("../panels/WL")),
   fn("OC", "Option chain", "underlying", "Strikes ± N around ATM; CE/PE LTP, OI, ΔOI, IV, Greeks, volume; PCR, max pain"),
   fn("OI", "OI analysis", "underlying", "OI and ΔOI by strike, build-up classification, PCR history"),
   fn("PAY", "Payoff", "optional", "Strategy payoff at expiry and T+0 with Greeks"),

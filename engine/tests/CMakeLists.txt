@@ -16,7 +16,9 @@ add_executable(vyuha_tests
   version_test.cc
 )
 target_link_libraries(vyuha_tests PRIVATE vyuha::core vyuha::kite vyuha::upstox vyuha::session vyuha::bus cnats::nats_static Boost::beast vyuha_warnings Threads::Threads GTest::gtest_main)
-gtest_discover_tests(vyuha_tests)
+# Discovery runs the fresh binary to list tests; macOS can take >5 s (the default) to first-launch
+# a newly linked binary on a busy machine.
+gtest_discover_tests(vyuha_tests DISCOVERY_TIMEOUT 60)
 target_compile_definitions(vyuha_tests PRIVATE VYUHA_FIXTURES_DIR="${PROJECT_SOURCE_DIR}/fixtures")
 
 # Reference tests against protoc-generated classes for the vendored Upstox schema. Not built with
@@ -34,11 +36,11 @@ if(NOT VYUHA_SANITIZER)
   target_link_libraries(vyuha_reference_tests PRIVATE vyuha::upstox vyuha::bus upstox_reference_proto
                                                       vyuha_engine_proto vyuha_warnings GTest::gtest_main)
   target_compile_definitions(vyuha_reference_tests PRIVATE VYUHA_FIXTURES_DIR="${PROJECT_SOURCE_DIR}/fixtures")
-  gtest_discover_tests(vyuha_reference_tests)
+  gtest_discover_tests(vyuha_reference_tests DISCOVERY_TIMEOUT 60)
 
   # gRPC adapter end to end (in-process server + client stub).
   add_executable(vyuha_rpc_tests engine_service_test.cc pg_instrument_directory_test.cc)
   target_link_libraries(vyuha_rpc_tests PRIVATE vyuha_rpc vyuha_pg libpqxx::pqxx vyuha_warnings GTest::gtest_main)
   target_compile_definitions(vyuha_rpc_tests PRIVATE VYUHA_MIGRATIONS_DIR="${PROJECT_SOURCE_DIR}/../db/migrations")
-  gtest_discover_tests(vyuha_rpc_tests)
+  gtest_discover_tests(vyuha_rpc_tests DISCOVERY_TIMEOUT 60)
 endif()

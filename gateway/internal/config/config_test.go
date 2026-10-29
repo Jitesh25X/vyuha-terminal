@@ -43,7 +43,7 @@ func TestLoad(t *testing.T) {
 				"LOG_LEVEL": "debug", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel:4317", "LIVE_TRADING_ENABLED": "true",
 				"JWT_SIGNING_KEY_PATH": "/run/secrets/jwt.pem", "ACCESS_TOKEN_TTL": "10m",
 				"TRUSTED_PROXIES": "172.18.0.0/16, 10.0.0.7",
-				"PUBLIC_BASE_URL": "https://desk.example.in/", "NATS_URL": "nats://nats:4222",
+				"PUBLIC_BASE_URL": "https://desk.example.in/", "NATS_URL": "nats://nats:4222", "CLICKHOUSE_URL": "clickhouse://u:p@ch:9000/vyuha",
 				"ENGINE_GRPC_ADDR": "127.0.0.1:17443", "WS_ALLOWED_ORIGINS": "https://a.example, https://b.example",
 			},
 			check: func(t *testing.T, c Config) {
@@ -68,7 +68,7 @@ func TestLoad(t *testing.T) {
 		{
 			name: "none means no proxy",
 			env: map[string]string{"VYUHA_ENV": "prod", "POSTGRES_URL": "postgres://x", "JWT_SIGNING_KEY_PATH": "/k", "TRUSTED_PROXIES": "none",
-				"PUBLIC_BASE_URL": "https://desk.example.in", "NATS_URL": "nats://nats:4222"},
+				"PUBLIC_BASE_URL": "https://desk.example.in", "NATS_URL": "nats://nats:4222", "CLICKHOUSE_URL": "clickhouse://u:p@ch:9000/vyuha"},
 			check: func(t *testing.T, c Config) {
 				if len(c.TrustedProxies) != 0 {
 					t.Fatalf("want no trusted proxies, got %v", c.TrustedProxies)
@@ -76,6 +76,7 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{name: "prod needs public base url", env: map[string]string{"VYUHA_ENV": "prod"}, wantErr: "PUBLIC_BASE_URL is required"},
+		{name: "prod needs clickhouse url", env: map[string]string{"VYUHA_ENV": "prod"}, wantErr: "CLICKHOUSE_URL is required"},
 		{name: "prod needs nats url", env: map[string]string{"VYUHA_ENV": "prod"}, wantErr: "NATS_URL is required"},
 		{name: "public base url must be https outside dev", env: map[string]string{"VYUHA_ENV": "staging", "PUBLIC_BASE_URL": "http://desk.example.in"}, wantErr: "https outside dev"},
 		{name: "public base url is an origin", env: map[string]string{"PUBLIC_BASE_URL": "https://desk.example.in/app"}, wantErr: "PUBLIC_BASE_URL must be an origin"},

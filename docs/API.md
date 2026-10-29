@@ -34,11 +34,11 @@ Req `{ "mfa_token": "…", "totp": "123456" }` → 200 `{ "access_token": "…",
 ### `POST /auth/reauth` — `{ password, totp }` → `{ "reauth_token": "…", "expires_in": 300 }`. Required header `X-Reauth` for sensitive endpoints (marked 🔐).
 
 ## 2. Instruments & market data
-### `GET /instruments/search?q=relia&segment=EQ&limit=20` → `[{ id, exchange, segment, tradingsymbol, name, expiry, strike, option_type, lot_size, tick_size }]`
+### `GET /instruments/search?q=relia&segment=EQ&limit=20` → `[{ id, exchange, segment, tradingsymbol, name, expiry, strike, option_type, lot_size, tick_size }]` (M1.9: prefix on trading symbol or underlying symbol, active contracts only; exact symbol first, then cash/index, nearer expiries; `segment` also accepts an exchange NSE/BSE/NFO/BFO; limit ≤ 50)
 ### `GET /instruments/{id}` → full instrument incl. `freeze_qty`, `fo_ban`, `underlying_id`.
 ### `GET /instruments/{id}/expiries` → `["2026-10-28", …]`
 ### `GET /marketdata/snapshot?ids=1,2,3` (entitled) → `[{ instrument_id, ltp, change_pct, bid, ask, volume, oi, ts, stale }]`
-### `GET /marketdata/candles?instrument_id=&interval=1m&from=&to=&adjusted=true` (entitled) → `{ "bars": [[ts, o, h, l, c, v, oi], …] }`. Max 50,000 bars per call; 400 if exceeded.
+### `GET /marketdata/candles?instrument_id=&interval=1m&from=&to=&adjusted=true` (entitled) → `{ "bars": [[ts, o, h, l, c, v, oi], …] }`. Max 50,000 bars per call; 400 if exceeded. (M1.9: intervals 1m/5m/15m/1h/1d built from recorded 1-minute bars — intraday buckets UTC-aligned, 1d by IST day; ts RFC 3339 UTC, prices decimal strings; entitlement = same rule as the WebSocket hub, 403 `MD_NOT_ENTITLED`; 503 `MD_UNAVAILABLE` when ClickHouse is down; `adjusted` not implemented yet.)
 ### `GET /optionchain/{underlying_id}?expiry=2026-10-28&strikes=20` (entitled)
 → `{ underlying: {ltp, fut_ltp}, expiry, pcr, max_pain, atm_strike, rows: [{ strike, ce: {instrument_id, ltp, oi, oi_chg, iv, delta, gamma, theta, vega, bid, ask, volume}, pe: {…} }] }`
 

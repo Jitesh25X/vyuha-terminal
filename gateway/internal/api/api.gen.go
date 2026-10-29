@@ -75,6 +75,72 @@ func (e HealthStatus) Valid() bool {
 	}
 }
 
+// Defines values for InstrumentExchange.
+const (
+	InstrumentExchangeBFO InstrumentExchange = "BFO"
+	InstrumentExchangeBSE InstrumentExchange = "BSE"
+	InstrumentExchangeNFO InstrumentExchange = "NFO"
+	InstrumentExchangeNSE InstrumentExchange = "NSE"
+)
+
+// Valid indicates whether the value is a known member of the InstrumentExchange enum.
+func (e InstrumentExchange) Valid() bool {
+	switch e {
+	case InstrumentExchangeBFO:
+		return true
+	case InstrumentExchangeBSE:
+		return true
+	case InstrumentExchangeNFO:
+		return true
+	case InstrumentExchangeNSE:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for InstrumentOptionType.
+const (
+	InstrumentOptionTypeCE InstrumentOptionType = "CE"
+	InstrumentOptionTypePE InstrumentOptionType = "PE"
+)
+
+// Valid indicates whether the value is a known member of the InstrumentOptionType enum.
+func (e InstrumentOptionType) Valid() bool {
+	switch e {
+	case InstrumentOptionTypeCE:
+		return true
+	case InstrumentOptionTypePE:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for InstrumentSegment.
+const (
+	InstrumentSegmentEQ  InstrumentSegment = "EQ"
+	InstrumentSegmentFUT InstrumentSegment = "FUT"
+	InstrumentSegmentIDX InstrumentSegment = "IDX"
+	InstrumentSegmentOPT InstrumentSegment = "OPT"
+)
+
+// Valid indicates whether the value is a known member of the InstrumentSegment enum.
+func (e InstrumentSegment) Valid() bool {
+	switch e {
+	case InstrumentSegmentEQ:
+		return true
+	case InstrumentSegmentFUT:
+		return true
+	case InstrumentSegmentIDX:
+		return true
+	case InstrumentSegmentOPT:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UserRole.
 const (
 	UserRoleAdmin       UserRole = "admin"
@@ -99,9 +165,78 @@ func (e UserRole) Valid() bool {
 	}
 }
 
+// Defines values for SearchInstrumentsParamsSegment.
+const (
+	SearchInstrumentsParamsSegmentBFO SearchInstrumentsParamsSegment = "BFO"
+	SearchInstrumentsParamsSegmentBSE SearchInstrumentsParamsSegment = "BSE"
+	SearchInstrumentsParamsSegmentEQ  SearchInstrumentsParamsSegment = "EQ"
+	SearchInstrumentsParamsSegmentFUT SearchInstrumentsParamsSegment = "FUT"
+	SearchInstrumentsParamsSegmentIDX SearchInstrumentsParamsSegment = "IDX"
+	SearchInstrumentsParamsSegmentNFO SearchInstrumentsParamsSegment = "NFO"
+	SearchInstrumentsParamsSegmentNSE SearchInstrumentsParamsSegment = "NSE"
+	SearchInstrumentsParamsSegmentOPT SearchInstrumentsParamsSegment = "OPT"
+)
+
+// Valid indicates whether the value is a known member of the SearchInstrumentsParamsSegment enum.
+func (e SearchInstrumentsParamsSegment) Valid() bool {
+	switch e {
+	case SearchInstrumentsParamsSegmentBFO:
+		return true
+	case SearchInstrumentsParamsSegmentBSE:
+		return true
+	case SearchInstrumentsParamsSegmentEQ:
+		return true
+	case SearchInstrumentsParamsSegmentFUT:
+		return true
+	case SearchInstrumentsParamsSegmentIDX:
+		return true
+	case SearchInstrumentsParamsSegmentNFO:
+		return true
+	case SearchInstrumentsParamsSegmentNSE:
+		return true
+	case SearchInstrumentsParamsSegmentOPT:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetCandlesParamsInterval.
+const (
+	GetCandlesParamsIntervalN15m GetCandlesParamsInterval = "15m"
+	GetCandlesParamsIntervalN1d  GetCandlesParamsInterval = "1d"
+	GetCandlesParamsIntervalN1h  GetCandlesParamsInterval = "1h"
+	GetCandlesParamsIntervalN1m  GetCandlesParamsInterval = "1m"
+	GetCandlesParamsIntervalN5m  GetCandlesParamsInterval = "5m"
+)
+
+// Valid indicates whether the value is a known member of the GetCandlesParamsInterval enum.
+func (e GetCandlesParamsInterval) Valid() bool {
+	switch e {
+	case GetCandlesParamsIntervalN15m:
+		return true
+	case GetCandlesParamsIntervalN1d:
+		return true
+	case GetCandlesParamsIntervalN1h:
+		return true
+	case GetCandlesParamsIntervalN1m:
+		return true
+	case GetCandlesParamsIntervalN5m:
+		return true
+	default:
+		return false
+	}
+}
+
 // BrokerLoginUrl defines model for BrokerLoginUrl.
 type BrokerLoginUrl struct {
 	Url string `json:"url"`
+}
+
+// Candles defines model for Candles.
+type Candles struct {
+	// Bars [ts (RFC 3339 UTC, bar open), open, high, low, close (decimal strings), volume, oi]
+	Bars [][]interface{} `json:"bars"`
 }
 
 // Check defines model for Check.
@@ -130,6 +265,40 @@ type HealthEnv string
 
 // HealthStatus defines model for Health.Status.
 type HealthStatus string
+
+// Instrument defines model for Instrument.
+type Instrument struct {
+	Exchange   InstrumentExchange    `json:"exchange"`
+	Expiry     *openapi_types.Date   `json:"expiry,omitempty"`
+	FoBan      bool                  `json:"fo_ban"`
+	FreezeQty  *int                  `json:"freeze_qty,omitempty"`
+	Id         int64                 `json:"id"`
+	LotSize    int                   `json:"lot_size"`
+	Name       *string               `json:"name,omitempty"`
+	OptionType *InstrumentOptionType `json:"option_type,omitempty"`
+	Segment    InstrumentSegment     `json:"segment"`
+
+	// Strike Decimal string
+	Strike *string `json:"strike,omitempty"`
+	Symbol string  `json:"symbol"`
+
+	// TickSize Decimal string
+	TickSize      string `json:"tick_size"`
+	Tradingsymbol string `json:"tradingsymbol"`
+	UnderlyingId  *int64 `json:"underlying_id,omitempty"`
+
+	// ValidTo Set when the contract is no longer listed
+	ValidTo *openapi_types.Date `json:"valid_to,omitempty"`
+}
+
+// InstrumentExchange defines model for Instrument.Exchange.
+type InstrumentExchange string
+
+// InstrumentOptionType defines model for Instrument.OptionType.
+type InstrumentOptionType string
+
+// InstrumentSegment defines model for Instrument.Segment.
+type InstrumentSegment string
 
 // LoginRequest defines model for LoginRequest.
 type LoginRequest struct {
@@ -265,6 +434,29 @@ type BrokerCallbackZerodhaParams struct {
 	State        *string `form:"state,omitempty" json:"state,omitempty"`
 }
 
+// SearchInstrumentsParams defines parameters for SearchInstruments.
+type SearchInstrumentsParams struct {
+	Q string `form:"q" json:"q"`
+
+	// Segment Segment (EQ, FUT, OPT, IDX) or exchange (NSE, BSE, NFO, BFO)
+	Segment *SearchInstrumentsParamsSegment `form:"segment,omitempty" json:"segment,omitempty"`
+	Limit   *int                            `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// SearchInstrumentsParamsSegment defines parameters for SearchInstruments.
+type SearchInstrumentsParamsSegment string
+
+// GetCandlesParams defines parameters for GetCandles.
+type GetCandlesParams struct {
+	InstrumentId int64                    `form:"instrument_id" json:"instrument_id"`
+	Interval     GetCandlesParamsInterval `form:"interval" json:"interval"`
+	From         time.Time                `form:"from" json:"from"`
+	To           time.Time                `form:"to" json:"to"`
+}
+
+// GetCandlesParamsInterval defines parameters for GetCandles.
+type GetCandlesParamsInterval string
+
 // LoginJSONRequestBody defines body for Login for application/json ContentType.
 type LoginJSONRequestBody = LoginRequest
 
@@ -315,6 +507,15 @@ type ServerInterface interface {
 	// GetHealth Gateway health with dependency checks
 	// (GET /health)
 	GetHealth(w http.ResponseWriter, r *http.Request)
+	// SearchInstruments Active instruments whose trading symbol or underlying symbol starts with q
+	// (GET /instruments/search)
+	SearchInstruments(w http.ResponseWriter, r *http.Request, params SearchInstrumentsParams)
+	// GetInstrument One instrument (active or expired)
+	// (GET /instruments/{id})
+	GetInstrument(w http.ResponseWriter, r *http.Request, id int64)
+	// GetCandles Historical bars from ClickHouse (entitled instruments only)
+	// (GET /marketdata/candles)
+	GetCandles(w http.ResponseWriter, r *http.Request, params GetCandlesParams)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -624,6 +825,163 @@ func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Requ
 	handler.ServeHTTP(w, r)
 }
 
+// SearchInstruments operation middleware
+func (siw *ServerInterfaceWrapper) SearchInstruments(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params SearchInstrumentsParams
+
+	// ------------- Required query parameter "q" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "q"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "segment" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "segment", r.URL.Query(), &params.Segment, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "segment"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "segment", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SearchInstruments(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetInstrument operation middleware
+func (siw *ServerInterfaceWrapper) GetInstrument(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id int64
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetInstrument(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetCandles operation middleware
+func (siw *ServerInterfaceWrapper) GetCandles(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetCandlesParams
+
+	// ------------- Required query parameter "instrument_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "instrument_id", r.URL.Query(), &params.InstrumentId, runtime.BindQueryParameterOptions{Type: "integer", Format: "int64"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "instrument_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "instrument_id", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "interval" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "interval", r.URL.Query(), &params.Interval, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "interval"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "interval", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "from" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "from", r.URL.Query(), &params.From, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "from"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "from", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "to" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "to", r.URL.Query(), &params.To, runtime.BindQueryParameterOptions{Type: "string", Format: "date-time"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "to"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "to", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetCandles(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 type UnescapedCookieParamError struct {
 	ParamName string
 	Err       error
@@ -755,6 +1113,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/brokers/{account_id}/login-url", wrapper.GetBrokerLoginUrl)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/brokers/callback/zerodha", wrapper.BrokerCallbackZerodha)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/brokers/callback/upstox", wrapper.BrokerCallbackUpstox)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/instruments/search", wrapper.SearchInstruments)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/instruments/{id}", wrapper.GetInstrument)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/marketdata/candles", wrapper.GetCandles)
 
 	return m
 }
@@ -1479,6 +1840,180 @@ func (response GetHealth503JSONResponse) VisitGetHealthResponse(w http.ResponseW
 	return err
 }
 
+type SearchInstrumentsRequestObject struct {
+	Params SearchInstrumentsParams
+}
+
+type SearchInstrumentsResponseObject interface {
+	VisitSearchInstrumentsResponse(w http.ResponseWriter) error
+}
+
+type SearchInstruments200JSONResponse []Instrument
+
+func (response SearchInstruments200JSONResponse) VisitSearchInstrumentsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SearchInstruments401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response SearchInstruments401ApplicationProblemPlusJSONResponse) VisitSearchInstrumentsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetInstrumentRequestObject struct {
+	Id int64 `json:"id"`
+}
+
+type GetInstrumentResponseObject interface {
+	VisitGetInstrumentResponse(w http.ResponseWriter) error
+}
+
+type GetInstrument200JSONResponse Instrument
+
+func (response GetInstrument200JSONResponse) VisitGetInstrumentResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetInstrument401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response GetInstrument401ApplicationProblemPlusJSONResponse) VisitGetInstrumentResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetInstrument404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response GetInstrument404ApplicationProblemPlusJSONResponse) VisitGetInstrumentResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetCandlesRequestObject struct {
+	Params GetCandlesParams
+}
+
+type GetCandlesResponseObject interface {
+	VisitGetCandlesResponse(w http.ResponseWriter) error
+}
+
+type GetCandles200JSONResponse Candles
+
+func (response GetCandles200JSONResponse) VisitGetCandlesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetCandles400ApplicationProblemPlusJSONResponse Problem
+
+func (response GetCandles400ApplicationProblemPlusJSONResponse) VisitGetCandlesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetCandles401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response GetCandles401ApplicationProblemPlusJSONResponse) VisitGetCandlesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetCandles403ApplicationProblemPlusJSONResponse struct {
+	ForbiddenApplicationProblemPlusJSONResponse
+}
+
+func (response GetCandles403ApplicationProblemPlusJSONResponse) VisitGetCandlesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetCandles503ApplicationProblemPlusJSONResponse Problem
+
+func (response GetCandles503ApplicationProblemPlusJSONResponse) VisitGetCandlesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(503)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
 	// Login Password step; returns an mfa_token for the TOTP step
@@ -1514,6 +2049,15 @@ type StrictServerInterface interface {
 	// GetHealth Gateway health with dependency checks
 	// (GET /health)
 	GetHealth(ctx context.Context, request GetHealthRequestObject) (GetHealthResponseObject, error)
+	// SearchInstruments Active instruments whose trading symbol or underlying symbol starts with q
+	// (GET /instruments/search)
+	SearchInstruments(ctx context.Context, request SearchInstrumentsRequestObject) (SearchInstrumentsResponseObject, error)
+	// GetInstrument One instrument (active or expired)
+	// (GET /instruments/{id})
+	GetInstrument(ctx context.Context, request GetInstrumentRequestObject) (GetInstrumentResponseObject, error)
+	// GetCandles Historical bars from ClickHouse (entitled instruments only)
+	// (GET /marketdata/candles)
+	GetCandles(ctx context.Context, request GetCandlesRequestObject) (GetCandlesResponseObject, error)
 }
 
 type StrictHandlerFunc func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error)
@@ -1857,6 +2401,84 @@ func (sh *strictHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetHealthResponseObject); ok {
 		if err := validResponse.VisitGetHealthResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// SearchInstruments operation middleware
+func (sh *strictHandler) SearchInstruments(w http.ResponseWriter, r *http.Request, params SearchInstrumentsParams) {
+	var request SearchInstrumentsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.SearchInstruments(ctx, request.(SearchInstrumentsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "SearchInstruments")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(SearchInstrumentsResponseObject); ok {
+		if err := validResponse.VisitSearchInstrumentsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetInstrument operation middleware
+func (sh *strictHandler) GetInstrument(w http.ResponseWriter, r *http.Request, id int64) {
+	var request GetInstrumentRequestObject
+
+	request.Id = id
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetInstrument(ctx, request.(GetInstrumentRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetInstrument")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetInstrumentResponseObject); ok {
+		if err := validResponse.VisitGetInstrumentResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetCandles operation middleware
+func (sh *strictHandler) GetCandles(w http.ResponseWriter, r *http.Request, params GetCandlesParams) {
+	var request GetCandlesRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetCandles(ctx, request.(GetCandlesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetCandles")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetCandlesResponseObject); ok {
+		if err := validResponse.VisitGetCandlesResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

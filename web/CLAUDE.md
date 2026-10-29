@@ -24,7 +24,7 @@ e2e/              Playwright tests incl. perf trace test
 pnpm dev            # http://127.0.0.1:5173, /api proxied to the gateway (VYUHA_GATEWAY_URL, default :8080; run `make dev-gateway`)
 pnpm test --run     # vitest (node environment: pure logic only, no DOM library)
 pnpm lint           # tsc --noEmit (strict); ESLint/Prettier are not installed (owner choice, 2026-10-28)
-make e2e            # from the repo root: throwaway gateway + DB, then Playwright
+make e2e            # from the repo root: throwaway gateway + DB + gateway/cmd/fakefeed, then Playwright (incl. the 60 s perf test)
 ```
 
 ## Rules
@@ -37,5 +37,8 @@ make e2e            # from the repo root: throwaway gateway + DB, then Playwrigh
 - Accessibility: focus-visible rings, all actions keyboard-reachable.
 - Auth: access token in memory only (zustand), never localStorage. Refresh goes through `refreshSession()` only:
   one call in flight per browser (shared promise + Web Lock), or the gateway's reuse detection revokes the session.
+- Market data: `lib/ws/client.ts` (`subscribe`, `useSubscription`, `onQuotes/onBars/onPrints`) is the only way in.
+  The md store's quotes/depth records are mutated in place (version counter) — read them with selectors, never
+  hold them across renders. Dev builds accept a WebSocket URL override in localStorage `vyuha.dev.wsUrl`.
 - Dockview 8 keeps its React bindings in `dockview-react` (not a dependency): `shell/Workspace.tsx` drives
   dockview-core's DOM API and renders panels through portals.

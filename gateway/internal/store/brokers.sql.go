@@ -175,7 +175,7 @@ func (q *Queries) ListInstrumentBrokerMaps(ctx context.Context, ids []int64) ([]
 }
 
 const listUserAccounts = `-- name: ListUserAccounts :many
-SELECT a.id, a.broker, a.data_entitled
+SELECT a.id, a.broker, a.data_entitled, a.client_code
 FROM account_user_map m
 JOIN broker_account a ON a.id = m.account_id
 JOIN app_user u ON u.id = m.user_id
@@ -187,6 +187,7 @@ type ListUserAccountsRow struct {
 	ID           pgtype.UUID
 	Broker       BrokerKind
 	DataEntitled bool
+	ClientCode   string
 }
 
 // Accounts a user may view, with whether they carry a market-data entitlement (ADR-009).
@@ -199,7 +200,12 @@ func (q *Queries) ListUserAccounts(ctx context.Context, userID pgtype.UUID) ([]L
 	var items []ListUserAccountsRow
 	for rows.Next() {
 		var i ListUserAccountsRow
-		if err := rows.Scan(&i.ID, &i.Broker, &i.DataEntitled); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.Broker,
+			&i.DataEntitled,
+			&i.ClientCode,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

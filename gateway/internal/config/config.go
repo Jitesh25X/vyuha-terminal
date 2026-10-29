@@ -44,6 +44,7 @@ type Config struct {
 	PublicBaseURL    string   // external origin; broker redirect URLs are built from it
 	EngineGRPCAddr   string   // vyuha_engine gRPC (loopback)
 	NATSURL          string   // engine market data
+	ClickHouseURL    string   // historical bars (GET /marketdata/candles); a secret-bearing DSN
 	WSAllowedOrigins []string // extra browser origins allowed on /ws (same-origin always is)
 }
 
@@ -153,6 +154,14 @@ func Load(getenv func(string) string) (Config, error) {
 			errs = append(errs, errors.New("NATS_URL is required outside dev"))
 		}
 	}
+	cfg.ClickHouseURL = get("CLICKHOUSE_URL", "")
+	if cfg.ClickHouseURL == "" {
+		if cfg.Env == EnvDev {
+			cfg.ClickHouseURL = "clickhouse://vyuha:vyuha@127.0.0.1:9000/vyuha" //nolint:gosec // G101: dev-only credentials from docker-compose.dev.yml
+		} else {
+			errs = append(errs, errors.New("CLICKHOUSE_URL is required outside dev"))
+		}
+	}
 	for _, o := range strings.Split(get("WS_ALLOWED_ORIGINS", ""), ",") {
 		if o = strings.TrimSpace(o); o != "" {
 			cfg.WSAllowedOrigins = append(cfg.WSAllowedOrigins, o)
@@ -196,6 +205,7 @@ func (c Config) LogValue() slog.Value {
 		slog.String("public_base_url", c.PublicBaseURL),
 		slog.String("engine_grpc_addr", c.EngineGRPCAddr),
 		slog.String("nats", redactURL(c.NATSURL)),
+		slog.String("clickhouse", redactURL(c.ClickHouseURL)),
 		slog.Int("ws_allowed_origins", len(c.WSAllowedOrigins)),
 	)
 }

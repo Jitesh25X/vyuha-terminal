@@ -42,3 +42,31 @@ export interface Problem {
   code?: string;
   locked_until?: string;
 }
+
+// ── market data (openapi.yaml: Instrument, Candles) ─────────────────────────
+export interface Instrument {
+  id: number;
+  exchange: "NSE" | "BSE" | "NFO" | "BFO";
+  segment: "EQ" | "FUT" | "OPT" | "IDX";
+  tradingsymbol: string;
+  symbol: string;
+  name?: string;
+  expiry?: string;
+  strike?: string;
+  option_type?: "CE" | "PE";
+  lot_size: number;
+  tick_size: string;
+  freeze_qty?: number;
+  fo_ban: boolean;
+  underlying_id?: number;
+  valid_to?: string;
+}
+
+export type CandleInterval = "1m" | "5m" | "15m" | "1h" | "1d";
+
+/** [ts RFC 3339, open, high, low, close (decimal strings), volume, oi] */
+export type CandleRow = [string, string, string, string, string, number, number];
+
+export interface Candles {
+  bars: CandleRow[];
+}
