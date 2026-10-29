@@ -51,13 +51,22 @@ user="e2e_trader"
 password="$(openssl rand -hex 16)"
 printf '%s\n' "$password" | "$tmp/vyuhactl" user create -username "$user" -display-name "E2E Trader" -role trader >/dev/null
 # Market panels (keyboard) and the perf test each enroll their own user (TOTP codes are single-use).
-for u in e2e_md e2e_perf; do
+for u in e2e_md e2e_perf e2e_oc; do
   printf '%s\n' "$password" | "$tmp/vyuhactl" user create -username "$u" -display-name "E2E ${u#e2e_}" -role trader >/dev/null
 done
 # A few instruments for the market panels to resolve (no broker account is mapped: no entitlement).
 "${compose[@]}" exec -T postgres psql -U vyuha -d "$db" -qc "INSERT INTO instrument (id, exchange, segment, symbol, tradingsymbol, name, tick_size, lot_size, valid_from, kite_token, upstox_key) VALUES
   (1001, 'NSE', 'EQ', 'RELIANCE', 'RELIANCE', 'Reliance Industries', 0.10, 1, '2026-01-01', 738561, 'NSE_EQ|INE002A01018'),
   (1002, 'NSE', 'EQ', 'INFY', 'INFY', 'Infosys', 0.10, 1, '2026-01-01', 408065, 'NSE_EQ|INE009A01021')" >/dev/null
+# OC/OI: a NIFTY index with one expiry a week out (3 strikes × CE/PE) and its same-expiry future.
+"${compose[@]}" exec -T postgres psql -U vyuha -d "$db" -qc "
+  INSERT INTO instrument (id, exchange, segment, symbol, tradingsymbol, name, tick_size, lot_size, valid_from, kite_token) VALUES
+    (1100, 'NSE', 'IDX', 'NIFTY', 'NIFTY 50', 'Nifty 50', 0.05, 1, '2026-01-01', 256265);
+  INSERT INTO instrument (id, exchange, segment, symbol, tradingsymbol, underlying_id, expiry, strike, option_type, tick_size, lot_size, valid_from, kite_token)
+  SELECT 1200 + n, 'NFO', 'OPT', 'NIFTY', 'NIFTYE2E' || k || ot, 1100, CURRENT_DATE + 7, k, ot::option_type, 0.05, 75, '2026-01-01', 900000 + n
+  FROM (VALUES (1, 24200, 'CE'), (2, 24200, 'PE'), (3, 24300, 'CE'), (4, 24300, 'PE'), (5, 24400, 'CE'), (6, 24400, 'PE')) AS v(n, k, ot);
+  INSERT INTO instrument (id, exchange, segment, symbol, tradingsymbol, underlying_id, expiry, tick_size, lot_size, valid_from, kite_token) VALUES
+    (1210, 'NFO', 'FUT', 'NIFTY', 'NIFTYE2EFUT', 1100, CURRENT_DATE + 7, 0.10, 75, '2026-01-01', 900010)" >/dev/null
 
 VYUHA_MASTER_KEY="$(sed -n 's/^VYUHA_MASTER_KEY=//p' "$tmp/env")" \
   JWT_SIGNING_KEY_PATH="$tmp/jwt.pem" GATEWAY_HTTP_ADDR="$gw_addr" LOG_LEVEL=warn OTEL_EXPORTER_OTLP_ENDPOINT= \
@@ -77,7 +86,7 @@ fi
 cd "$root/web"
 status=0
 VYUHA_GATEWAY_URL="http://$gw_addr" VYUHA_WEB_PORT="$web_port" VYUHA_E2E_USER="$user" VYUHA_E2E_PASSWORD="$password" \
-  VYUHA_E2E_MD_USER=e2e_md VYUHA_E2E_PERF_USER=e2e_perf VYUHA_E2E_FAKEFEED="$feed_addr" \
+  VYUHA_E2E_MD_USER=e2e_md VYUHA_E2E_PERF_USER=e2e_perf VYUHA_E2E_OC_USER=e2e_oc VYUHA_E2E_FAKEFEED="$feed_addr" \
   pnpm exec playwright test "$@" || status=$?
 if [ $status -ne 0 ]; then
   echo "── gateway log ──" >&2

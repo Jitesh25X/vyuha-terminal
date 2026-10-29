@@ -51,3 +51,13 @@ export function direction(v: number | undefined): "up" | "down" | "flat" {
 export function toChartPrice(units: number): number {
   return units / UNITS_PER_RUPEE;
 }
+
+/** IV (decimal, 0.1432) → "14.32"; "—" when undefined. */
+export function formatIv(v: number | undefined): string {
+  return v === undefined || !Number.isFinite(v) ? "—" : (v * 100).toFixed(2);
+}
+
+/** A Greek with fixed decimals; "—" when undefined. */
+export function formatGreek(v: number | undefined, digits: number): string {
+  return v === undefined || !Number.isFinite(v) ? "—" : v.toFixed(digits);
+}

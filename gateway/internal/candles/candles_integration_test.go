@@ -67,3 +67,51 @@ func TestBarsAggregatesOneMinuteBars(t *testing.T) {
 		t.Fatalf("other instrument: %v, %v", got, err)
 	}
 }
+
+func TestLastOIIsPreviousSessionClose(t *testing.T) {
+	conn, _, dsn := chtest.New(t)
+	ctx := context.Background()
+	r, err := Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+
+	batch, err := conn.PrepareBatch(ctx, "INSERT INTO "+r.database+".bars (instrument_id, interval, ts, open, high, low, close, volume, oi, source, version)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Instrument 7: OI 1000+m on the 28th and 2000+m on the 29th (09:15 IST = 03:45 UTC, 10 minutes each).
+	// Instrument 9: only bars without OI (cash-like) — no baseline.
+	for _, day := range []int{28, 29} {
+		start := time.Date(2026, 10, day, 3, 45, 0, 0, time.UTC)
+		for m := range 10 {
+			ts := start.Add(time.Duration(m) * time.Minute)
+			oi := uint64(day-27)*1000 + uint64(m) //nolint:gosec // G115: small test values
+			if err := batch.Append(uint64(7), "1m", ts, int64(1), int64(1), int64(1), int64(1), uint64(1), oi, "engine", uint64(1)); err != nil {
+				t.Fatal(err)
+			}
+			if err := batch.Append(uint64(9), "1m", ts, int64(1), int64(1), int64(1), int64(1), uint64(1), uint64(0), "engine", uint64(1)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := batch.Send(); err != nil {
+		t.Fatal(err)
+	}
+
+	open29 := time.Date(2026, 10, 29, 3, 45, 0, 0, time.UTC)
+	got, err := r.LastOI(ctx, []uint64{7, 8, 9}, open29)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[7] != 1009 {
+		t.Fatalf("LastOI before the 29th's open = %v, want only 7 → 1009 (28th's close)", got)
+	}
+	if got, err := r.LastOI(ctx, []uint64{7}, time.Date(2026, 10, 28, 3, 45, 0, 0, time.UTC)); err != nil || len(got) != 0 {
+		t.Fatalf("nothing recorded before the 28th: %v, %v", got, err)
+	}
+	if got, err := r.LastOI(ctx, nil, open29); err != nil || len(got) != 0 {
+		t.Fatalf("no ids: %v, %v", got, err)
+	}
+}

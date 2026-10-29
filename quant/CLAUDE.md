@@ -22,6 +22,7 @@ tests/ (+ tests/golden/)
 - `instruments sync [--date D] [--from-dir DIR] [--allow-large-change]` — F-MD-1 master sync (08:00 IST)
 - `ban import FILE [--date D]` / `ban check` — NSE F&O ban list, manual import only (ADR-019; never fetch from NSE)
 - `holidays seed` — exchange_holiday from exchange_calendars XBOM (existing rows win)
+- `serve` — internal API for the gateway on `QUANT_HTTP_ADDR` (default 127.0.0.1:8090, loopback, no auth): `POST /internal/optionchain`, `GET /health`. Settings: `RISK_FREE_RATE` (decimal, RBI repo rate) + `RISK_FREE_RATE_AS_OF`, `IV_MID_MAX_SPREAD` (0.10), `IV_LTP_MAX_AGE_S` (60)
 
 ## Rules
 - `uv run pytest`, `uv run mypy --strict src sdk`, `uv run ruff check`.

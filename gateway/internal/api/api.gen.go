@@ -141,6 +141,84 @@ func (e InstrumentSegment) Valid() bool {
 	}
 }
 
+// Defines values for OptionChainAnalytics.
+const (
+	OptionChainAnalyticsOk          OptionChainAnalytics = "ok"
+	OptionChainAnalyticsUnavailable OptionChainAnalytics = "unavailable"
+)
+
+// Valid indicates whether the value is a known member of the OptionChainAnalytics enum.
+func (e OptionChainAnalytics) Valid() bool {
+	switch e {
+	case OptionChainAnalyticsOk:
+		return true
+	case OptionChainAnalyticsUnavailable:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OptionChainForwardSource.
+const (
+	OptionChainForwardSourceFuture       OptionChainForwardSource = "future"
+	OptionChainForwardSourceSpot         OptionChainForwardSource = "spot"
+	OptionChainForwardSourceSyntheticLtp OptionChainForwardSource = "synthetic_ltp"
+	OptionChainForwardSourceSyntheticMid OptionChainForwardSource = "synthetic_mid"
+)
+
+// Valid indicates whether the value is a known member of the OptionChainForwardSource enum.
+func (e OptionChainForwardSource) Valid() bool {
+	switch e {
+	case OptionChainForwardSourceFuture:
+		return true
+	case OptionChainForwardSourceSpot:
+		return true
+	case OptionChainForwardSourceSyntheticLtp:
+		return true
+	case OptionChainForwardSourceSyntheticMid:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OptionChainModel.
+const (
+	OptionChainModelBlack76 OptionChainModel = "black76"
+	OptionChainModelBsm     OptionChainModel = "bsm"
+)
+
+// Valid indicates whether the value is a known member of the OptionChainModel enum.
+func (e OptionChainModel) Valid() bool {
+	switch e {
+	case OptionChainModelBlack76:
+		return true
+	case OptionChainModelBsm:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OptionSideIvSource.
+const (
+	OptionSideIvSourceLtp OptionSideIvSource = "ltp"
+	OptionSideIvSourceMid OptionSideIvSource = "mid"
+)
+
+// Valid indicates whether the value is a known member of the OptionSideIvSource enum.
+func (e OptionSideIvSource) Valid() bool {
+	switch e {
+	case OptionSideIvSourceLtp:
+		return true
+	case OptionSideIvSourceMid:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UserRole.
 const (
 	UserRoleAdmin       UserRole = "admin"
@@ -331,6 +409,95 @@ type MfaTokenRequest struct {
 	MfaToken string `json:"mfa_token"`
 }
 
+// OptionChain defines model for OptionChain.
+type OptionChain struct {
+	Analytics OptionChainAnalytics `json:"analytics"`
+	AsOf      time.Time            `json:"as_of"`
+	AtmStrike *string              `json:"atm_strike,omitempty"`
+
+	// ContractIds Every contract of the expiry (subscribe them so PCR and max pain see the whole chain)
+	ContractIds []int64            `json:"contract_ids"`
+	Expiry      openapi_types.Date `json:"expiry"`
+
+	// Forward Forward (Black-76) or dividend-adjusted spot (BSM), rupees
+	Forward       *float64                  `json:"forward,omitempty"`
+	ForwardSource *OptionChainForwardSource `json:"forward_source,omitempty"`
+	LotSize       int                       `json:"lot_size"`
+	MaxPain       *string                   `json:"max_pain,omitempty"`
+	Model         *OptionChainModel         `json:"model,omitempty"`
+
+	// OiStrikes Strikes with OI behind pcr and max_pain
+	OiStrikes *int `json:"oi_strikes,omitempty"`
+
+	// Pcr Put OI / call OI over every strike of the expiry with OI
+	Pcr  *float64 `json:"pcr,omitempty"`
+	Rate *float64 `json:"rate,omitempty"`
+
+	// RateAsOf When the configured risk-free rate took effect
+	RateAsOf   *openapi_types.Date `json:"rate_as_of,omitempty"`
+	Rows       []OptionChainRow    `json:"rows"`
+	TYears     *float64            `json:"t_years,omitempty"`
+	Underlying struct {
+		FutLtp *string `json:"fut_ltp,omitempty"`
+
+		// FutureId Same-expiry future, when listed
+		FutureId     *int64 `json:"future_id,omitempty"`
+		InstrumentId int64  `json:"instrument_id"`
+
+		// Ltp Decimal string; absent until a tick is seen
+		Ltp *string `json:"ltp,omitempty"`
+	} `json:"underlying"`
+}
+
+// OptionChainAnalytics defines model for OptionChain.Analytics.
+type OptionChainAnalytics string
+
+// OptionChainForwardSource defines model for OptionChain.ForwardSource.
+type OptionChainForwardSource string
+
+// OptionChainModel defines model for OptionChain.Model.
+type OptionChainModel string
+
+// OptionChainRow defines model for OptionChainRow.
+type OptionChainRow struct {
+	// Ce One contract. Market fields are absent until a tick is seen; analytics are absent where undefined
+	// (no forward, price below intrinsic − 1 tick, …). iv is a decimal (0.142 = 14.2 %); Greeks are per
+	// unit with respect to the model's underlying: theta in ₹ per calendar day, vega in ₹ per vol point.
+	Ce *OptionSide `json:"ce,omitempty"`
+
+	// Pe One contract. Market fields are absent until a tick is seen; analytics are absent where undefined
+	// (no forward, price below intrinsic − 1 tick, …). iv is a decimal (0.142 = 14.2 %); Greeks are per
+	// unit with respect to the model's underlying: theta in ₹ per calendar day, vega in ₹ per vol point.
+	Pe     *OptionSide `json:"pe,omitempty"`
+	Strike string      `json:"strike"`
+}
+
+// OptionSide One contract. Market fields are absent until a tick is seen; analytics are absent where undefined
+// (no forward, price below intrinsic − 1 tick, …). iv is a decimal (0.142 = 14.2 %); Greeks are per
+// unit with respect to the model's underlying: theta in ₹ per calendar day, vega in ₹ per vol point.
+type OptionSide struct {
+	Ask          *string  `json:"ask,omitempty"`
+	Bid          *string  `json:"bid,omitempty"`
+	Delta        *float64 `json:"delta,omitempty"`
+	Gamma        *float64 `json:"gamma,omitempty"`
+	InstrumentId int64    `json:"instrument_id"`
+	Iv           *float64 `json:"iv,omitempty"`
+
+	// IvSource Price the IV was solved from
+	IvSource      *OptionSideIvSource `json:"iv_source,omitempty"`
+	Ltp           *string             `json:"ltp,omitempty"`
+	Oi            *int64              `json:"oi,omitempty"`
+	OiChg         *int64              `json:"oi_chg,omitempty"`
+	PrevClose     *string             `json:"prev_close,omitempty"`
+	Theta         *float64            `json:"theta,omitempty"`
+	Tradingsymbol string              `json:"tradingsymbol"`
+	Vega          *float64            `json:"vega,omitempty"`
+	Volume        *int64              `json:"volume,omitempty"`
+}
+
+// OptionSideIvSource Price the IV was solved from
+type OptionSideIvSource string
+
 // Problem RFC 9457 problem details.
 type Problem struct {
 	// Code Stable machine code, e.g. R-LOSS-DAILY
@@ -457,6 +624,12 @@ type GetCandlesParams struct {
 // GetCandlesParamsInterval defines parameters for GetCandles.
 type GetCandlesParamsInterval string
 
+// GetOptionChainParams defines parameters for GetOptionChain.
+type GetOptionChainParams struct {
+	Expiry  *openapi_types.Date `form:"expiry,omitempty" json:"expiry,omitempty"`
+	Strikes *int                `form:"strikes,omitempty" json:"strikes,omitempty"`
+}
+
 // LoginJSONRequestBody defines body for Login for application/json ContentType.
 type LoginJSONRequestBody = LoginRequest
 
@@ -513,9 +686,15 @@ type ServerInterface interface {
 	// GetInstrument One instrument (active or expired)
 	// (GET /instruments/{id})
 	GetInstrument(w http.ResponseWriter, r *http.Request, id int64)
+	// GetExpiries Active option expiries of an underlying (today IST onwards), nearest first
+	// (GET /instruments/{id}/expiries)
+	GetExpiries(w http.ResponseWriter, r *http.Request, id int64)
 	// GetCandles Historical bars from ClickHouse (entitled instruments only)
 	// (GET /marketdata/candles)
 	GetCandles(w http.ResponseWriter, r *http.Request, params GetCandlesParams)
+	// GetOptionChain Option chain with IV, Greeks, PCR and max pain (F-MD-3)
+	// (GET /optionchain/{underlying_id})
+	GetOptionChain(w http.ResponseWriter, r *http.Request, underlyingId int64, params GetOptionChainParams)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -910,6 +1089,32 @@ func (siw *ServerInterfaceWrapper) GetInstrument(w http.ResponseWriter, r *http.
 	handler.ServeHTTP(w, r)
 }
 
+// GetExpiries operation middleware
+func (siw *ServerInterfaceWrapper) GetExpiries(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id int64
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetExpiries(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetCandles operation middleware
 func (siw *ServerInterfaceWrapper) GetCandles(w http.ResponseWriter, r *http.Request) {
 
@@ -973,6 +1178,61 @@ func (siw *ServerInterfaceWrapper) GetCandles(w http.ResponseWriter, r *http.Req
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetCandles(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetOptionChain operation middleware
+func (siw *ServerInterfaceWrapper) GetOptionChain(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "underlying_id" -------------
+	var underlyingId int64
+
+	err = runtime.BindStyledParameterWithOptions("simple", "underlying_id", r.PathValue("underlying_id"), &underlyingId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "underlying_id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetOptionChainParams
+
+	// ------------- Optional query parameter "expiry" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "expiry", r.URL.Query(), &params.Expiry, runtime.BindQueryParameterOptions{Type: "string", Format: "date"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "expiry"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "expiry", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "strikes" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "strikes", r.URL.Query(), &params.Strikes, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "strikes"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "strikes", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetOptionChain(w, r, underlyingId, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1115,6 +1375,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/brokers/callback/upstox", wrapper.BrokerCallbackUpstox)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/instruments/search", wrapper.SearchInstruments)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/instruments/{id}", wrapper.GetInstrument)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/instruments/{id}/expiries", wrapper.GetExpiries)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/optionchain/{underlying_id}", wrapper.GetOptionChain)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/marketdata/candles", wrapper.GetCandles)
 
 	return m
@@ -1932,6 +2194,44 @@ func (response GetInstrument404ApplicationProblemPlusJSONResponse) VisitGetInstr
 	return err
 }
 
+type GetExpiriesRequestObject struct {
+	Id int64 `json:"id"`
+}
+
+type GetExpiriesResponseObject interface {
+	VisitGetExpiriesResponse(w http.ResponseWriter) error
+}
+
+type GetExpiries200JSONResponse []openapi_types.Date
+
+func (response GetExpiries200JSONResponse) VisitGetExpiriesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetExpiries401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response GetExpiries401ApplicationProblemPlusJSONResponse) VisitGetExpiriesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetCandlesRequestObject struct {
 	Params GetCandlesParams
 }
@@ -2014,6 +2314,77 @@ func (response GetCandles503ApplicationProblemPlusJSONResponse) VisitGetCandlesR
 	return err
 }
 
+type GetOptionChainRequestObject struct {
+	UnderlyingId int64 `json:"underlying_id"`
+	Params       GetOptionChainParams
+}
+
+type GetOptionChainResponseObject interface {
+	VisitGetOptionChainResponse(w http.ResponseWriter) error
+}
+
+type GetOptionChain200JSONResponse OptionChain
+
+func (response GetOptionChain200JSONResponse) VisitGetOptionChainResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetOptionChain401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response GetOptionChain401ApplicationProblemPlusJSONResponse) VisitGetOptionChainResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetOptionChain403ApplicationProblemPlusJSONResponse struct {
+	ForbiddenApplicationProblemPlusJSONResponse
+}
+
+func (response GetOptionChain403ApplicationProblemPlusJSONResponse) VisitGetOptionChainResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetOptionChain404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response GetOptionChain404ApplicationProblemPlusJSONResponse) VisitGetOptionChainResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
 	// Login Password step; returns an mfa_token for the TOTP step
@@ -2055,9 +2426,15 @@ type StrictServerInterface interface {
 	// GetInstrument One instrument (active or expired)
 	// (GET /instruments/{id})
 	GetInstrument(ctx context.Context, request GetInstrumentRequestObject) (GetInstrumentResponseObject, error)
+	// GetExpiries Active option expiries of an underlying (today IST onwards), nearest first
+	// (GET /instruments/{id}/expiries)
+	GetExpiries(ctx context.Context, request GetExpiriesRequestObject) (GetExpiriesResponseObject, error)
 	// GetCandles Historical bars from ClickHouse (entitled instruments only)
 	// (GET /marketdata/candles)
 	GetCandles(ctx context.Context, request GetCandlesRequestObject) (GetCandlesResponseObject, error)
+	// GetOptionChain Option chain with IV, Greeks, PCR and max pain (F-MD-3)
+	// (GET /optionchain/{underlying_id})
+	GetOptionChain(ctx context.Context, request GetOptionChainRequestObject) (GetOptionChainResponseObject, error)
 }
 
 type StrictHandlerFunc func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error)
@@ -2460,6 +2837,32 @@ func (sh *strictHandler) GetInstrument(w http.ResponseWriter, r *http.Request, i
 	}
 }
 
+// GetExpiries operation middleware
+func (sh *strictHandler) GetExpiries(w http.ResponseWriter, r *http.Request, id int64) {
+	var request GetExpiriesRequestObject
+
+	request.Id = id
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetExpiries(ctx, request.(GetExpiriesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetExpiries")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetExpiriesResponseObject); ok {
+		if err := validResponse.VisitGetExpiriesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetCandles operation middleware
 func (sh *strictHandler) GetCandles(w http.ResponseWriter, r *http.Request, params GetCandlesParams) {
 	var request GetCandlesRequestObject
@@ -2479,6 +2882,33 @@ func (sh *strictHandler) GetCandles(w http.ResponseWriter, r *http.Request, para
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetCandlesResponseObject); ok {
 		if err := validResponse.VisitGetCandlesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetOptionChain operation middleware
+func (sh *strictHandler) GetOptionChain(w http.ResponseWriter, r *http.Request, underlyingId int64, params GetOptionChainParams) {
+	var request GetOptionChainRequestObject
+
+	request.UnderlyingId = underlyingId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetOptionChain(ctx, request.(GetOptionChainRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetOptionChain")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetOptionChainResponseObject); ok {
+		if err := validResponse.VisitGetOptionChainResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

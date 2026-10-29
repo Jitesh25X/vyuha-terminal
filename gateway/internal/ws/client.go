@@ -179,13 +179,24 @@ func itemID(it *wsv1.Item) uint64 {
 	return it.GetDepth().GetInstrumentId()
 }
 
+// DataAccounts is the set of a user's accounts whose feeds they may see (ADR-009/020): mapped,
+// data-entitled and not sim. WebSocket delivery and REST reads of latest values both use it.
+func DataAccounts(accounts []Account) map[string]bool {
+	data := map[string]bool{}
+	for _, a := range accounts {
+		if rbac.CanReceiveMarketData(&rbac.Mapping{CanView: true}, a.DataEntitled) && a.Broker != "sim" {
+			data[a.ID] = true
+		}
+	}
+	return data
+}
+
 func (c *client) setAccounts(accounts []Account) {
-	data, visible := map[string]bool{}, map[string]string{}
+	data, visible := DataAccounts(accounts), map[string]string{}
 	byBroker := map[string][]string{}
 	for _, a := range accounts {
 		visible[a.ID] = a.Label
-		if rbac.CanReceiveMarketData(&rbac.Mapping{CanView: true}, a.DataEntitled) && a.Broker != "sim" {
-			data[a.ID] = true
+		if data[a.ID] {
 			byBroker[a.Broker] = append(byBroker[a.Broker], a.ID)
 		}
 	}
@@ -384,39 +395,14 @@ func (c *client) snapshotItems(ch wsv1.Channel, ids, denied []uint64) snapshot {
 	c.mu.Lock()
 	data := c.data
 	c.mu.Unlock()
-	h := c.hub
-	var missing []uint64
-	h.mu.Lock()
+	allowed := make([]uint64, 0, len(ids))
 	for _, id := range ids {
-		if slices.Contains(denied, id) {
-			continue
-		}
-		var best *marketdatav1.Tick
-		for a := range data {
-			if t := h.last[lastKey{id, a}]; t != nil && (best == nil || t.GetRecvTsNs() > best.GetRecvTsNs()) {
-				best = t
-			}
-		}
-		if best != nil {
-			out.ticks[id] = best
-		} else {
-			missing = append(missing, id)
+		if !slices.Contains(denied, id) {
+			allowed = append(allowed, id)
 		}
 	}
-	h.mu.Unlock()
-	if len(missing) > 0 {
-		lctx, cancel := context.WithTimeout(c.ctx, time.Second)
-		last, err := h.src.Last(lctx, missing)
-		cancel()
-		if err == nil {
-			h.mu.Lock()
-			for id, s := range last {
-				if t := s.GetTick(); t != nil && data[h.feeds[t.GetFeedId()]] {
-					out.ticks[id] = t
-				}
-			}
-			h.mu.Unlock()
-		}
+	for id, v := range c.hub.Latest(c.ctx, data, allowed) {
+		out.ticks[id] = v.Tick
 	}
 	for _, id := range ids {
 		if t := out.ticks[id]; t != nil {

@@ -70,3 +70,56 @@ export type CandleRow = [string, string, string, string, string, number, number]
 export interface Candles {
   bars: CandleRow[];
 }
+
+// ── option chain (openapi.yaml: OptionChain, OptionChainRow, OptionSide) ─────
+/** One contract. Market fields absent until a tick is seen; analytics absent where undefined. */
+export interface OptionSide {
+  instrument_id: number;
+  tradingsymbol: string;
+  ltp?: string;
+  prev_close?: string;
+  bid?: string;
+  ask?: string;
+  volume?: number;
+  oi?: number;
+  oi_chg?: number;
+  /** decimal: 0.142 = 14.2 % */
+  iv?: number;
+  /** price the IV was solved from: tight mid, else an LTP that traded within the last minute */
+  iv_source?: "mid" | "ltp";
+  delta?: number;
+  gamma?: number;
+  /** ₹ per calendar day */
+  theta?: number;
+  /** ₹ per vol point */
+  vega?: number;
+}
+
+export interface OptionChainRow {
+  strike: string;
+  ce?: OptionSide;
+  pe?: OptionSide;
+}
+
+export interface OptionChain {
+  underlying: { instrument_id: number; ltp?: string; future_id?: number; fut_ltp?: string };
+  expiry: string;
+  lot_size: number;
+  analytics: "ok" | "unavailable";
+  model?: "black76" | "bsm";
+  forward?: number;
+  forward_source?: "future" | "synthetic_mid" | "synthetic_ltp" | "spot";
+  rate?: number;
+  /** date the configured risk-free rate took effect */
+  rate_as_of?: string;
+  t_years?: number;
+  atm_strike?: string;
+  /** over every strike of the expiry with OI (`oi_strikes`), not just the rows */
+  pcr?: number;
+  max_pain?: string;
+  oi_strikes?: number;
+  as_of: string;
+  rows: OptionChainRow[];
+  /** every contract of the expiry: subscribed so PCR and max pain see the whole chain */
+  contract_ids: number[];
+}
