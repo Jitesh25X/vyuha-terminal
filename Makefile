@@ -97,8 +97,13 @@ test: test-engine test-gateway test-quant test-intel test-web
 # NATS/Postgres integration tests run when the dev stack is up (make up), like test-gateway.
 ENGINE_PRESETS ?= debug asan
 # Configure only: installs the vcpkg manifest with the engine compiler (CI builds the binary cache this way).
+# Extra configure args for the engine presets. CI passes release-only vcpkg triplets
+# (-DVCPKG_TARGET_TRIPLET=x64-linux-release -DVCPKG_HOST_TRIPLET=x64-linux-release): each dependency is
+# built once instead of debug + release. Empty locally.
+ENGINE_CMAKE_ARGS ?=
+
 engine-deps:
-	$(call maybe,engine/CMakeLists.txt,cd engine && cmake --preset debug >/dev/null)
+	$(call maybe,engine/CMakeLists.txt,cd engine && cmake --preset debug $(ENGINE_CMAKE_ARGS))
 
 test-engine:
 	$(call maybe,engine/CMakeLists.txt,cd engine && \
@@ -106,7 +111,7 @@ test-engine:
 	    export VYUHA_TEST_NATS_URL="$${VYUHA_TEST_NATS_URL:-nats://127.0.0.1:4222}"; fi; \
 	  if docker compose -f ../deploy/docker-compose.dev.yml ps --status running -q postgres 2>/dev/null | grep -q .; then \
 	    export VYUHA_TEST_POSTGRES_URL="$${VYUHA_TEST_POSTGRES_URL:-postgres://vyuha:vyuha@127.0.0.1:5432/vyuha?sslmode=disable}"; fi; \
-	  for p in $(ENGINE_PRESETS); do cmake --preset $$p && cmake --build --preset $$p && ctest --preset $$p || exit 1; done)
+	  for p in $(ENGINE_PRESETS); do cmake --preset $$p $(ENGINE_CMAKE_ARGS) && cmake --build --preset $$p && ctest --preset $$p || exit 1; done)
 
 # Go protobuf code is gitignored, so generate it first. Store integration tests run when the dev Postgres is up.
 test-gateway:
@@ -174,7 +179,7 @@ lint: proto-lint lint-engine lint-gateway lint-quant lint-intel lint-web
 
 # clang-tidy reads build/debug/compile_commands.json; configure debug if it's missing (e.g. after clean-space).
 lint-engine:
-	$(call maybe,engine/CMakeLists.txt,cd engine && { test -f build/debug/compile_commands.json || cmake --preset debug >/dev/null; } && clang-format --dry-run --Werror $$(git ls-files --cached --others --exclude-standard '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA) '/engine/(src|tests|bench|bindings|fuzz)/')
+	$(call maybe,engine/CMakeLists.txt,cd engine && { test -f build/debug/compile_commands.json || cmake --preset debug $(ENGINE_CMAKE_ARGS) >/dev/null; } && clang-format --dry-run --Werror $$(git ls-files --cached --others --exclude-standard '*.cc' '*.h') && run-clang-tidy -p build/debug -quiet $(TIDY_EXTRA) '/engine/(src|tests|bench|bindings|fuzz)/')
 
 lint-gateway:
 	$(call maybe,gateway/go.mod,cd gateway && test -z "$$(gofmt -l $$(git ls-files --cached --others --exclude-standard '*.go'))" || { gofmt -l $$(git ls-files --cached --others --exclude-standard '*.go'); echo "✖ gofmt"; exit 1; }; \
