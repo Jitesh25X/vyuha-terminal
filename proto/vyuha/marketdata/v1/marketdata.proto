@@ -49,6 +49,11 @@ message Tick {
   // Engine session (broker account) whose feed received this tick; see SessionInfo.feed_id.
   // The gateway shows a tick only to users entitled through that account (ADR-009).
   uint32 feed_id = 26;
+  // When this feed last saw the instrument trade (epoch ns); 0 = unknown. Upstox: the broker's last
+  // trade time (ltt). Kite: the full-mode last-traded timestamp, else inferred by the engine from this
+  // feed's cumulative day volume rising (Kite quote mode has no trade time). Kept in md_last, so it
+  // survives restarts; the gateway uses it to decide whether an LTP is recent enough for IV.
+  int64 last_trade_ts_ns = 27;
 }
 
 message Bar {

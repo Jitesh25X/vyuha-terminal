@@ -69,7 +69,8 @@ TEST(UpstoxParser, DecodesFullIndexAndLtpcFeeds) {
   EXPECT_EQ(fut->ltp, rs("24450.05"));
   EXPECT_EQ(fut->prev_close, rs("24280"));
   EXPECT_EQ(fut->ltq, 75U);
-  EXPECT_EQ(fut->exchange_ts, kTsMs * 1'000'000);  // ltt wins over currentTs
+  EXPECT_EQ(fut->exchange_ts, kTsMs * 1'000'000);    // ltt wins over currentTs
+  EXPECT_EQ(fut->last_trade_ts, kTsMs * 1'000'000);  // ltt is the broker's last trade time
   EXPECT_EQ(fut->recv_ts, kRecv);
   EXPECT_EQ((std::array{fut->open, fut->high, fut->low}),
             (std::array{rs("24300"), rs("24500"), rs("24250")}));
@@ -91,6 +92,7 @@ TEST(UpstoxParser, DecodesFullIndexAndLtpcFeeds) {
   ASSERT_NE(eq, nullptr);
   EXPECT_EQ(eq->ltp, rs("2450.05"));
   EXPECT_EQ(eq->exchange_ts, (kTsMs + 500) * 1'000'000);  // no ltt: frame currentTs
+  EXPECT_EQ(eq->last_trade_ts, 0);                        // ...and no trade time (not currentTs)
 }
 
 TEST(UpstoxParser, MarketInfoAndUnknownKeys) {

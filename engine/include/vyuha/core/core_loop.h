@@ -11,6 +11,7 @@
 #include "vyuha/md/last_value.h"
 #include "vyuha/md/session.h"
 #include "vyuha/md/tick.h"
+#include "vyuha/md/trade_clock.h"
 
 namespace vyuha {
 
@@ -51,6 +52,7 @@ class CoreLoop {
   void run(const std::stop_token& stop);
 
   [[nodiscard]] const md::LastValueBook& book() const noexcept { return book_; }
+  [[nodiscard]] const md::TradeClock& trades() const noexcept { return trades_; }
   [[nodiscard]] const md::BarBuilder& bars(md::BarInterval i) const noexcept {
     return i == md::BarInterval::k1s ? bars_1s_ : bars_1m_;
   }
@@ -67,6 +69,7 @@ class CoreLoop {
   std::size_t n_inputs_{0};
   std::size_t next_input_{0};
   md::LastValueBook book_;
+  md::TradeClock trades_;
   md::BarBuilder bars_1s_;
   md::BarBuilder bars_1m_;
   CoreStats stats_;

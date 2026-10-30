@@ -838,35 +838,19 @@ func TestDataAccounts(t *testing.T) {
 	}
 }
 
-// A trade is inferred when a feed's cumulative day volume rises between two of its ticks; quote
-// refreshes without volume don't count, and the first tick seen has no baseline.
-func TestLatestTradedAtFromVolume(t *testing.T) {
-	now := time.Date(2026, 10, 29, 5, 30, 0, 0, time.UTC)
-	clock := now
-	h := New(DefaultConfig(), nil, &fakeDir{}, &fakeEngine{}, &fakeSource{ready: make(chan struct{})},
-		slog.New(slog.NewTextHandler(io.Discard, nil)), func() time.Time { return clock })
+// TradedAt is the engine's Tick.last_trade_ts, from the cache and from md_last alike (so it survives
+// a gateway restart); zero when the engine doesn't know it.
+func TestLatestTradedAtFromEngine(t *testing.T) {
+	traded := time.Date(2026, 10, 30, 4, 0, 5, 0, time.UTC)
+	src := &fakeSource{ready: make(chan struct{}), last: map[uint64]*marketdatav1.Snapshot{
+		8: {Tick: &marketdatav1.Tick{InstrumentId: 8, FeedId: 11, LastTradeTsNs: traded.UnixNano()}},
+	}}
+	h := New(DefaultConfig(), nil, &fakeDir{}, &fakeEngine{}, src, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Now)
 	h.feeds = map[uint32]string{11: "A"}
-	h.byInstrument[7] = map[*client]int{{}: 1} // someone is subscribed
-	traded := func() time.Time {
-		return h.Latest(context.Background(), map[string]bool{"A": true}, []uint64{7})[7].TradedAt
-	}
-	h.onTick(&marketdatav1.Tick{InstrumentId: 7, FeedId: 11, Volume: 100, Ltp: 1})
-	if !traded().IsZero() {
-		t.Fatal("first tick: no baseline, no trade time")
-	}
-	clock = now.Add(time.Second)
-	h.onTick(&marketdatav1.Tick{InstrumentId: 7, FeedId: 11, Volume: 100, Bid: 2}) // quote change only
-	if !traded().IsZero() {
-		t.Fatal("a quote refresh is not a trade")
-	}
-	clock = now.Add(2 * time.Second)
-	h.onTick(&marketdatav1.Tick{InstrumentId: 7, FeedId: 11, Volume: 175, Ltp: 3})
-	if got := traded(); !got.Equal(now.Add(2 * time.Second)) {
-		t.Fatalf("TradedAt = %v", got)
-	}
-	clock = now.Add(time.Minute)
-	h.onTick(&marketdatav1.Tick{InstrumentId: 7, FeedId: 11, Volume: 175, Bid: 4})
-	if got := traded(); !got.Equal(now.Add(2 * time.Second)) {
-		t.Fatalf("TradedAt moved without a trade: %v", got)
+	h.last[lastKey{7, "A"}] = &marketdatav1.Tick{InstrumentId: 7, FeedId: 11, LastTradeTsNs: traded.UnixNano()}
+	h.last[lastKey{9, "A"}] = &marketdatav1.Tick{InstrumentId: 9, FeedId: 11}
+	got := h.Latest(context.Background(), map[string]bool{"A": true}, []uint64{7, 8, 9})
+	if !got[7].TradedAt.Equal(traded) || !got[8].TradedAt.Equal(traded) || !got[9].TradedAt.IsZero() {
+		t.Fatalf("cache %v, md_last %v, unknown %v", got[7].TradedAt, got[8].TradedAt, got[9].TradedAt)
 	}
 }

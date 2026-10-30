@@ -28,6 +28,9 @@ struct Tick {
   InstrumentId instrument_id{0};
   Nanos exchange_ts{0};
   Nanos recv_ts{0};
+  // When this feed last saw the instrument trade; 0 = unknown. Decoders set it when the broker sends
+  // one (Upstox ltt, Kite full mode); the core's TradeClock infers it otherwise and carries it forward.
+  Nanos last_trade_ts{0};
   std::uint64_t seq{0};
   Source source{Source::kUnknown};
   std::uint32_t feed_id{0};  // session whose feed received it (entitlement routing, ADR-009)
