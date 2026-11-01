@@ -121,7 +121,7 @@ Current milestone: **M1**
 - [ ] **M1.11c** Engine: keep the last-trade/volume inference state in the last-value book entry (shares the cache line already loaded for the tick); delete M1.11b's separate `TradeClock` table
   - deps: M1.11b
   - needs: nothing new
-  - done: `BM_CorePollTicks` ≤ 80 ns/tick at 5,000 instruments (M1.11b: 134) and within 2 % of 18.0M ticks/s at 100; the 6 inference tests + ASan pass; before/after numbers recorded
+  - done: `BM_CorePollTicks` ≤ 80 ns/tick at 5,000 instruments (M1.11b: 134) and within 2 % of 18.0M ticks/s at 100; the 6 inference tests + ASan pass; before/after numbers recorded — 2026-11-02: tests met (debug 81/81, ASan+UBSan 71/71, lint-engine; the 6 inference scenarios + a feed-slot test). **Benchmarks: relative targets met, absolute not reproducible — owner to accept.** Interleaved A/B/C runs (7 rounds × 2 s, median ns/tick, one session): 100 instruments — baseline (no inference) 71.9, M1.11b 72.3 (+0.6 %), **M1.11c 73.3 (+2.0 %)**; 5,000 — baseline 108.0, M1.11b 134.5 (+24.6 %), **M1.11c 110.8 (+2.7 %)**. This laptop's baseline itself is 108 ns / 13.9M/s today (round-to-round spread 98–205 ns), so the absolute 80 ns / 18.0M/s figures (taken in a different session, partly while other builds ran) can't be compared; the earlier "M1.11b 134 ns vs 73 ns baseline" was measured under that load
 - [ ] **M1.12** **Staging:** VM with 2 static IPs, real Kite + Upstox sessions streaming Nifty 50 + NIFTY options
   - deps: M1.11c
   - needs: Staging VM only; record only Nifty 50 + NIFTY options near expiries
