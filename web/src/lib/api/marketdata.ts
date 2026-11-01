@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { request } from "./client";
-import type { CandleInterval, Candles, Instrument } from "./types";
+import type { CandleInterval, Candles, IndexConstituents, Instrument } from "./types";
 
 const SEGMENT = /^(EQ|FUT|OPT|IDX|NSE|BSE|NFO|BFO)$/;
 
@@ -49,6 +49,17 @@ export function useCandles(instrumentId: number | undefined, interval: CandleInt
     },
     enabled: instrumentId !== undefined,
     staleTime: 60_000,
+    retry: false,
+  });
+}
+
+/** Index members (reference data); 404 NO_CONSTITUENTS until a source exists (M6.1). */
+export function useIndexConstituents(indexId: number | undefined) {
+  return useQuery({
+    queryKey: ["constituents", indexId],
+    queryFn: () => request<IndexConstituents>(`/indices/${indexId}/constituents`, { auth: true }),
+    enabled: indexId !== undefined,
+    staleTime: 60 * 60_000,
     retry: false,
   });
 }

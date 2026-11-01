@@ -1,12 +1,12 @@
 // Apache ECharts (TECH_STACK: analytics charts, canvas renderer), registered once with only the parts
 // the terminal uses so the bundle stays small.
-import { BarChart, LineChart } from "echarts/charts";
+import { BarChart, LineChart, TreemapChart } from "echarts/charts";
 import { GridComponent, LegendComponent, MarkLineComponent, TooltipComponent } from "echarts/components";
 import * as echarts from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
 import { useEffect, useRef } from "react";
 
-echarts.use([BarChart, LineChart, GridComponent, LegendComponent, MarkLineComponent, TooltipComponent, CanvasRenderer]);
+echarts.use([BarChart, LineChart, TreemapChart, GridComponent, LegendComponent, MarkLineComponent, TooltipComponent, CanvasRenderer]);
 
 export type ChartOption = echarts.EChartsCoreOption;
 

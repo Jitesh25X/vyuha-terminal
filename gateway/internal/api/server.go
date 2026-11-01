@@ -29,14 +29,15 @@ type DB interface {
 
 // Server implements StrictServerInterface.
 type Server struct {
-	version string
-	env     config.Env
-	db      DB
-	auth    *auth.Service
-	brokers *brokers.Service
-	md      *MarketData
-	oc      *OptionChains
-	logger  *slog.Logger
+	version      string
+	env          config.Env
+	db           DB
+	auth         *auth.Service
+	brokers      *brokers.Service
+	md           *MarketData
+	oc           *OptionChains
+	constituents ConstituentSource
+	logger       *slog.Logger
 
 	trustedProxies []netip.Prefix
 	credLimiter    *ratelimit.Limiter
