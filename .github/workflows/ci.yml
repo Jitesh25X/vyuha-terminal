@@ -1,7 +1,11 @@
-# CI: one job per service plus sanitizers, all through the same `make` targets used locally.
+# CI: one job per service, all through the same `make` targets used locally.
 # Toolchains come from scripts/bootstrap.sh (pinned + sha256) so CI and dev machines match.
 # Branch protection requires the single `ci-ok` check, so jobs can be added or renamed freely.
 # The intel/ job is added by the task that scaffolds it (M6.x).
+#
+# Cost controls: `changes` (scripts/ci-changes.sh) runs only the services a change touches; the engine
+# runs its debug preset here, while ASan/TSan and parser fuzzing run in nightly.yml; superseded PR runs
+# are cancelled; caches are keyed by lockfiles, so PRs hit main's caches and don't save new ones.
 name: ci
 
 on:
@@ -19,12 +23,24 @@ concurrency:
 
 env:
   VYUHA_TOOLS_DIR: /home/runner/.local/share/vyuha-tools
-  VCPKG_ROOT: /home/runner/.local/share/vyuha-tools/vcpkg
-  # Release-only vcpkg builds (debug engine builds link them fine on Linux): half the cold-build time.
-  # Must be the same for engine-deps and the preset jobs, or the binary cache never matches.
-  ENGINE_CMAKE_ARGS: -DVCPKG_TARGET_TRIPLET=x64-linux-release -DVCPKG_HOST_TRIPLET=x64-linux-release
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      engine: ${{ steps.f.outputs.engine }}
+      gateway: ${{ steps.f.outputs.gateway }}
+      quant: ${{ steps.f.outputs.quant }}
+      web: ${{ steps.f.outputs.web }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # PRs: the PR's changes (base → merge commit). Pushes: since the previous push. Manual runs: all.
+      - id: f
+        run: scripts/ci-changes.sh "${{ github.event_name != 'workflow_dispatch' && (github.event.pull_request.base.sha || github.event.before) || '' }}" "${{ github.sha }}"
+
   hygiene:
     name: invariants + secrets scan
     runs-on: ubuntu-24.04
@@ -45,134 +61,16 @@ jobs:
           tar -C "$tmp" -xzf "$tmp/gl.tgz" gitleaks
           "$tmp/gitleaks" git --redact --no-banner --verbose .
 
-  # Builds the vcpkg manifest once into the binary cache so the preset jobs below restore it instead
-  # of each compiling gRPC/abseil/protobuf in parallel (which filled the runners' disks). Sanitizer
-  # flags live in our CMake, not the triplet, so all presets share one set of archives.
-  #
-  # A cold build of the whole manifest can outlast one job, and actions/cache only saves on success, so
-  # a timed-out run used to leave nothing behind and the next run started from zero again. Now the
-  # archives vcpkg finished are saved as a "partial" cache even when the build step times out, and the
-  # next run restores the newest partial and builds only what is left: runs converge to a full cache.
-  engine-deps:
-    name: engine deps (vcpkg)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 345
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.13"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ env.VYUHA_TOOLS_DIR }}
-          key: tools-cpp-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'engine/vcpkg.json') }}
-      - id: vcpkg-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/vcpkg/archives
-          key: vcpkg-${{ runner.os }}-gcc14-rel-${{ hashFiles('engine/vcpkg.json', 'engine/vcpkg-configuration.json', 'engine/vcpkg-overlays/**', 'Makefile') }}
-          restore-keys: vcpkg-${{ runner.os }}-gcc14-rel-${{ hashFiles('engine/vcpkg.json', 'engine/vcpkg-configuration.json', 'engine/vcpkg-overlays/**', 'Makefile') }}-partial-
-      - if: steps.vcpkg-cache.outputs.cache-hit != 'true'
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-      - if: steps.vcpkg-cache.outputs.cache-hit != 'true'
-        run: |
-          scripts/bootstrap.sh cpp
-          echo "$VYUHA_TOOLS_DIR/bin" >> "$GITHUB_PATH"
-      # Through make, so vcpkg sees the same compiler (GCC 14) as the preset jobs: its package ABI
-      # hashes include the compiler, and a mismatch silently rebuilds everything there.
-      # Step timeout below the job's, so the partial cache can still be saved when it expires.
-      - id: build
-        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 300
-        run: make engine-deps
-      - if: steps.vcpkg-cache.outputs.cache-hit != 'true' && steps.build.outcome == 'success'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/vcpkg/archives
-          key: vcpkg-${{ runner.os }}-gcc14-rel-${{ hashFiles('engine/vcpkg.json', 'engine/vcpkg-configuration.json', 'engine/vcpkg-overlays/**', 'Makefile') }}
-      - if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true' && steps.build.outcome != 'success'
-        continue-on-error: true # nothing to save when no package finished
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/vcpkg/archives
-          key: vcpkg-${{ runner.os }}-gcc14-rel-${{ hashFiles('engine/vcpkg.json', 'engine/vcpkg-configuration.json', 'engine/vcpkg-overlays/**', 'Makefile') }}-partial-${{ github.run_id }}-${{ github.run_attempt }}
-      - if: always() && steps.build.outcome != 'success' && steps.build.outcome != 'skipped'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: engine-deps-logs
-          path: |
-            engine/build/debug/vcpkg-manifest-install.log
-            ${{ env.VCPKG_ROOT }}/buildtrees/*/*.log
-          if-no-files-found: ignore
-          retention-days: 7
-
   engine:
-    name: engine (${{ matrix.preset }})
-    needs: engine-deps
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        preset: [debug, asan, tsan]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.13"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ env.VYUHA_TOOLS_DIR }}
-          key: tools-cpp-${{ runner.os }}-${{ hashFiles('scripts/bootstrap.sh', 'engine/vcpkg.json') }}
-      # vcpkg binary cache, saved by engine-deps; restore only.
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/vcpkg/archives
-          key: vcpkg-${{ runner.os }}-gcc14-rel-${{ hashFiles('engine/vcpkg.json', 'engine/vcpkg-configuration.json', 'engine/vcpkg-overlays/**', 'Makefile') }}
-          fail-on-cache-miss: true
-      - run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-      - run: |
-          scripts/bootstrap.sh cpp
-          echo "$VYUHA_TOOLS_DIR/bin" >> "$GITHUB_PATH"
-      # Ubuntu 24.04 runners use 32-bit mmap ASLR, which TSan's shadow memory layout can't handle.
-      - if: matrix.preset == 'tsan'
-        run: sudo sysctl vm.mmap_rnd_bits=28
-      - if: matrix.preset == 'debug'
-        run: make up # NATS publisher + Postgres instrument-directory integration tests
-      - run: make test-engine ENGINE_PRESETS=${{ matrix.preset }}
-      - if: matrix.preset == 'debug'
-        run: make lint-engine
-      - if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: engine-${{ matrix.preset }}-logs
-          path: |
-            engine/build/${{ matrix.preset }}/Testing/
-            engine/build/${{ matrix.preset }}/vcpkg-manifest-install.log
-          retention-days: 7
-
-  # Parser fuzzing with libFuzzer + ASan + UBSan (macOS can't run ASan with libFuzzer on LLVM 18).
-  # PRs fuzz for 60 s; pushes to main (and manual runs) for the full 10 minutes.
-  fuzz:
-    runs-on: ubuntu-24.04
-    # `make fuzz` runs every parser target in turn (kite, upstox) for FUZZ_SECONDS each: 2 × 10 min on
-    # main pushes, plus the build. 20 min fit one target (M1.4) and cancelled every main run since M1.5.
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: |
-          sudo apt-get update -qq
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends clang-18 libclang-rt-18-dev cmake ninja-build
-      - run: make fuzz FUZZ_SECONDS=${{ github.event_name == 'pull_request' && '60' || '600' }}
-      - if: failure() || cancelled()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: fuzz-crashes
-          path: engine/build/fuzz/crash-*
-          if-no-files-found: ignore
-          retention-days: 14
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
+    uses: ./.github/workflows/engine.yml
+    with:
+      presets: '["debug"]'
 
   gateway:
+    needs: changes
+    if: needs.changes.outputs.gateway == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -203,6 +101,8 @@ jobs:
           git diff --exit-code -- gateway
 
   quant:
+    needs: changes
+    if: needs.changes.outputs.quant == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -224,6 +124,8 @@ jobs:
       - run: make lint-quant test-quant
 
   web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -270,11 +172,13 @@ jobs:
           path: web/test-results/
           retention-days: 7
 
-  # The one required status check on main.
+  # The one required status check on main. Jobs skipped by the path filter count as passing; a failed
+  # or cancelled job (including `changes` itself) fails it.
   ci-ok:
     if: always()
-    needs: [hygiene, engine-deps, engine, fuzz, gateway, quant, web]
+    needs: [changes, hygiene, engine, gateway, quant, web]
     runs-on: ubuntu-24.04
     steps:
       - run: |
-          [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" = false ]
+          [ "${{ needs.changes.result }}" = success ]
+          [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = false ]

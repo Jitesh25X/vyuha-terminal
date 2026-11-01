@@ -1,0 +1,63 @@
+# Nightly: the slow engine checks that PRs and pushes skip to save CI time — ASan+UBSan and TSan
+# presets, and 10-minute libFuzzer runs of both broker parsers. Runs at 03:00 IST on main, only when
+# main changed in the last 26 hours (or on a manual run).
+name: nightly
+
+on:
+  schedule:
+    - cron: "30 21 * * *" # 21:30 UTC = 03:00 IST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.g.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 50
+      - id: g
+        run: |
+          if [ "${{ github.event_name }}" = workflow_dispatch ] || [ -n "$(git log --since='26 hours ago' --format=%H -1)" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"; echo "· no commits in the last 26 h: skipping"
+          fi
+
+  sanitizers:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    uses: ./.github/workflows/engine.yml
+    with:
+      presets: '["asan", "tsan"]'
+
+  # Parser fuzzing with libFuzzer + ASan + UBSan (macOS can't run ASan with libFuzzer on LLVM 18).
+  # `make fuzz` runs every parser target in turn (kite, upstox) for FUZZ_SECONDS each: 2 × 10 min plus
+  # the build.
+  fuzz:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          sudo apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends clang-18 libclang-rt-18-dev cmake ninja-build
+      - run: make fuzz FUZZ_SECONDS=600
+      - if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crashes
+          path: engine/build/fuzz/crash-*
+          if-no-files-found: ignore
+          retention-days: 14
