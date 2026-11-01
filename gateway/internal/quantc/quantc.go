@@ -27,8 +27,8 @@ type SideQuote struct {
 	Bid *string `json:"bid,omitempty"`
 	Ask *string `json:"ask,omitempty"`
 	OI  uint64  `json:"oi"`
-	// TradedAt is when the gateway last saw the contract trade (nil: not seen); quant uses the LTP for
-	// IV only if this is recent.
+	// TradedAt is the contract's last trade time from the engine (Tick.last_trade_ts; nil: unknown);
+	// quant uses the LTP for IV only if this is recent.
 	TradedAt *time.Time `json:"traded_at,omitempty"`
 }
 

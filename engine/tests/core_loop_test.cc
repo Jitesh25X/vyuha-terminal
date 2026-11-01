@@ -83,6 +83,30 @@ TEST(CoreLoop, SequencesTicksUpdatesBookAndBuildsBars) {
   EXPECT_EQ(core.stats().ticks, 3U);
 }
 
+// Kite quote-mode ticks carry no trade time: the core stamps one when this feed's volume rises and
+// forwards it (to NATS / md_last) on every later tick of that feed.
+TEST(CoreLoop, StampsInferredLastTradeTime) {
+  const SimClock clock(ist(2026, 10, 30, 9, 30));
+  RecordingSink sink;
+  CoreLoop core(CoreConfig{.max_instruments = 64}, clock, sink);
+  auto kite = std::make_unique<TickRing>();
+  ASSERT_TRUE(core.add_input(*kite));
+  const auto t1 = ist(2026, 10, 30, 9, 30, 1);
+  for (auto t : {trade(1, ist(2026, 10, 30, 9, 30), 100, 10), trade(1, t1, 101, 25),
+                 trade(1, ist(2026, 10, 30, 9, 30, 9), 101, 25)}) {
+    t.feed_id = 5;
+    ASSERT_TRUE(kite->try_push(t));
+  }
+  EXPECT_EQ(core.poll(), 3U);
+  ASSERT_EQ(sink.ticks.size(), 3U);
+  EXPECT_EQ(sink.ticks[0].last_trade_ts, 0);
+  EXPECT_EQ(sink.ticks[1].last_trade_ts, t1);
+  EXPECT_EQ(sink.ticks[2].last_trade_ts, t1);
+  ASSERT_NE(core.book().find(1), nullptr);
+  EXPECT_EQ(core.book().find(1)->last_trade_ts, t1);
+  EXPECT_EQ(core.trades().stats().inferred, 1U);
+}
+
 TEST(CoreLoop, RejectsInvalidTicks) {
   const SimClock clock(ist(2026, 10, 28, 10, 0));
   RecordingSink sink;

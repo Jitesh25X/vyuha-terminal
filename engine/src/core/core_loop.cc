@@ -12,6 +12,7 @@ CoreLoop::CoreLoop(const CoreConfig& cfg, const IClock& clock, md::IMdSink& sink
       clock_(&clock),
       sink_(&sink),
       book_(cfg.max_instruments),
+      trades_(cfg.max_instruments * 2),  // (instrument, feed): an instrument may stream on two feeds
       bars_1s_(md::BarInterval::k1s, cfg.max_instruments, cfg.hours, cfg.bar_grace),
       bars_1m_(md::BarInterval::k1m, cfg.max_instruments, cfg.hours, cfg.bar_grace) {}
 
@@ -71,6 +72,7 @@ void CoreLoop::on_tick(md::Tick& tick) noexcept {
   }
   tick.seq = ++seq_;
   ++stats_.ticks;
+  trades_.stamp(tick);
   if (!book_.update(tick)) {
     ++stats_.book_full;
   }

@@ -19,6 +19,7 @@ vyuha::md::Tick sample_tick() {
   t.instrument_id = 13'050'370;
   t.exchange_ts = 1'793'190'900'000'000'000;
   t.recv_ts = 1'793'190'900'000'123'456;
+  t.last_trade_ts = 1'793'190'899'000'000'000;
   t.seq = 42;
   t.feed_id = 3;
   t.source = vyuha::md::Source::kUpstox;
@@ -60,6 +61,7 @@ void expect_same(const vyuha::md::Tick& t, const pb::Tick& p) {
   EXPECT_EQ(p.ask_qty(), t.ask_qty);
   EXPECT_EQ(p.seq(), t.seq);
   EXPECT_EQ(p.feed_id(), t.feed_id);
+  EXPECT_EQ(p.last_trade_ts_ns(), t.last_trade_ts);
   ASSERT_EQ(p.bids_size(), 5);
   ASSERT_EQ(p.asks_size(), 5);
   EXPECT_EQ(p.bids(4).price(), t.bids[4].price.units());
@@ -97,7 +99,7 @@ TEST(MdEncodeReference, WorstCaseTickFitsTheBuffer) {
   constexpr auto kU64 = std::numeric_limits<std::uint64_t>::max();
   vyuha::md::Tick t;
   t.instrument_id = kU64;
-  t.exchange_ts = t.recv_ts = kMin;
+  t.exchange_ts = t.recv_ts = t.last_trade_ts = kMin;
   t.seq = kU64;
   t.source = vyuha::md::Source::kUpstox;
   t.feed_id = kU32;
@@ -117,6 +119,7 @@ TEST(MdEncodeReference, WorstCaseTickFitsTheBuffer) {
   pb::Tick p;
   ASSERT_TRUE(p.ParseFromArray(buf.data(), static_cast<int>(n)));
   EXPECT_EQ(p.feed_id(), kU32);
+  EXPECT_EQ(p.last_trade_ts_ns(), kMin);
   std::array<std::uint8_t, vyuha::bus::kMaxSnapshotBytes> sbuf{};
   EXPECT_GT(vyuha::bus::encode_snapshot(t, true, sbuf), 0U);
 }

@@ -41,6 +41,7 @@ add_library(vyuha_core_lib
   src/core/wall_clock.cc
   src/md/bar_builder.cc
   src/md/last_value.cc
+  src/md/trade_clock.cc
   src/util/log.cc
   src/util/net.cc
   src/util/secret.cc

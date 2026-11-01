@@ -152,8 +152,7 @@ type Hub struct {
 	clients      map[*client]struct{}
 	byInstrument map[uint64]map[*client]int // clients with any market-data subscription to the id
 	last         map[lastKey]*marketdatav1.Tick
-	traded       map[lastKey]time.Time // when this feed last showed the instrument's day volume rising
-	feeds        map[uint32]string     // feed id → account
+	feeds        map[uint32]string // feed id → account
 	sessions     map[string]*enginev1.SessionInfo
 	engineOK     bool
 	want         map[string]map[uint64]wantCount // account → id → counts
@@ -180,7 +179,6 @@ func New(cfg Config, verify Verifier, dir Directory, engine Engine, src Source, 
 		clients:      map[*client]struct{}{},
 		byInstrument: map[uint64]map[*client]int{},
 		last:         map[lastKey]*marketdatav1.Tick{},
-		traded:       map[lastKey]time.Time{},
 		feeds:        map[uint32]string{},
 		sessions:     map[string]*enginev1.SessionInfo{},
 		want:         map[string]map[uint64]wantCount{},
@@ -325,18 +323,14 @@ func (h *Hub) onTick(t *marketdatav1.Tick) {
 	if len(subs) == 0 {
 		return
 	}
-	key := lastKey{t.GetInstrumentId(), account}
-	if prev := h.last[key]; prev != nil && t.GetVolume() > prev.GetVolume() {
-		h.traded[key] = h.now() // cumulative day volume only rises on a trade
-	}
-	h.last[key] = t
+	h.last[lastKey{t.GetInstrumentId(), account}] = t
 	for c := range subs {
 		c.offerTick(t, account)
 	}
 }
 
-// LatestValue is an instrument's newest tick from one of a user's feeds, and when that feed last showed
-// it trading (zero when no trade has been seen since the gateway started watching it).
+// LatestValue is an instrument's newest tick from one of a user's feeds, and when that feed last saw it
+// trade (zero when unknown).
 type LatestValue struct {
 	Tick     *marketdatav1.Tick
 	TradedAt time.Time
@@ -347,8 +341,8 @@ type LatestValue struct {
 // (ADR-020). WebSocket snapshots and REST reads (option chain) share this rule. Ids without such a
 // tick are absent; an md_last failure leaves them absent rather than failing the call.
 //
-// TradedAt is inferred from the cached stream (day volume rose between two ticks of the same feed), so
-// it is known only for instruments someone is subscribed to, and only after a trade seen live.
+// TradedAt is the engine's Tick.last_trade_ts (broker trade time, or inferred by the engine from every
+// tick of that feed): it is in md_last too, so it survives a gateway restart.
 func (h *Hub) Latest(ctx context.Context, accounts map[string]bool, ids []uint64) map[uint64]LatestValue {
 	out := make(map[uint64]LatestValue, len(ids))
 	var missing []uint64
@@ -358,7 +352,7 @@ func (h *Hub) Latest(ctx context.Context, accounts map[string]bool, ids []uint64
 		for a := range accounts {
 			k := lastKey{id, a}
 			if t := h.last[k]; t != nil && (best.Tick == nil || t.GetRecvTsNs() > best.Tick.GetRecvTsNs()) {
-				best = LatestValue{Tick: t, TradedAt: h.traded[k]}
+				best = LatestValue{Tick: t, TradedAt: tradedAt(t)}
 			}
 		}
 		if best.Tick != nil {
@@ -380,7 +374,7 @@ func (h *Hub) Latest(ctx context.Context, accounts map[string]bool, ids []uint64
 	h.mu.Lock()
 	for id, s := range last {
 		if t := s.GetTick(); t != nil && accounts[h.feeds[t.GetFeedId()]] {
-			out[id] = LatestValue{Tick: t}
+			out[id] = LatestValue{Tick: t, TradedAt: tradedAt(t)}
 		}
 	}
 	h.mu.Unlock()
@@ -476,7 +470,6 @@ func (h *Hub) removeInterest(c *client, ch wsv1.Channel, ids map[uint64]string) 
 				for k := range h.last {
 					if k.id == id {
 						delete(h.last, k)
-						delete(h.traded, k)
 					}
 				}
 			}
@@ -709,4 +702,12 @@ func EntitledVia(accounts []Account, m InstrumentMap) []string {
 		}
 	}
 	return out
+}
+
+// tradedAt is the tick's last trade time, or zero when the engine doesn't know it.
+func tradedAt(t *marketdatav1.Tick) time.Time {
+	if ns := t.GetLastTradeTsNs(); ns > 0 {
+		return time.Unix(0, ns).UTC()
+	}
+	return time.Time{}
 }

@@ -177,6 +177,7 @@ bool decode_ltpc(std::span<const std::uint8_t> b, FeedOut& o) noexcept {
         const Nanos ts = ms_to_nanos(r.expect_varint(w));
         if (ts != 0) {
           o.tick->exchange_ts = ts;
+          o.tick->last_trade_ts = ts;
         }
         break;
       }

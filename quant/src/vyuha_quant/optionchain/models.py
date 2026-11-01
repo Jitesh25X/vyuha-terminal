@@ -16,7 +16,7 @@ class SideQuote(BaseModel):
     bid: Decimal | None = None
     ask: Decimal | None = None
     oi: int = Field(default=0, ge=0)
-    traded_at: AwareDatetime | None = None  # last time the gateway saw this contract trade (volume rose)
+    traded_at: AwareDatetime | None = None  # last trade time (engine Tick.last_trade_ts); None = unknown
 
 
 class StrikeIn(BaseModel):

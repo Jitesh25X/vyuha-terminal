@@ -128,6 +128,7 @@ PacketResult parse_packet(std::span<const std::uint8_t> p, const TokenMap& token
   out.low = paise(p, 36);
   out.prev_close = paise(p, 40);
   if (n == kFull) {
+    out.last_trade_ts = seconds(p, 44);  // last-traded timestamp (0 when it hasn't traded)
     out.oi = be32(p, 48);
     out.exchange_ts = seconds(p, 60);
     parse_depth(p, out);

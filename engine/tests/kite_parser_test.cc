@@ -62,6 +62,7 @@ TEST(KiteParser, FullQuoteIndexAndUnsupportedSegments) {
   EXPECT_EQ(fut.volume, 1'234'500U);
   EXPECT_EQ(fut.oi, 9'876'500U);
   EXPECT_EQ(fut.exchange_ts, kTs);
+  EXPECT_EQ(fut.last_trade_ts, kTs - vyuha::kNanosPerSecond);  // bytes 44–48: last-traded timestamp
   EXPECT_EQ(fut.recv_ts, kRecv);
   EXPECT_EQ((std::array{fut.open, fut.high, fut.low, fut.prev_close}),
             (std::array{paise(2'430'000), paise(2'450'000), paise(2'425'000), paise(2'428'000)}));
@@ -77,11 +78,13 @@ TEST(KiteParser, FullQuoteIndexAndUnsupportedSegments) {
       (std::array{idx.ltp, idx.high, idx.low, idx.open, idx.prev_close}),
       (std::array{paise(2'440'015), paise(2'450'000), paise(2'420'000), paise(2'430'000), paise(2'428'000)}));
   EXPECT_EQ(idx.exchange_ts, kTs);
+  EXPECT_EQ(idx.last_trade_ts, 0);  // indices don't trade
 
   const Tick& eq = ticks[2];  // 44-byte quote: no exchange time, so recv time stands in
   EXPECT_EQ(eq.ltp.to_string(), "2450.0500");
   EXPECT_EQ(eq.volume, 5'000'000U);
   EXPECT_EQ(eq.exchange_ts, kRecv);
+  EXPECT_EQ(eq.last_trade_ts, 0);  // quote mode has no trade time: the core's TradeClock infers it
   EXPECT_EQ(eq.bid.units(), 0);
 }
 

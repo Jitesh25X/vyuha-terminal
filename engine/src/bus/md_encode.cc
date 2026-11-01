@@ -147,6 +147,7 @@ void write_tick(Writer& w, const md::Tick& t) noexcept {
   }
   w.u64(25, t.seq);
   w.u64(26, t.feed_id);
+  w.i64(27, t.last_trade_ts);
 }
 
 }  // namespace
