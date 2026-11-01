@@ -4,7 +4,7 @@ include(GoogleTest)
 
 add_executable(vyuha_tests
   bar_builder_test.cc
-  trade_clock_test.cc
+  last_value_test.cc
   core_loop_test.cc
   kite_parser_test.cc
   kite_ticker_test.cc

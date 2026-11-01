@@ -84,7 +84,7 @@ TEST(KiteParser, FullQuoteIndexAndUnsupportedSegments) {
   EXPECT_EQ(eq.ltp.to_string(), "2450.0500");
   EXPECT_EQ(eq.volume, 5'000'000U);
   EXPECT_EQ(eq.exchange_ts, kRecv);
-  EXPECT_EQ(eq.last_trade_ts, 0);  // quote mode has no trade time: the core's TradeClock infers it
+  EXPECT_EQ(eq.last_trade_ts, 0);  // quote mode has no trade time: the core's last-value book infers it
   EXPECT_EQ(eq.bid.units(), 0);
 }
 
