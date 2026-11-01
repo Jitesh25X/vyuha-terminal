@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/ratelimit"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/ratelimit"
 )
 
 func limitedHandler(trusted []netip.Prefix) http.Handler {

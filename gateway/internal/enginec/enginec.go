@@ -14,8 +14,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	enginev1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/engine/v1"
-	marketdatav1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1"
+	enginev1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/engine/v1"
+	marketdatav1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
 )
 
 // DefaultTimeout bounds each engine call; SessionTimeout the session start/stop calls, which run

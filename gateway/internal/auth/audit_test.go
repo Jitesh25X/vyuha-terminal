@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/audit"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/audit"
 )
 
 // Every auth mutation leaves an audit row in order, the chain verifies, and nothing secret is stored.

@@ -1,4 +1,4 @@
-module github.com/jiteshraj/vyuha/gateway
+module github.com/Jitesh25X/vyuha-terminal/gateway
 
 go 1.27
 

@@ -7,7 +7,7 @@ import "vyuha/marketdata/v1/marketdata.proto";
 import "vyuha/orders/v1/orders.proto";
 import "vyuha/risk/v1/risk.proto";
 
-option go_package = "github.com/jiteshraj/vyuha/gateway/gen/vyuha/engine/v1;enginev1";
+option go_package = "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/engine/v1;enginev1";
 
 // Internal control API of the C++ engine. Private network + mTLS in prod.
 service EngineService {

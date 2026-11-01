@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package vyuha.common.v1;
 
-option go_package = "github.com/jiteshraj/vyuha/gateway/gen/vyuha/common/v1;commonv1";
+option go_package = "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/common/v1;commonv1";
 
 // Price in units of 1/10000 rupee (1/100 paise). 1 rupee = 10000.
 message Price {

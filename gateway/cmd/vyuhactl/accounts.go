@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/brokers"
-	"github.com/jiteshraj/vyuha/gateway/internal/config"
-	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/brokers"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/config"
+	vcrypto "github.com/Jitesh25X/vyuha-terminal/gateway/internal/crypto"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
 )
 
 func runAccountCreate(args []string) error {

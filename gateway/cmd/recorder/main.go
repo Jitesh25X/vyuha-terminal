@@ -17,7 +17,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/recorder"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/recorder"
 )
 
 func env(key, def string) string {

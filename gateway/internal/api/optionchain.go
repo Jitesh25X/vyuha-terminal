@@ -13,10 +13,10 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 
-	marketdatav1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1"
-	"github.com/jiteshraj/vyuha/gateway/internal/quantc"
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
-	"github.com/jiteshraj/vyuha/gateway/internal/ws"
+	marketdatav1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/quantc"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/ws"
 )
 
 // ChainStore is the part of store.Queries the option-chain routes use.

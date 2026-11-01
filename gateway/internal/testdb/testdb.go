@@ -17,7 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
 )
 
 const migrateLockKey int64 = 0x7679756861_7464 // "vyuha" "td"

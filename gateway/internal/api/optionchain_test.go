@@ -13,12 +13,12 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 
-	marketdatav1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1"
-	"github.com/jiteshraj/vyuha/gateway/internal/config"
-	"github.com/jiteshraj/vyuha/gateway/internal/quantc"
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
-	"github.com/jiteshraj/vyuha/gateway/internal/testdb"
-	"github.com/jiteshraj/vyuha/gateway/internal/ws"
+	marketdatav1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/config"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/quantc"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/testdb"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/ws"
 )
 
 // Chain fixture: underlying 100 (NIFTY index, or a stock), future 200, strikes 24000…24500 step 100,

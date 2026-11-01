@@ -15,7 +15,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	mdv1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1"
+	mdv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
 )
 
 // Sink writes batches (ClickHouse in production, a fake in tests).

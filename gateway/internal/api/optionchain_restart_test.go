@@ -15,12 +15,12 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
 
-	enginev1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/engine/v1"
-	marketdatav1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1"
-	"github.com/jiteshraj/vyuha/gateway/internal/config"
-	"github.com/jiteshraj/vyuha/gateway/internal/quantc"
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
-	"github.com/jiteshraj/vyuha/gateway/internal/ws"
+	enginev1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/engine/v1"
+	marketdatav1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/config"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/quantc"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/ws"
 )
 
 // M1.11b done check: after a gateway restart (fresh hub, empty cache) the engine's last trade time

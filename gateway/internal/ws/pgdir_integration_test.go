@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
-	"github.com/jiteshraj/vyuha/gateway/internal/testdb"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/testdb"
 )
 
 func TestPGDirectory(t *testing.T) {

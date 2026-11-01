@@ -12,9 +12,9 @@ import (
 	"github.com/coder/websocket"
 	"google.golang.org/protobuf/proto"
 
-	marketdatav1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1"
-	wsv1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/ws/v1"
-	"github.com/jiteshraj/vyuha/gateway/internal/rbac"
+	marketdatav1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
+	wsv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/ws/v1"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/rbac"
 )
 
 // Close codes and error codes (API.md §8, ws.proto Error.code).

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/chtest"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/chtest"
 )
 
 func TestBarsAggregatesOneMinuteBars(t *testing.T) {

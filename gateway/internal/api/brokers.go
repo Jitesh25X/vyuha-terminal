@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/brokers"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/brokers"
 )
 
 // terminalPath is where broker callbacks send the browser back to.

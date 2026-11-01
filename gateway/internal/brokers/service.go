@@ -17,13 +17,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	commonv1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/common/v1"
-	enginev1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/engine/v1"
-	"github.com/jiteshraj/vyuha/gateway/internal/audit"
-	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
-	"github.com/jiteshraj/vyuha/gateway/internal/enginec"
-	"github.com/jiteshraj/vyuha/gateway/internal/rbac"
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
+	commonv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/common/v1"
+	enginev1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/engine/v1"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/audit"
+	vcrypto "github.com/Jitesh25X/vyuha-terminal/gateway/internal/crypto"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/enginec"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/rbac"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
 )
 
 // Broker names match the broker_kind enum and the callback paths.

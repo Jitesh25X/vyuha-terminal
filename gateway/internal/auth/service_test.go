@@ -14,9 +14,9 @@ import (
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 
-	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
-	"github.com/jiteshraj/vyuha/gateway/internal/testdb"
+	vcrypto "github.com/Jitesh25X/vyuha-terminal/gateway/internal/crypto"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/testdb"
 )
 
 // Integration suite: runs against Postgres when VYUHA_TEST_POSTGRES_URL is set (make test-gateway).

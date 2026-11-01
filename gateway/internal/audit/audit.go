@@ -12,7 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
 )
 
 // ActorKind matches the audit_event.actor_kind CHECK constraint.
