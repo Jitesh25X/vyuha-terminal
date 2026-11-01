@@ -70,6 +70,7 @@ make verify         # lint + test + e2e + invariants check (run before declaring
 - If a spec is ambiguous, check `DECISIONS.md`. If it's still unclear, write `[DECISION NEEDED: …]` with a recommended default in `docs/DECISIONS.md` and ask the owner. Don't guess on anything touching money, risk, compliance or broker behaviour.
 - Broker API behaviour (limits, params, endpoints) changes often. Verify against current official docs before you implement an adapter, then record the doc URL + date in the adapter's README.
 - Use `.claude/agents/risk-reviewer` on any diff touching `engine/src/{risk,oms,broker}` or `gateway/internal/{auth,rbac}`.
+- Don't gate CI on benchmarks: GitHub's shared runners are too noisy. Compare benchmark numbers only within one machine and session; the official absolute baseline comes from the staging VM (M1.12).
 
 ## Style
 - C++: see `engine/CLAUDE.md` (no exceptions on hot path, `std::expected`, no heap alloc per tick).

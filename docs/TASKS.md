@@ -126,6 +126,7 @@ Current milestone: **M1**
   - deps: M1.11c
   - needs: Staging VM only; record only Nifty 50 + NIFTY options near expiries
   - done: Tick→screen p95 < 400 ms measured; `make bootstrap C=core` passes on the staging Ubuntu VM; engine benchmarks (`make bench`) run on the staging VM (Linux, core thread pinned) and recorded here as the official absolute baseline for future comparisons (no CI benchmark gating: shared runners are too noisy)
+  - notes: Owner, 2026-11-02. (1) Nightly first: report the latest nightly (sanitizers + fuzz) result before other work; if it failed, fix that first. (2) To resume: merge `main` into `m1.12-staging-wip` and resolve the conflicts, including the ADR numbering (ADR-021 is "Public without license" on main, so the staging ADR is ADR-022) and the Go module path (`github.com/Jitesh25X/vyuha-terminal/gateway` on main). Then stop and wait for the owner to provide the staging VM details.
 
 **M1 exit:** live data from both brokers on staging; benchmarks meet NFRs.
 - [ ] M1 exit verified (`/milestone-exit`)
