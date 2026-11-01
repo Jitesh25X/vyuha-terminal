@@ -35,7 +35,7 @@ connection; `plan_subscriptions` enforces them per user (stricter) and the feed 
   single core helper `Price::from_wire_rupees` (nearest 1/10 000 rupee); NaN/inf/negative values drop
   the feed (`bad_price`). No floating-point price is kept in broker code (invariant 8). Timestamps (`ltt`, `currentTs`) are epoch ms;
   `exchange_ts = ltt`, else `currentTs`, else receive time. `ltt` (the last trade time) also fills
-  `Tick::last_trade_ts`; without it that stays 0 and the core's `TradeClock` infers it (M1.11b).
+  `Tick::last_trade_ts`; without it that stays 0 and the core's last-value book infers it (M1.11b).
 - `full_d30` carries 30 depth levels; `Tick` keeps the best 5. Day OHLC comes from the `1d` entry.
 - The server pings when idle; Beast answers pings and the idle timeout (30 s) catches dead sockets.
 

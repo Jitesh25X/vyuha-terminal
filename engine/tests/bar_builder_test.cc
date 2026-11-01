@@ -154,13 +154,15 @@ TEST(BarBuilder, NewDayStartsVolumeFromZero) {
 
 TEST(LastValueBook, KeepsLatestTickPerInstrument) {
   vyuha::md::LastValueBook book(4);
+  // update() stamps the tick (last_trade_ts), so it takes an lvalue.
+  auto update = [&book](vyuha::md::Tick t) { return book.update(t); };
   EXPECT_EQ(book.find(7), nullptr);
-  ASSERT_TRUE(book.update(trade(7, 1, 100, 1)));
-  ASSERT_TRUE(book.update(trade(7, 2, 101, 2)));
-  ASSERT_TRUE(book.update(trade(8, 2, 50, 2)));
+  ASSERT_TRUE(update(trade(7, 1, 100, 1)));
+  ASSERT_TRUE(update(trade(7, 2, 101, 2)));
+  ASSERT_TRUE(update(trade(8, 2, 50, 2)));
   EXPECT_EQ(book.find(7)->ltp, rs(101));
   EXPECT_EQ(book.size(), 2U);
-  EXPECT_FALSE(book.update(trade(0, 2, 50, 2)));  // id 0 is never stored
+  EXPECT_FALSE(update(trade(0, 2, 50, 2)));  // id 0 is never stored
 }
 
 }  // namespace

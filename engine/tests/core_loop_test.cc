@@ -104,7 +104,7 @@ TEST(CoreLoop, StampsInferredLastTradeTime) {
   EXPECT_EQ(sink.ticks[2].last_trade_ts, t1);
   ASSERT_NE(core.book().find(1), nullptr);
   EXPECT_EQ(core.book().find(1)->last_trade_ts, t1);
-  EXPECT_EQ(core.trades().stats().inferred, 1U);
+  EXPECT_EQ(core.book().stats().inferred, 1U);
 }
 
 TEST(CoreLoop, RejectsInvalidTicks) {

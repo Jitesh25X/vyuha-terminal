@@ -118,8 +118,12 @@ Current milestone: **M1**
   - deps: M1.11
   - needs: nothing new
   - done: Unit tests for both brokers; gateway-restart test showing LTP-based IVs keep showing — 2026-10-30: done; `TradeClock` (core thread) stamps/infers per (instrument, feed); Kite full mode reads bytes 44–48 (verified against pykiteconnect 2026-10-30), Upstox `ltt`; hub's volume-delta inference removed. Restart test `TestOptionChainLTPIVSurvivesGatewayRestart` (fresh hub, real NATS KV) passed against a running `vyuha-quant serve`
-- [ ] **M1.12** **Staging:** VM with 2 static IPs, real Kite + Upstox sessions streaming Nifty 50 + NIFTY options
+- [ ] **M1.11c** Engine: keep the last-trade/volume inference state in the last-value book entry (shares the cache line already loaded for the tick); delete M1.11b's separate `TradeClock` table
   - deps: M1.11b
+  - needs: nothing new
+  - done: `BM_CorePollTicks` ≤ 80 ns/tick at 5,000 instruments (M1.11b: 134) and within 2 % of 18.0M ticks/s at 100; the 6 inference tests + ASan pass; before/after numbers recorded
+- [ ] **M1.12** **Staging:** VM with 2 static IPs, real Kite + Upstox sessions streaming Nifty 50 + NIFTY options
+  - deps: M1.11c
   - needs: Staging VM only; record only Nifty 50 + NIFTY options near expiries
   - done: Tick→screen p95 < 400 ms measured; `make bootstrap C=core` passes on the staging Ubuntu VM
 

@@ -29,7 +29,7 @@ struct Tick {
   Nanos exchange_ts{0};
   Nanos recv_ts{0};
   // When this feed last saw the instrument trade; 0 = unknown. Decoders set it when the broker sends
-  // one (Upstox ltt, Kite full mode); the core's TradeClock infers it otherwise and carries it forward.
+  // one (Upstox ltt, Kite full mode); the core's last-value book infers it otherwise and carries it forward.
   Nanos last_trade_ts{0};
   std::uint64_t seq{0};
   Source source{Source::kUnknown};
