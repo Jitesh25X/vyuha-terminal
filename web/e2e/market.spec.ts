@@ -54,4 +54,26 @@ test("market panels open by keyboard and show the entitlement state", async ({ p
   await page.keyboard.press("Delete");
   await expect(wl.getByText("1 instrument", { exact: true })).toBeVisible();
   await expect(wl.getByRole("gridcell", { name: "RELIANCE", exact: true })).toHaveCount(0);
+
+  // Daily broker login (M1.8 API, M1.12 UI): the status bar offers it for the mapped Kite account. The
+  // broker's page is intercepted — nothing reaches Kite.
+  let kiteUrl: URL | undefined;
+  await page.route("https://kite.zerodha.com/**", async (route) => {
+    kiteUrl = new URL(route.request().url());
+    await route.fulfill({ status: 200, contentType: "text/html", body: "<title>Kite stub</title>stub" });
+  });
+  const login = status.getByRole("button", { name: "LOGIN KITE E2E001" });
+  await expect(login).toBeVisible();
+  await login.focus();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveTitle("Kite stub");
+  expect(kiteUrl?.pathname).toBe("/connect/login");
+  expect(kiteUrl?.searchParams.get("v")).toBe("3");
+  expect(kiteUrl?.searchParams.get("api_key")).toBe("e2e-kite-key");
+  expect(new URLSearchParams(kiteUrl?.searchParams.get("redirect_params") ?? "").get("state")).toMatch(/^[\w-]+\.[\w-]+$/);
+
+  // The broker sends the user back; a cancelled login is reported and the URL cleaned.
+  await page.goto("/terminal?broker_login=error&code=BROKER_LOGIN_DENIED");
+  await expect(page.getByRole("status").getByText("Broker login failed: the login was cancelled at the broker")).toBeVisible();
+  await expect(page).toHaveURL(/\/$/);
 });

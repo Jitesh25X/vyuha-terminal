@@ -143,3 +143,15 @@ export interface IndexConstituents {
   as_of: string;
   constituents: Constituent[];
 }
+
+// ── brokers (openapi.yaml: BrokerAccount, BrokerLoginUrl) ───────────────────
+export interface BrokerAccount {
+  id: string;
+  broker: "zerodha" | "upstox" | "sim";
+  client_code: string;
+  holder_name: string;
+  status: "disconnected" | "awaiting_login" | "connected" | "error" | "disabled";
+  data_entitled: boolean;
+  token_expires_at?: string;
+  can_login: boolean;
+}

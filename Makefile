@@ -38,7 +38,7 @@ endef
 
 CLEAN_DIRS := engine/build gateway/bin web/dist web/test-results web/playwright-report
 
-.PHONY: clean-space bootstrap up down engine-deps web-gen dev-secrets dev-gateway migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine lint-engine lint-gateway lint-quant lint-intel lint-web test-gateway test-quant test-intel test-web bench fuzz fuzz-kite fuzz-upstox e2e lint verify invariants
+.PHONY: clean-space bootstrap up down engine-deps web-gen proto-fresh staging-build dev-secrets dev-gateway migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine lint-engine lint-gateway lint-quant lint-intel lint-web test-gateway test-quant test-intel test-web bench fuzz fuzz-kite fuzz-upstox e2e lint verify invariants
 
 # Installs ONE component, just-in-time: make bootstrap C=cpp   (core|proto|cpp|go|py|web)
 # Add CHECK=1 to only report what is present / would be installed.
@@ -96,6 +96,22 @@ test: test-engine test-gateway test-quant test-intel test-web
 # ENGINE_PRESETS picks the CMake presets (CI runs debug, asan and tsan as separate jobs).
 # NATS/Postgres integration tests run when the dev stack is up (make up), like test-gateway.
 ENGINE_PRESETS ?= debug asan
+# Generated Go + TS protobuf code (gitignored) for the images, only when missing or older than a .proto
+# (buf's remote plugins are rate-limited). Needs only buf (make bootstrap C=proto), not node_modules.
+proto-fresh:
+	@if [ ! -f gateway/gen/.stamp ] || [ ! -f web/src/gen/.stamp ] || [ -n "$$(find proto -name '*.proto' -newer gateway/gen/.stamp)" ] || [ -n "$$(find proto -name '*.proto' -newer web/src/gen/.stamp)" ]; then \
+	  $(MAKE) --no-print-directory proto-lint && cd proto && buf generate --template buf.gen.go.yaml && touch ../gateway/gen/.stamp \
+	    && buf generate --template buf.gen.ts.yaml && touch ../web/src/gen/.stamp; \
+	else echo "· generated protobuf code is current"; fi
+
+# Staging/production images (deploy/staging, ADR-022). Build on the staging VM; tags are local.
+STAGING_TAG ?= staging
+staging-build: proto-fresh
+	docker build -f deploy/staging/engine.Dockerfile -t vyuha/engine:$(STAGING_TAG) .
+	docker build -f deploy/staging/gateway.Dockerfile -t vyuha/gateway:$(STAGING_TAG) --build-arg VERSION=$$(git rev-parse --short HEAD) .
+	docker build -f deploy/staging/quant.Dockerfile -t vyuha/quant:$(STAGING_TAG) .
+	docker build -f deploy/staging/web.Dockerfile -t vyuha/web:$(STAGING_TAG) .
+
 # Configure only: installs the vcpkg manifest with the engine compiler (CI builds the binary cache this way).
 engine-deps:
 	$(call maybe,engine/CMakeLists.txt,cd engine && cmake --preset debug >/dev/null)

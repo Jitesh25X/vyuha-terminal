@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { resetMd, useMd } from "../../stores/md";
 import { accessToken, useSession } from "../../stores/session";
 import { refreshSession } from "../api/client";
+import { histogram, percentile, Ring } from "./latency";
 import type { BarLite, Channel, Diff, FromWorker, PrintLite, QuoteLite, ToWorker } from "./protocol";
 
 // Main-thread side of the market-data worker: reference-counted subscriptions, diff application to
@@ -65,6 +66,8 @@ export function stopMarketData(): void {
   unsubscribeSession = undefined;
   for (const r of refs.values()) clearTimeout(r.timer);
   refs.clear();
+  resetLatency();
+  clock = undefined;
   resetMd();
 }
 
@@ -132,8 +135,63 @@ export function onPrints(fn: Listener<PrintLite>): () => void {
   return () => printListeners.delete(fn);
 }
 
+// ── tick → screen latency (SYS panel; M1.12 done check) ─────────────────────
+const LATENCY_SAMPLES = 20_000;
+const tickToScreen = new Ring(LATENCY_SAMPLES);
+const exchangeToScreen = new Ring(LATENCY_SAMPLES);
+let clock: { offsetMs: number; rttMs: number } | undefined;
+
+export interface LatencyStats {
+  samples: number;
+  p50?: number;
+  p95?: number;
+  p99?: number;
+  histogram: number[];
+  exchangeP50?: number;
+  exchangeP95?: number;
+  clockOffsetMs?: number;
+  clockRttMs?: number;
+}
+
+/** Latency of the last ≤ 20,000 quotes painted, in ms (engine receive → paint; exchange → paint). */
+export function latencyStats(): LatencyStats {
+  const v = tickToScreen.values();
+  const x = exchangeToScreen.values();
+  const s: LatencyStats = { samples: v.length, histogram: histogram(v) };
+  const set = <K extends keyof LatencyStats>(k: K, val: LatencyStats[K] | undefined) => {
+    if (val !== undefined) s[k] = val;
+  };
+  set("p50", percentile(v, 50));
+  set("p95", percentile(v, 95));
+  set("p99", percentile(v, 99));
+  set("exchangeP50", percentile(x, 50));
+  set("exchangeP95", percentile(x, 95));
+  set("clockOffsetMs", clock?.offsetMs);
+  set("clockRttMs", clock?.rttMs);
+  return s;
+}
+
+export function resetLatency(): void {
+  tickToScreen.clear();
+  exchangeToScreen.clear();
+}
+
+/** Samples the quotes of a diff in the next animation frame, i.e. when they are painted. */
+function sampleLatency(quotes: QuoteLite[]): void {
+  if (!clock) return; // no clock estimate yet: server and browser times aren't comparable
+  const offset = clock.offsetMs;
+  requestAnimationFrame(() => {
+    const paint = Date.now() + offset; // on the server's clock
+    for (const q of quotes) {
+      if (q.recvTs > 0) tickToScreen.push(paint - q.recvTs);
+      if (q.exchangeTs > 0) exchangeToScreen.push(paint - q.exchangeTs);
+    }
+  });
+}
+
 function apply(d: Diff): void {
   if (d.authExpired) void reauthenticate();
+  if (d.clock) clock = d.clock;
   const patch: Partial<ReturnType<typeof useMd.getState>> = {};
   const s = useMd.getState();
   // quotes/depth/lastQuoteAt are updated in place (see stores/md); version triggers subscribers.
@@ -159,7 +217,10 @@ function apply(d: Diff): void {
   if (d.system) patch.system = d.system;
   if (d.conn) patch.conn = d.conn;
   if (Object.keys(patch).length > 0) useMd.setState(patch);
-  if (d.quotes.length > 0) for (const fn of quoteListeners) fn(d.quotes);
+  if (d.quotes.length > 0) {
+    for (const fn of quoteListeners) fn(d.quotes);
+    sampleLatency(d.quotes);
+  }
   if (d.bars.length > 0) for (const fn of barListeners) fn(d.bars);
   if (d.prints.length > 0) for (const fn of printListeners) fn(d.prints);
 }

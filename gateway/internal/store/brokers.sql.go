@@ -144,6 +144,50 @@ func (q *Queries) IsExchangeHoliday(ctx context.Context, day pgtype.Date) (bool,
 	return holiday, err
 }
 
+const listAllBrokerAccounts = `-- name: ListAllBrokerAccounts :many
+SELECT id, broker, client_code, holder_name, status, data_entitled, token_expires_at
+FROM broker_account
+ORDER BY broker, client_code
+`
+
+type ListAllBrokerAccountsRow struct {
+	ID             pgtype.UUID
+	Broker         BrokerKind
+	ClientCode     string
+	HolderName     string
+	Status         AccountStatus
+	DataEntitled   bool
+	TokenExpiresAt pgtype.Timestamptz
+}
+
+func (q *Queries) ListAllBrokerAccounts(ctx context.Context) ([]ListAllBrokerAccountsRow, error) {
+	rows, err := q.db.Query(ctx, listAllBrokerAccounts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAllBrokerAccountsRow
+	for rows.Next() {
+		var i ListAllBrokerAccountsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Broker,
+			&i.ClientCode,
+			&i.HolderName,
+			&i.Status,
+			&i.DataEntitled,
+			&i.TokenExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listInstrumentBrokerMaps = `-- name: ListInstrumentBrokerMaps :many
 SELECT id, kite_token, upstox_key FROM instrument WHERE id = ANY($1::bigint[]) AND valid_to IS NULL
 `
@@ -164,6 +208,53 @@ func (q *Queries) ListInstrumentBrokerMaps(ctx context.Context, ids []int64) ([]
 	for rows.Next() {
 		var i ListInstrumentBrokerMapsRow
 		if err := rows.Scan(&i.ID, &i.KiteToken, &i.UpstoxKey); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMappedBrokerAccounts = `-- name: ListMappedBrokerAccounts :many
+SELECT a.id, a.broker, a.client_code, a.holder_name, a.status, a.data_entitled, a.token_expires_at, m.can_trade
+FROM account_user_map m JOIN broker_account a ON a.id = m.account_id
+WHERE m.user_id = $1 AND m.can_view
+ORDER BY a.broker, a.client_code
+`
+
+type ListMappedBrokerAccountsRow struct {
+	ID             pgtype.UUID
+	Broker         BrokerKind
+	ClientCode     string
+	HolderName     string
+	Status         AccountStatus
+	DataEntitled   bool
+	TokenExpiresAt pgtype.Timestamptz
+	CanTrade       bool
+}
+
+func (q *Queries) ListMappedBrokerAccounts(ctx context.Context, userID pgtype.UUID) ([]ListMappedBrokerAccountsRow, error) {
+	rows, err := q.db.Query(ctx, listMappedBrokerAccounts, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMappedBrokerAccountsRow
+	for rows.Next() {
+		var i ListMappedBrokerAccountsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Broker,
+			&i.ClientCode,
+			&i.HolderName,
+			&i.Status,
+			&i.DataEntitled,
+			&i.TokenExpiresAt,
+			&i.CanTrade,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

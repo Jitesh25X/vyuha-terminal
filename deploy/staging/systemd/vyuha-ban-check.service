@@ -1,0 +1,9 @@
+[Unit]
+Description=Vyuha F&O ban list check (alerts admins if today's list is missing; ADR-019)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vyuha/deploy/staging
+ExecStart=/usr/bin/docker compose run --rm --no-deps quant ban check

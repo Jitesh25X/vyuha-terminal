@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useHealth } from "../lib/api/auth";
+import { BROKER_NAME, startBrokerLogin, useBrokerAccounts } from "../lib/api/brokers";
 import type { FeedLite } from "../lib/ws/protocol";
 import { useMd } from "../stores/md";
 import { pushToast } from "../stores/toasts";
@@ -38,6 +39,32 @@ function useDisconnectToasts(feeds: FeedLite[] | undefined) {
   }, [feeds]);
 }
 
+/** Accounts the user may log in whose session isn't connected: one button each (daily broker login). */
+function LoginPrompts() {
+  const accounts = useBrokerAccounts();
+  const pending = (accounts.data ?? []).filter((a) => a.can_login && a.status !== "connected" && a.status !== "disabled");
+  if (pending.length === 0) return null;
+  return (
+    <span className="flex items-center gap-2" aria-label="Broker logins">
+      {pending.map((a) => (
+        <button
+          key={a.id}
+          type="button"
+          title={`${a.holder_name} · ${a.status.replace("_", " ")}`}
+          className="border border-warn text-warn px-1 focus-visible:outline focus-visible:outline-amber"
+          onClick={() =>
+            void startBrokerLogin(a.id).catch((e: unknown) =>
+              pushToast("error", `${BROKER_NAME[a.broker]} ${a.client_code}: login could not start — ${e instanceof Error ? e.message : String(e)}`),
+            )
+          }
+        >
+          LOGIN {BROKER_NAME[a.broker].toUpperCase()} {a.client_code}
+        </button>
+      ))}
+    </span>
+  );
+}
+
 export function StatusBar() {
   const health = useHealth();
   const system = useMd((s) => s.system);
@@ -58,6 +85,7 @@ export function StatusBar() {
           </span>
         ))}
       </span>
+      <LoginPrompts />
       {system && <span className="text-muted">data {system.dataLatencyMs}ms</span>}
       <span>
         engine <span className={system ? (system.engineOk ? "text-up" : "text-down") : "text-muted"}>{system ? (system.engineOk ? "OK" : "DOWN") : "…"}</span>

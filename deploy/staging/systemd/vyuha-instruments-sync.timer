@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily instrument master sync at 08:00 IST (F-MD-1)
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 Asia/Kolkata
+Persistent=true
+
+[Install]
+WantedBy=timers.target

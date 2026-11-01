@@ -2,6 +2,7 @@
 import { create, type MessageInitShape, toBinary } from "@bufbuild/protobuf";
 import { ClientMsgSchema } from "../../gen/vyuha/ws/v1/ws_pb";
 import { channelEnum, Merger } from "./decode";
+import { bestSample, type ClockSample, clockSample } from "./latency";
 import type { Channel, ConnState, Diff, FromWorker, ToWorker } from "./protocol";
 
 // Market-data worker (UI_SPEC §7): owns the WebSocket, decodes protobuf off the main thread, merges
@@ -10,6 +11,9 @@ import type { Channel, ConnState, Diff, FromWorker, ToWorker } from "./protocol"
 declare const self: DedicatedWorkerGlobalScope;
 
 const BACKOFF_MS = [500, 1000, 2000, 5000, 10_000];
+/** Clock-offset probes (Ping/Pong) while connected; the best of the last few is used. */
+const PING_EVERY_MS = 5000;
+const CLOCK_SAMPLES = 12;
 
 let url = "";
 let token = "";
@@ -21,6 +25,9 @@ const merger = new Merger();
 let conn: ConnState | undefined;
 let authExpired = false;
 let flushScheduled = false;
+let pingTimer: ReturnType<typeof setInterval> | undefined;
+let clockSamples: ClockSample[] = [];
+let clockChanged = false;
 
 /** Desired subscriptions: channel → id → conflate_ms. Replayed in full after every reconnect. */
 const desired = new Map<Channel, Map<number, number>>();
@@ -63,13 +70,25 @@ function connect(): void {
     ws.send(toBinary(ClientMsgSchema, create(ClientMsgSchema, { reqId: ++reqId, body: { case: "hello", value: { accessToken: token, clientVersion: "web" } } })));
     resubscribeAll();
     setConn("open");
+    const ping = () => send({ body: { case: "ping", value: { clientTsMs: BigInt(Date.now()) } } });
+    clearInterval(pingTimer);
+    clockSamples = []; // a new connection may land on another path
+    ping();
+    pingTimer = setInterval(ping, PING_EVERY_MS);
   };
   ws.onmessage = (e: MessageEvent<ArrayBuffer>) => {
-    if (e.data instanceof ArrayBuffer && merger.push(new Uint8Array(e.data))) schedule();
+    if (!(e.data instanceof ArrayBuffer) || !merger.push(new Uint8Array(e.data))) return;
+    const pongs = merger.takePongs();
+    if (pongs.length > 0) {
+      clockSamples = [...clockSamples, ...pongs.map((p) => clockSample(p.clientMs, p.serverMs, p.recvMs))].slice(-CLOCK_SAMPLES);
+      clockChanged = true;
+    }
+    schedule();
   };
   ws.onclose = (e) => {
     if (socket !== ws) return; // replaced by a newer connection
     socket = undefined;
+    clearInterval(pingTimer);
     setConn("closed");
     if (e.code === 4401) {
       // Token expired or rejected: the main thread refreshes and sends "start" again.
@@ -95,6 +114,9 @@ function flush(): void {
   const diff: Diff = merger.take();
   if (conn !== undefined) diff.conn = conn;
   if (authExpired) diff.authExpired = true;
+  const clock = clockChanged ? bestSample(clockSamples) : undefined;
+  if (clock) diff.clock = clock;
+  clockChanged = false;
   conn = undefined;
   authExpired = false;
   const msg: FromWorker = { type: "diff", diff };
@@ -141,6 +163,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
     }
     case "stop":
       url = token = "";
+      clearInterval(pingTimer);
       desired.clear();
       wantSystem = false;
       clearTimeout(reconnectTimer);
