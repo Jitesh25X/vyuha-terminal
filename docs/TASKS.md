@@ -118,14 +118,14 @@ Current milestone: **M1**
   - deps: M1.11
   - needs: nothing new
   - done: Unit tests for both brokers; gateway-restart test showing LTP-based IVs keep showing — 2026-10-30: done; `TradeClock` (core thread) stamps/infers per (instrument, feed); Kite full mode reads bytes 44–48 (verified against pykiteconnect 2026-10-30), Upstox `ltt`; hub's volume-delta inference removed. Restart test `TestOptionChainLTPIVSurvivesGatewayRestart` (fresh hub, real NATS KV) passed against a running `vyuha-quant serve`
-- [ ] **M1.11c** Engine: keep the last-trade/volume inference state in the last-value book entry (shares the cache line already loaded for the tick); delete M1.11b's separate `TradeClock` table
+- [x] **M1.11c** Engine: keep the last-trade/volume inference state in the last-value book entry (shares the cache line already loaded for the tick); delete M1.11b's separate `TradeClock` table
   - deps: M1.11b
   - needs: nothing new
-  - done: `BM_CorePollTicks` ≤ 80 ns/tick at 5,000 instruments (M1.11b: 134) and within 2 % of 18.0M ticks/s at 100; the 6 inference tests + ASan pass; before/after numbers recorded — 2026-11-02: tests met (debug 81/81, ASan+UBSan 71/71, lint-engine; the 6 inference scenarios + a feed-slot test). **Benchmarks: relative targets met, absolute not reproducible — owner to accept.** Interleaved A/B/C runs (7 rounds × 2 s, median ns/tick, one session): 100 instruments — baseline (no inference) 71.9, M1.11b 72.3 (+0.6 %), **M1.11c 73.3 (+2.0 %)**; 5,000 — baseline 108.0, M1.11b 134.5 (+24.6 %), **M1.11c 110.8 (+2.7 %)**. This laptop's baseline itself is 108 ns / 13.9M/s today (round-to-round spread 98–205 ns), so the absolute 80 ns / 18.0M/s figures (taken in a different session, partly while other builds ran) can't be compared; the earlier "M1.11b 134 ns vs 73 ns baseline" was measured under that load
+  - done: `BM_CorePollTicks` within 3 % of the pre-M1.11b baseline (no inference) on the same machine, at 5,000 and 100 instruments; the 6 inference tests + ASan pass; before/after numbers recorded (owner 2026-11-02: replaces the absolute ≤ 80 ns / 18.0M ticks/s targets, which came from a different session and aren't reproducible here; official absolute baseline set at M1.12 on the staging VM) — 2026-11-02: done. Tests: debug 81/81, ASan+UBSan 71/71, lint-engine; the 6 inference scenarios + a feed-slot test. Interleaved A/B/C runs on the dev laptop (7 rounds × 2 s, median ns/tick, one session): 100 instruments — baseline 71.9, M1.11b 72.3 (+0.6 %), **M1.11c 73.3 (+2.0 %)**; 5,000 — baseline 108.0, M1.11b 134.5 (+24.6 %), **M1.11c 110.8 (+2.7 %)**. Laptop round-to-round spread 98–205 ns at 5,000, so only same-session relative numbers are meaningful here
 - [ ] **M1.12** **Staging:** VM with 2 static IPs, real Kite + Upstox sessions streaming Nifty 50 + NIFTY options
   - deps: M1.11c
   - needs: Staging VM only; record only Nifty 50 + NIFTY options near expiries
-  - done: Tick→screen p95 < 400 ms measured; `make bootstrap C=core` passes on the staging Ubuntu VM
+  - done: Tick→screen p95 < 400 ms measured; `make bootstrap C=core` passes on the staging Ubuntu VM; engine benchmarks (`make bench`) run on the staging VM (Linux, core thread pinned) and recorded here as the official absolute baseline for future comparisons (no CI benchmark gating: shared runners are too noisy)
 
 **M1 exit:** live data from both brokers on staging; benchmarks meet NFRs.
 - [ ] M1 exit verified (`/milestone-exit`)
