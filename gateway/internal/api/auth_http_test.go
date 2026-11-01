@@ -21,11 +21,11 @@ import (
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/auth"
-	"github.com/jiteshraj/vyuha/gateway/internal/config"
-	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
-	"github.com/jiteshraj/vyuha/gateway/internal/testdb"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/auth"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/config"
+	vcrypto "github.com/Jitesh25X/vyuha-terminal/gateway/internal/crypto"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/testdb"
 )
 
 // End-to-end over HTTP with a real cookie jar: login → enroll → confirm → refresh → reuse → reauth → logout.

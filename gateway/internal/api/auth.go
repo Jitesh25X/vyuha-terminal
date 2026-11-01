@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/auth"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/auth"
 )
 
 const (

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/brokers"
-	"github.com/jiteshraj/vyuha/gateway/internal/config"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/brokers"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/config"
 )
 
 // The callbacks are reachable without a bearer token, always redirect to the terminal, never cache,

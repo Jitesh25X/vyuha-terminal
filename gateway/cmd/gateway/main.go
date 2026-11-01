@@ -14,17 +14,17 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/api"
-	"github.com/jiteshraj/vyuha/gateway/internal/auth"
-	"github.com/jiteshraj/vyuha/gateway/internal/brokers"
-	"github.com/jiteshraj/vyuha/gateway/internal/candles"
-	"github.com/jiteshraj/vyuha/gateway/internal/config"
-	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
-	"github.com/jiteshraj/vyuha/gateway/internal/enginec"
-	"github.com/jiteshraj/vyuha/gateway/internal/quantc"
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
-	"github.com/jiteshraj/vyuha/gateway/internal/telemetry"
-	"github.com/jiteshraj/vyuha/gateway/internal/ws"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/api"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/auth"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/brokers"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/candles"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/config"
+	vcrypto "github.com/Jitesh25X/vyuha-terminal/gateway/internal/crypto"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/enginec"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/quantc"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/telemetry"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/ws"
 )
 
 // version is overridden at build time with -ldflags "-X main.version=...".

@@ -21,10 +21,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/audit"
-	"github.com/jiteshraj/vyuha/gateway/internal/auth"
-	"github.com/jiteshraj/vyuha/gateway/internal/config"
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/audit"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/auth"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/config"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
 )
 
 const usage = `usage:

@@ -8,8 +8,8 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 
-	commonv1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/common/v1"
-	mdv1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1"
+	commonv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/common/v1"
+	mdv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
 )
 
 // ClickHouse writes into the vyuha.ticks / vyuha.bars tables (db/clickhouse/001_init.sql).

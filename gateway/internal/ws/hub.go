@@ -19,10 +19,10 @@ import (
 
 	"github.com/coder/websocket"
 
-	enginev1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/engine/v1"
-	marketdatav1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1"
-	wsv1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/ws/v1"
-	"github.com/jiteshraj/vyuha/gateway/internal/auth"
+	enginev1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/engine/v1"
+	marketdatav1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
+	wsv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/ws/v1"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/auth"
 )
 
 // Config tunes the hub; DefaultConfig follows API.md §8.

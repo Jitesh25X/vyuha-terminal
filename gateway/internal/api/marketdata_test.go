@@ -10,12 +10,12 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/auth"
-	"github.com/jiteshraj/vyuha/gateway/internal/candles"
-	"github.com/jiteshraj/vyuha/gateway/internal/config"
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
-	"github.com/jiteshraj/vyuha/gateway/internal/testdb"
-	"github.com/jiteshraj/vyuha/gateway/internal/ws"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/auth"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/candles"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/config"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/testdb"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/ws"
 )
 
 func TestUnits(t *testing.T) {

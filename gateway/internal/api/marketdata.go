@@ -12,9 +12,9 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/candles"
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
-	"github.com/jiteshraj/vyuha/gateway/internal/ws"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/candles"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/ws"
 )
 
 // InstrumentStore is the part of store.Queries the instrument routes use.

@@ -15,9 +15,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/audit"
-	vcrypto "github.com/jiteshraj/vyuha/gateway/internal/crypto"
-	"github.com/jiteshraj/vyuha/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/audit"
+	vcrypto "github.com/Jitesh25X/vyuha-terminal/gateway/internal/crypto"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
 )
 
 // Config holds token lifetimes and lockout policy (DATA_MODEL.md: 5 failures → 15 min).

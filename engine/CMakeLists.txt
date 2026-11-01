@@ -41,7 +41,6 @@ add_library(vyuha_core_lib
   src/core/wall_clock.cc
   src/md/bar_builder.cc
   src/md/last_value.cc
-  src/md/trade_clock.cc
   src/util/log.cc
   src/util/net.cc
   src/util/secret.cc
@@ -115,6 +114,15 @@ if(NOT VYUHA_SANITIZER)
                     PLUGIN "protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>")
 
   find_package(libpqxx CONFIG REQUIRED)
+  # vcpkg's PostgreSQL wrapper links libpq's static helpers (pgcommon, pgport) per configuration, from
+  # lib/ for non-Debug and debug/lib/ for Debug. Release-only triplets (CI: x64-linux-release) have no
+  # debug/lib, so Debug builds got neither and failed to link. Use the release helpers there; a no-op
+  # with the default triplets. Order matters for GNU ld: libpq → pgcommon → pgport.
+  if(TARGET PostgreSQL::PostgreSQL AND PostgreSQL_pgcommon_LIBRARY_RELEASE AND NOT PostgreSQL_pgcommon_LIBRARY_DEBUG)
+    set_property(TARGET PostgreSQL::PostgreSQL APPEND PROPERTY INTERFACE_LINK_LIBRARIES
+                 "$<$<CONFIG:DEBUG>:${PostgreSQL_pgcommon_LIBRARY_RELEASE}>"
+                 "$<$<CONFIG:DEBUG>:${PostgreSQL_pgport_LIBRARY_RELEASE}>")
+  endif()
   add_library(vyuha_pg STATIC src/session/pg_instrument_directory.cc)
   target_link_libraries(vyuha_pg PUBLIC vyuha::session PRIVATE vyuha_warnings libpqxx::pqxx)
 

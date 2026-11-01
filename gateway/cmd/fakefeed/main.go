@@ -19,9 +19,9 @@ import (
 	"github.com/coder/websocket"
 	"google.golang.org/protobuf/proto"
 
-	commonv1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/common/v1"
-	mdv1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1"
-	wsv1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/ws/v1"
+	commonv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/common/v1"
+	mdv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
+	wsv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/ws/v1"
 )
 
 type feed struct {

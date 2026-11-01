@@ -10,10 +10,10 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/auth"
-	"github.com/jiteshraj/vyuha/gateway/internal/brokers"
-	"github.com/jiteshraj/vyuha/gateway/internal/config"
-	"github.com/jiteshraj/vyuha/gateway/internal/ratelimit"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/auth"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/brokers"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/config"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/ratelimit"
 )
 
 // BaseURL is the prefix for every REST route.

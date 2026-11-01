@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package vyuha.orders.v1;
 
-option go_package = "github.com/jiteshraj/vyuha/gateway/gen/vyuha/orders/v1;ordersv1";
+option go_package = "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/orders/v1;ordersv1";
 
 enum Side {
   SIDE_UNSPECIFIED = 0;

@@ -9,7 +9,7 @@ import (
 
 	openapi_types "github.com/oapi-codegen/runtime/types"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/config"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/config"
 )
 
 type fakeConstituents map[int64]*IndexConstituents

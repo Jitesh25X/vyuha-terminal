@@ -14,7 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/config"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/config"
 )
 
 type fakeDB struct{ err error }

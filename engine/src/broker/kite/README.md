@@ -28,7 +28,7 @@ Nothing here talks to live Kite in tests (invariant 3): tests use fixtures and a
   commodity segments are rejected (`unsupported_segment`); we don't trade them.
 - LTP/quote packets carry no exchange time: `exchange_ts = recv_ts` for those.
 - Full packets carry the last-traded timestamp at bytes 44–48 (seconds; pykiteconnect's
-  `last_trade_time`) → `Tick::last_trade_ts`. Quote packets have none: the core's `TradeClock` infers it
+  `last_trade_time`) → `Tick::last_trade_ts`. Quote packets have none: the core's last-value book infers it
   from this feed's cumulative volume rising (M1.11b).
 - Text frames are JSON `{type: order|error|message, data}`. `order` postbacks go to the OMS from M3;
   errors/messages are logged (kind only).

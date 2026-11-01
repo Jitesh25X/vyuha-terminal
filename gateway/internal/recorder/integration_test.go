@@ -12,8 +12,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 
-	mdv1 "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1"
-	"github.com/jiteshraj/vyuha/gateway/internal/chtest"
+	mdv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/chtest"
 )
 
 // F-MD-4 AC1 end to end on the dev stack (`make up PROFILES="core md"`): every published tick

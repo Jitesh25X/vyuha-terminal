@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jiteshraj/vyuha/gateway/internal/auth"
-	"github.com/jiteshraj/vyuha/gateway/internal/ratelimit"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/auth"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/ratelimit"
 )
 
 type ctxKey int

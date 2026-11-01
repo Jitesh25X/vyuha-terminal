@@ -8,6 +8,8 @@ research/backtesting with Indian costs, and an AI copilot that explains — but 
 > Status: **specification stage**. Build follows `docs/ROADMAP.md` using Claude Code.
 > Not investment advice. You are responsible for complying with SEBI/exchange rules and your broker's terms — see `docs/COMPLIANCE.md`.
 
+> **No license yet, all rights reserved. Not investment advice. Not affiliated with Bloomberg, BlackRock, Zerodha or Upstox.** See [`DISCLAIMER.md`](DISCLAIMER.md).
+
 ## Start here
 | File | What it is |
 |---|---|

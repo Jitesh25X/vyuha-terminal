@@ -4,7 +4,7 @@ package vyuha.marketdata.v1;
 
 import "vyuha/common/v1/common.proto";
 
-option go_package = "github.com/jiteshraj/vyuha/gateway/gen/vyuha/marketdata/v1;marketdatav1";
+option go_package = "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1;marketdatav1";
 
 enum FeedMode {
   FEED_MODE_UNSPECIFIED = 0;
