@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # vyuha_engine (release). Build context: repo root (make staging-build).
-# Toolchain matches CI/Linux dev: GCC 14, vcpkg at engine/vcpkg.json's builtin-baseline, static ports.
+# Toolchain matches CI/Linux dev: GCC 14, vcpkg at engine/vcpkg.json's builtin-baseline, static ports,
+# release-only triplets (engine.yml's ENGINE_CMAKE_ARGS): half the cold-build time, same dependency builds.
 # Runs with network_mode: host so sessions can bind each account's static IP (ARCHITECTURE §5).
 
 FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS build
@@ -19,12 +20,13 @@ RUN baseline="$(python3 -c 'import json; print(json.load(open("engine/vcpkg.json
 # Dependencies in their own layer (the long part: gRPC/abseil/protobuf), reused until the manifest changes.
 RUN --mount=type=cache,target=/root/.cache/vcpkg \
     "$VCPKG_ROOT/vcpkg" install --x-manifest-root=engine --x-install-root=/opt/vcpkg_installed \
-      --triplet x64-linux --clean-after-build
+      --triplet x64-linux-release --host-triplet x64-linux-release --clean-after-build
 COPY proto proto
 COPY engine engine
 RUN cmake -S engine -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-      -DVCPKG_INSTALLED_DIR=/opt/vcpkg_installed -DVCPKG_MANIFEST_INSTALL=OFF -DVCPKG_TARGET_TRIPLET=x64-linux \
+      -DVCPKG_INSTALLED_DIR=/opt/vcpkg_installed -DVCPKG_MANIFEST_INSTALL=OFF \
+      -DVCPKG_TARGET_TRIPLET=x64-linux-release -DVCPKG_HOST_TRIPLET=x64-linux-release \
       -DVYUHA_BUILD_TESTS=OFF -DVYUHA_BUILD_PYTHON=OFF \
     && cmake --build build --target vyuha_engine
 
