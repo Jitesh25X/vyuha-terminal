@@ -14,7 +14,9 @@ This file is the **single source of truth for what to build next**. Claude Code 
 
 Legend: `deps` = tasks that must be `[x]` first · `needs` = the **only** things you may install or download for this task · `done` = completion check.
 
-Current milestone: **M1**
+Current order (ADR-023, staging VM pending): **M4.1 → M2 → M4**. M1.12 and M3 are blocked: waiting on VM. A task marked **blocked** is skipped by rule 1 until its blocker clears.
+
+Current milestone: **M4.1, then M2**
 
 
 ## M0 — Foundations
@@ -122,20 +124,20 @@ Current milestone: **M1**
   - deps: M1.11b
   - needs: nothing new
   - done: `BM_CorePollTicks` within 3 % of the pre-M1.11b baseline (no inference) on the same machine, at 5,000 and 100 instruments; the 6 inference tests + ASan pass; before/after numbers recorded (owner 2026-11-02: replaces the absolute ≤ 80 ns / 18.0M ticks/s targets, which came from a different session and aren't reproducible here; official absolute baseline set at M1.12 on the staging VM) — 2026-11-02: done. Tests: debug 81/81, ASan+UBSan 71/71, lint-engine; the 6 inference scenarios + a feed-slot test. Interleaved A/B/C runs on the dev laptop (7 rounds × 2 s, median ns/tick, one session): 100 instruments — baseline 71.9, M1.11b 72.3 (+0.6 %), **M1.11c 73.3 (+2.0 %)**; 5,000 — baseline 108.0, M1.11b 134.5 (+24.6 %), **M1.11c 110.8 (+2.7 %)**. Laptop round-to-round spread 98–205 ns at 5,000, so only same-session relative numbers are meaningful here
-- [ ] **M1.12** **Staging:** VM with 2 static IPs, real Kite + Upstox sessions streaming Nifty 50 + NIFTY options
+- [ ] **M1.12** (**blocked: waiting on VM**, ADR-023) **Staging:** VM with 2 static IPs, real Kite + Upstox sessions streaming Nifty 50 + NIFTY options
   - deps: M1.11c
   - needs: Staging VM only; record only Nifty 50 + NIFTY options near expiries
   - done: Tick→screen p95 < 400 ms measured; `make bootstrap C=core` passes on the staging Ubuntu VM; engine benchmarks (`make bench`) run on the staging VM (Linux, core thread pinned) and recorded here as the official absolute baseline for future comparisons (no CI benchmark gating: shared runners are too noisy)
   - notes: Owner, 2026-11-02. (1) Nightly first: report the latest nightly (sanitizers + fuzz) result before other work; if it failed, fix that first. (2) To resume: merge `main` into `m1.12-staging-wip` and resolve the conflicts, including the ADR numbering (ADR-021 is "Public without license" on main, so the staging ADR is ADR-022) and the Go module path (`github.com/Jitesh25X/vyuha-terminal/gateway` on main). Then stop and wait for the owner to provide the staging VM details.
 
 **M1 exit:** live data from both brokers on staging; benchmarks meet NFRs.
-- [ ] M1 exit verified (`/milestone-exit`)
+- [ ] M1 exit verified (`/milestone-exit`) (**blocked: waiting on VM**)
 
 
 ## M2 — Paper OMS & risk gate
 
 - [ ] **M2.1** OMS state machine + `order_event` writer thread + recovery from Postgres
-  - deps: M1 exit
+  - deps: M1.11c, M4.1 (ADR-023)
   - needs: vcpkg: `rapidcheck`
   - done: Property tests: only legal transitions
 - [ ] **M2.2** RiskGate framework (`ApprovedOrder` construct-only-by-gate, rule table, GateContext)
@@ -172,13 +174,15 @@ Current milestone: **M1**
   - done: Playwright: keyboard-only paper trade flow; `OC` row + `B`/`S` opens a pre-filled ticket for that contract (F-MD-3 AC, deferred from M1.10)
 
 **M2 exit:** a full paper trading day on staging with ≥ 50 orders, zero illegal transitions, and every gate rule exercised by tests.
-- [ ] M2 exit verified (`/milestone-exit`)
+- [ ] M2 exit verified (`/milestone-exit`) (**blocked: waiting on VM**; needs the paper day on staging)
 
 
 ## M3 — Live execution
 
+**All of M3 is blocked: waiting on VM (ADR-023).** Resume when the owner sends the VM details, after M1.12.
+
 - [ ] **M3.1** Kite order adapter (place/modify/cancel, tags, market protection, order-update stream, positions/margins) with VCR fixtures
-  - deps: M2 exit
+  - deps: M2 exit, M1.12
   - needs: nothing new (recorded fixtures built from documented example payloads)
   - done: Contract tests
 - [ ] **M3.2** Upstox order adapter (same) + Portfolio Stream Feed
@@ -200,7 +204,7 @@ Current milestone: **M1**
 - [ ] **M3.6** `LIVE_TRADING_ENABLED` guard, live/paper UI distinctions, re-auth flows
   - deps: M3.5
   - needs: nothing new
-  - done: E2E
+  - done: E2E; live trading refuses an account with a private `static_ip` or no `public_static_ip`, and an egress check proves the public IP (added at M4.1: `docs/RUN_LOCAL.md` uses a LAN address, and nothing else stops that reaching live)
 - [ ] **M3.7** Compliance report `COMP`; `AUD` viewer
   - deps: M3.6
   - needs: nothing new
@@ -220,12 +224,20 @@ Current milestone: **M1**
 
 ## M4 — Data, strategies & backtesting
 
-- [ ] **M4.1** Download manager (Kite + Upstox historical, expired options), Parquet lake, dataset catalogue, `DL` panel
-  - deps: M3 exit
-  - needs: Python: aiolimiter, duckdb, pyarrow. **Data:** only the instruments/interval/range in the job spec (start with Nifty 50, 1-min, 2 years)
-  - done: F-RS-1 ACs
-- [ ] **M4.2** Cost schedule seeding (verified, with sources) + cost engine + contract-note tests
+- [ ] **M4.1** Upstox historical downloader: job spec, rate-limit-aware chunked fetch, resume, validation, Parquet lake, dataset catalogue, adjusted view on read
+  - deps: M1.1 (ADR-023: out of order, no M2/M3 dependency)
+  - needs: Python: aiolimiter. **Data:** only the job spec's range. First job: Nifty 50 constituents + NIFTY/BANKNIFTY index, 1-minute from Jan 2022, daily from 2015; nothing more
+  - done: F-RS-1 ACs against a local fake Upstox server (50 symbols × 2 years × 1-minute, no 429, kill -9 resume, re-run fetches 0 new bars, raw never changed)
+- [ ] **M4.1a** First real download on the owner's Upstox account (**blocked: waiting on owner**: Upstox account in `vyuhactl`, daily login, NSE constituents CSV; `docs/RUN_LOCAL.md §6`)
   - deps: M4.1
+  - needs: **Data:** the first job above only
+  - done: both jobs finish with `http_429` = 0; a re-run reports 0 requests; bar counts recorded here
+- [ ] **M4.1b** Rest of the download manager: Kite historical, expired options (`options_expired/`), `POST/GET /data/jobs` + `GET /data/datasets`, `DL` panel
+  - deps: M4.1, M2.9
+  - needs: nothing new. **Data:** only what a job spec names
+  - done: F-RS-1 description complete; API tests; Playwright: `DL` job builder + progress
+- [ ] **M4.2** Cost schedule seeding (verified, with sources) + cost engine + contract-note tests
+  - deps: M4.1b, M2.9 (ADR-023: M2 exit needs staging)
   - needs: nothing new
   - done: 5 contract-note tests pass to ₹0.01
 - [ ] **M4.3** nanobind bindings for core (clock, SimBroker, gate, OMS)
@@ -244,17 +256,21 @@ Current milestone: **M1**
   - deps: M4.5
   - needs: nothing new
   - done: F-RS-3 ACs
-- [ ] **M4.7** Strategy lifecycle + approval; paper/live strategy hosting via engine
+- [ ] **M4.7** Strategy lifecycle + approval; **paper** strategy hosting via engine
   - deps: M4.6
   - needs: nothing new
-  - done: F-RS-4 ACs
+  - done: F-RS-4 ACs (paper; approval rules tested without a live broker)
+- [ ] **M4.7b** **Live** strategy hosting via engine (**blocked: waiting on M3**, ADR-023)
+  - deps: M4.8, M3 exit
+  - needs: nothing new
+  - done: F-RS-4 ACs (live, owner's account)
 - [ ] **M4.8** Web: `STRAT` (Monaco), `BT` report, `PAY` payoff
   - deps: M4.7
   - needs: npm: @monaco-editor/react (Monaco loaded lazily)
   - done: E2E
 
 **M4 exit:** the same strategy file runs in backtest, paper and live (owner's account, 1 lot) with matching behaviour.
-- [ ] M4 exit verified (`/milestone-exit`)
+- [ ] M4 exit verified (`/milestone-exit`) (**blocked: waiting on M3**; needs M4.7b)
 
 
 ## M5 — Portfolio risk analytics

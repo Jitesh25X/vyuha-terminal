@@ -6,7 +6,7 @@ and F&O through Zerodha Kite Connect and Upstox.
 
 ## Read before you write code
 1. `docs/PRD.md` — what to build, acceptance criteria (feature IDs like `F-RK-1`).
-2. `docs/TASKS.md` — **the execution queue.** Do exactly one task at a time: the first unchecked task whose deps are done. `docs/ROADMAP.md` gives milestone context. Do not start milestone N+1 until N's exit criteria pass (`/milestone-exit`).
+2. `docs/TASKS.md` — **the execution queue.** Do exactly one task at a time: the first unchecked task whose deps are done. `docs/ROADMAP.md` gives milestone context. Do not start milestone N+1 until N's exit criteria pass (`/milestone-exit`), except for the order set by ADR-023 (staging VM pending).
 3. The spec for the module you touch: `ARCHITECTURE.md`, `TECH_STACK.md`, `DATA_MODEL.md`, `API.md`,
    `RISK_ENGINE.md`, `CONTEXT_ENGINE_AND_AI.md`, `DESK_AGENTS.md`, `STRATEGY_SDK_AND_BACKTEST.md`, `UI_SPEC.md`, `COMPLIANCE.md`.
 4. The service's own `CLAUDE.md` (`engine/`, `gateway/`, `quant/`, `intel/`, `web/`).

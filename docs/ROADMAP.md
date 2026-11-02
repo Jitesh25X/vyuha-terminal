@@ -1,6 +1,7 @@
 # Roadmap (build order for Claude Code)
 
 Rules:
+- **Current order is ADR-023** (staging VM pending): M4.1, then M2, then M4; M1.12 and M3 blocked on the VM.
 - Work through milestones **in order**. A milestone is done only when every exit criterion passes in CI (or on the staging VM where noted) and its exit box in `docs/TASKS.md` is ticked.
 - Each task is sized to fit one Claude Code session (≈ one PR). IDs `M<milestone>.<n>`.
 - Build mode (ADR-017): **Claude Code writes all code**; the owner reviews. (The former 🧠 hand-written markers were removed.) Previously: The owner writes it, and Claude Code reviews it and writes the tests.
