@@ -144,10 +144,11 @@ func (s *Service) LoginURL(ctx context.Context, userID, accountID string) (strin
 	if acct.Broker != store.BrokerKindZerodha && acct.Broker != store.BrokerKindUpstox {
 		return "", ErrNoLogin
 	}
-	apiKey, err := s.open(acct.ApiKeyEnc, "api_key_enc", acct.ID)
+	apiKey, err := s.openAudited(ctx, acct.ApiKeyEnc, "api_key_enc", acct.ID, userID, "broker_login_url")
 	if err != nil {
 		return "", fmt.Errorf("brokers: api key: %w", err)
 	}
+	defer clear(apiKey)
 	state, err := s.states.issue(acct.ID.String(), userID, string(acct.Broker))
 	if err != nil {
 		return "", err
@@ -222,8 +223,11 @@ func (s *Service) complete(ctx context.Context, st loginState, p CallbackParams)
 	if string(acct.Broker) != st.Broker || acct.StaticIp == nil {
 		return nil, CodeForbidden
 	}
-	apiKey, err1 := s.open(acct.ApiKeyEnc, "api_key_enc", acct.ID)
-	apiSecret, err2 := s.open(acct.ApiSecretEnc, "api_secret_enc", acct.ID)
+	const purpose = "broker_token_exchange_and_start_session"
+	apiKey, err1 := s.openAudited(ctx, acct.ApiKeyEnc, "api_key_enc", acct.ID, st.User, purpose)
+	defer clear(apiKey)
+	apiSecret, err2 := s.openAudited(ctx, acct.ApiSecretEnc, "api_secret_enc", acct.ID, st.User, purpose)
+	defer clear(apiSecret)
 	if err1 != nil || err2 != nil {
 		return nil, CodeSecretsUnreadable
 	}
@@ -330,11 +334,24 @@ func (s *Service) authorise(ctx context.Context, userID, accountID string) (stor
 	return acct, nil
 }
 
-func (s *Service) open(sealed []byte, column string, id pgtype.UUID) ([]byte, error) {
+// openAudited is the only way this service decrypts a secret (gateway/CLAUDE.md lists the permitted sites).
+// The caller zeroes the result. Without its audit row, the secret isn't returned.
+func (s *Service) openAudited(ctx context.Context, sealed []byte, column string, id pgtype.UUID, userID, purpose string) ([]byte, error) {
 	if len(sealed) == 0 {
 		return nil, vcrypto.ErrDecrypt
 	}
-	return s.env.Open(sealed, ad(column, id))
+	secret, err := s.env.Open(sealed, ad(column, id))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := audit.Record(ctx, s.q, audit.Event{
+		ActorID: userID, ActorKind: audit.ActorUser, Action: "broker.secret.opened", Entity: "broker_account", EntityID: id.String(),
+		Payload: map[string]any{"field": column, "purpose": purpose},
+	}); err != nil {
+		clear(secret)
+		return nil, fmt.Errorf("brokers: audit secret use: %w", err)
+	}
+	return secret, nil
 }
 
 func (s *Service) redirectURI(broker string) string {

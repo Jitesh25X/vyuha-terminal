@@ -176,7 +176,7 @@ func stateOf(t *testing.T, loginURL string) (url.Values, string) {
 func (f *fixture) auditActions(account string) []string {
 	f.t.Helper()
 	rows, err := f.pool.Query(context.Background(),
-		`SELECT action || ':' || coalesce(payload->>'reason', '') FROM audit_event WHERE entity = 'broker_account' AND entity_id = $1 ORDER BY id`, account)
+		`SELECT action || ':' || coalesce(payload->>'reason', '') FROM audit_event WHERE entity = 'broker_account' AND entity_id = $1 AND action <> 'broker.secret.opened' ORDER BY id`, account)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -560,5 +560,61 @@ func TestDatabaseRefusesAddressesThatPinNothing(t *testing.T) {
 				t.Errorf("%s = %s refused: %v", column, ip, err)
 			}
 		}
+	}
+}
+
+func TestEveryBrokerSecretDecryptIsAudited(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	admin := f.user("admin_user", "admin")
+	acct := f.account("upstox", "UP1", "key-value", "secret-value", "127.0.0.1")
+	opened := func() []string {
+		rows, err := f.pool.Query(ctx, `SELECT payload->>'field', payload->>'purpose', actor_id::text FROM audit_event
+			WHERE action = 'broker.secret.opened' AND entity_id = $1 ORDER BY id`, acct)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var field, purpose, actor string
+			if err := rows.Scan(&field, &purpose, &actor); err != nil {
+				t.Fatal(err)
+			}
+			if actor != admin {
+				t.Errorf("actor = %s, want %s", actor, admin)
+			}
+			out = append(out, field+":"+purpose)
+		}
+		return out
+	}
+	if _, err := f.svc.LoginURL(ctx, admin, acct); err != nil {
+		t.Fatal(err)
+	}
+	if got := opened(); len(got) != 1 || got[0] != "api_key_enc:broker_login_url" {
+		t.Fatalf("after LoginURL: %v", got)
+	}
+	var leaks int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM audit_event WHERE payload::text LIKE '%key-value%' OR payload::text LIKE '%secret-value%'`).Scan(&leaks); err != nil || leaks != 0 {
+		t.Fatalf("secret in the audit log: %d rows, %v", leaks, err)
+	}
+}
+
+func TestBrokerSecretIsNotReturnedWithoutItsAuditRow(t *testing.T) {
+	f := newFixture(t)
+	id := f.account("upstox", "UP1", "key-value", "secret-value", "127.0.0.1")
+	var aid pgtype.UUID
+	if err := aid.Scan(id); err != nil {
+		t.Fatal(err)
+	}
+	var sealed []byte
+	ctx := context.Background()
+	if err := f.pool.QueryRow(ctx, `SELECT api_key_enc FROM broker_account WHERE id = $1`, id).Scan(&sealed); err != nil {
+		t.Fatal(err)
+	}
+	broken := *f.svc
+	broken.q = store.New(failingAudit{f.pool})
+	if got, err := broken.openAudited(ctx, sealed, "api_key_enc", aid, f.user("admin_user", "admin"), "test"); err == nil || got != nil {
+		t.Fatalf("audit failed but got %q, err %v", got, err)
 	}
 }

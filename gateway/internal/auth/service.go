@@ -590,6 +590,14 @@ func (s *Service) totpOK(ctx context.Context, q *store.Queries, u store.AppUser,
 	if err != nil {
 		return false, fmt.Errorf("open totp secret: %w", err)
 	}
+	defer clear(secret)
+	userID := u.ID.String()
+	if _, err := audit.Record(ctx, q, audit.Event{
+		ActorID: userID, ActorKind: audit.ActorUser, Action: "auth.totp.opened", Entity: "app_user", EntityID: userID,
+		Payload: map[string]any{"purpose": "login_totp_verification"},
+	}); err != nil {
+		return false, fmt.Errorf("audit totp use: %w", err)
+	}
 	step, ok := matchTOTP(string(secret), code, now)
 	if !ok {
 		return false, nil
