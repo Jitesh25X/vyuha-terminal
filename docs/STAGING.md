@@ -1,5 +1,13 @@
 # Staging runbook (M1.12)
 
+> **WIP: not finished, not verified.** M1.12 is blocked until the staging VM exists (ADR-023). Merged to
+> `main` so M2 can build on the same tree, not because staging works. Don't treat anything below as done
+> or production-ready, and don't count it towards M1.12 or the M1 exit.
+>
+> WIP files: this runbook, everything in `deploy/staging/` (Dockerfiles, compose file, Caddyfile,
+> `init-env.sh`, `roles.sql`, `systemd/`) and the `make staging-build` target. The images have never been
+> built, and nothing has run on a VM. Remove this notice only when M1.12 is ticked in `docs/TASKS.md`.
+
 Goal: one VM with two static IPs, a real Kite session and a real Upstox session streaming Nifty 50 and
 NIFTY options (near expiries), and a measured tick → screen p95 under 400 ms.
 
