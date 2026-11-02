@@ -1,0 +1,6 @@
+{
+  "interval": "1minute",
+  "from": "2022-01-01",
+  "constituents_csv": "../../data/reference/ind_nifty50list.csv",
+  "symbols": ["NSE:NIFTY 50", "NSE:NIFTY BANK"]
+}

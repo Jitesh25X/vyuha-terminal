@@ -6,6 +6,8 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -30,12 +32,16 @@ class Settings:
     http_addr: str = "127.0.0.1:8090"  # internal API (gateway → quant); loopback unless told otherwise
     iv_mid_max_spread: float = 0.10  # IV from the mid only when spread ≤ this fraction of the mid
     iv_ltp_max_age_s: float = 60.0  # else from the LTP only when it traded this recently
+    data_lake_dir: Path = Path("./data/lake")
+    upstox_api_base: str = "https://api.upstox.com"  # overridable in dev only, for a local fake server
+    download_pace_s: float | None = None  # dev only; default comes from data/limits.py
 
     def __repr__(self) -> str:  # never print credentials
         return (
             f"Settings(env={self.env!r}, postgres=<redacted>, risk_free_rate={self.risk_free_rate!r}, "
             f"risk_free_rate_as_of={self.risk_free_rate_as_of!r}, http_addr={self.http_addr!r}, "
-            f"iv_mid_max_spread={self.iv_mid_max_spread!r}, iv_ltp_max_age_s={self.iv_ltp_max_age_s!r})"
+            f"iv_mid_max_spread={self.iv_mid_max_spread!r}, iv_ltp_max_age_s={self.iv_ltp_max_age_s!r}, "
+            f"data_lake_dir={str(self.data_lake_dir)!r})"
         )
 
 
@@ -64,6 +70,16 @@ def load(environ: dict[str, str] | None = None) -> Settings:
     if not 0 < age <= 3600:
         raise ValueError(f"IV_LTP_MAX_AGE_S must be in (0, 3600] seconds, got {age!r}")
     addr = e.get("QUANT_HTTP_ADDR", "").strip() or "127.0.0.1:8090"
+    base = e.get("UPSTOX_API_BASE", "").strip()
+    raw_pace = e.get("DOWNLOAD_PACE_S", "").strip()
+    if env != "dev" and (base or raw_pace):
+        raise ValueError("UPSTOX_API_BASE and DOWNLOAD_PACE_S are for dev only")
+    if raw_pace and not base:
+        raise ValueError(
+            "DOWNLOAD_PACE_S needs UPSTOX_API_BASE: the real API always gets the documented pace"
+        )
+    if base and urlsplit(base).hostname not in ("127.0.0.1", "localhost"):
+        raise ValueError("UPSTOX_API_BASE must be a loopback URL: it receives the access token")
     return Settings(
         env=env,
         postgres_url=url,
@@ -72,6 +88,9 @@ def load(environ: dict[str, str] | None = None) -> Settings:
         http_addr=addr,
         iv_mid_max_spread=spread,
         iv_ltp_max_age_s=age,
+        data_lake_dir=Path(e.get("DATA_LAKE_DIR", "").strip() or "./data/lake"),
+        upstox_api_base=base or "https://api.upstox.com",
+        download_pace_s=float(raw_pace) if raw_pace else None,
     )
 
 

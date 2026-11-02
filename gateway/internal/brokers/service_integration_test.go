@@ -484,3 +484,33 @@ func TestAccountsListing(t *testing.T) {
 		t.Fatalf("inactive user: %v", err)
 	}
 }
+
+func TestOpenAccessToken(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	id := f.account("upstox", "UP1", "key", "secret", "127.0.0.1")
+	now := time.Date(2026, 11, 2, 4, 0, 0, 0, time.UTC)
+	if _, _, err := OpenAccessToken(ctx, f.pool, f.env, "upstox:UP1", "owner", "test", now); !errors.Is(err, ErrNoLiveToken) {
+		t.Fatalf("no token yet: %v", err)
+	}
+	sealed, err := f.env.Seal([]byte("tok"), []byte("broker_account.access_token_enc:"+id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := now.Add(time.Hour)
+	f.exec(`UPDATE broker_account SET access_token_enc = $1, token_expires_at = $2 WHERE id = $3`, sealed, expires, id)
+	gotID, token, err := OpenAccessToken(ctx, f.pool, f.env, "upstox:UP1", "owner", "test", now)
+	if err != nil || gotID != id || token != "tok" {
+		t.Fatalf("got %q %q %v", gotID, token, err)
+	}
+	if _, _, err := OpenAccessToken(ctx, f.pool, f.env, id, "owner", "test", expires); !errors.Is(err, ErrNoLiveToken) {
+		t.Fatalf("expired: %v", err)
+	}
+	if got := f.auditActions(id); len(got) == 0 || !strings.HasPrefix(got[len(got)-1], "broker.token.opened") {
+		t.Fatalf("audit = %v", got)
+	}
+	f.exec(`UPDATE broker_account SET status = 'disabled', token_expires_at = $1 WHERE id = $2`, expires.Add(time.Hour), id)
+	if _, _, err := OpenAccessToken(ctx, f.pool, f.env, id, "owner", "test", now); err == nil || errors.Is(err, ErrNoLiveToken) {
+		t.Fatalf("disabled: %v", err)
+	}
+}

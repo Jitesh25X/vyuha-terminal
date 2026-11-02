@@ -153,3 +153,16 @@ func TestExchangeRefusesStaticIPNotOnHost(t *testing.T) {
 		t.Fatalf("err = %v, request reached server = %v", err, hit)
 	}
 }
+
+func TestNewAccountRefusesAddressesThatPinNothing(t *testing.T) {
+	for _, ip := range []string{"0.0.0.0", "::", "224.0.0.1", "ff02::1"} {
+		a := NewAccount{Broker: "upstox", ClientCode: "UP1", HolderName: "X", StaticIP: ip, APIKey: "k", APISecret: "s"}
+		if _, err := a.params(); err == nil {
+			t.Errorf("static IP %s accepted", ip)
+		}
+	}
+	a := NewAccount{Broker: "upstox", ClientCode: "UP1", HolderName: "X", StaticIP: "10.0.0.5", APIKey: "k", APISecret: "s"}
+	if _, err := a.params(); err != nil {
+		t.Errorf("a host address was refused: %v", err)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -119,24 +120,70 @@ func (a NewAccount) params() (store.CreateBrokerAccountParams, error) {
 		if err != nil {
 			return p, fmt.Errorf("%s %q is not an IP address", f.name, f.raw)
 		}
+		if ip.IsUnspecified() || ip.IsMulticast() { // would bind without pinning the source address (invariant 4)
+			return p, fmt.Errorf("%s %q must name one address of this host", f.name, f.raw)
+		}
 		*f.dst = &ip
 	}
 	return p, nil
+}
+
+// ErrNoLiveToken means the account has no unexpired access token: the user must do the daily login.
+var ErrNoLiveToken = errors.New("brokers: no live access token: do the daily broker login first")
+
+// OpenAccessToken decrypts an account's current access token for a local job (vyuhactl download run)
+// and audits it; account is an id or broker:client_code. It returns the account id and the token.
+func OpenAccessToken(ctx context.Context, db store.DBTX, env *vcrypto.Envelope, account, requestedBy, purpose string, now time.Time) (string, string, error) {
+	q := store.New(db)
+	aid, err := accountID(ctx, q, account)
+	if err != nil {
+		return "", "", err
+	}
+	acct, err := q.GetBrokerAccount(ctx, aid)
+	if err != nil {
+		return "", "", fmt.Errorf("brokers: account %s: %w", account, err)
+	}
+	if acct.Status == store.AccountStatusDisabled {
+		return "", "", fmt.Errorf("brokers: account %s is disabled", account)
+	}
+	if acct.AccessTokenEnc == nil || !acct.TokenExpiresAt.Valid || !now.Before(acct.TokenExpiresAt.Time) {
+		return "", "", ErrNoLiveToken
+	}
+	token, err := env.Open(acct.AccessTokenEnc, ad("access_token_enc", acct.ID))
+	if err != nil {
+		return "", "", fmt.Errorf("brokers: access token: %w", err)
+	}
+	if _, err := audit.Record(ctx, q, audit.Event{
+		ActorKind: audit.ActorSystem, Action: "broker.token.opened", Entity: "broker_account", EntityID: acct.ID.String(),
+		Payload: map[string]any{"requested_by": requestedBy, "purpose": purpose},
+	}); err != nil {
+		return "", "", fmt.Errorf("brokers: audit token use: %w", err)
+	}
+	return acct.ID.String(), string(token), nil
+}
+
+func accountID(ctx context.Context, q *store.Queries, account string) (pgtype.UUID, error) {
+	var aid pgtype.UUID
+	if broker, client, ok := strings.Cut(account, ":"); ok {
+		id, err := q.FindBrokerAccount(ctx, store.FindBrokerAccountParams{Broker: store.BrokerKind(broker), ClientCode: client})
+		if err != nil {
+			return aid, fmt.Errorf("brokers: account %s: %w", account, err)
+		}
+		return id, nil
+	}
+	if err := aid.Scan(account); err != nil {
+		return aid, fmt.Errorf("brokers: account must be an id or broker:client_code")
+	}
+	return aid, nil
 }
 
 // MapUser lets a user view (and optionally trade) an account; account is an id or broker:client_code.
 func MapUser(ctx context.Context, db DB, account, username string, canTrade, isDefault bool) error {
 	return pgx.BeginFunc(ctx, db, func(tx pgx.Tx) error {
 		q := store.New(tx)
-		var aid pgtype.UUID
-		if broker, client, ok := strings.Cut(account, ":"); ok {
-			id, err := q.FindBrokerAccount(ctx, store.FindBrokerAccountParams{Broker: store.BrokerKind(broker), ClientCode: client})
-			if err != nil {
-				return fmt.Errorf("brokers: account %s: %w", account, err)
-			}
-			aid = id
-		} else if err := aid.Scan(account); err != nil {
-			return fmt.Errorf("brokers: account must be an id or broker:client_code")
+		aid, err := accountID(ctx, q, account)
+		if err != nil {
+			return err
 		}
 		u, err := q.GetUserByUsername(ctx, username)
 		if err != nil {

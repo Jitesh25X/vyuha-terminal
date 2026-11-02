@@ -41,6 +41,8 @@ const usage = `usage:
       [-public-ip IP] [-backup-ip IP] [-data-entitled] [-ops-cap 8]
       (API key and secret are read from the terminal with echo off, or two lines of piped stdin; stored encrypted)
   vyuhactl account map -account ID|broker:client_code -user USERNAME [-trade] [-default]
+  vyuhactl download run -account ID|broker:client_code -user USERNAME -spec FILE [-quant "uv run --project quant vyuha-quant"]
+      (runs or resumes a historical download; hands the live access token to the quant job on stdin)
 Reads POSTGRES_URL etc. from the environment (VYUHA_ENV=dev defaults apply).`
 
 // errUsage makes main print the usage text.
@@ -73,6 +75,8 @@ func run(args []string) error {
 		return runAccountCreate(args[2:])
 	case "account map":
 		return runAccountMap(args[2:])
+	case "download run":
+		return runDownload(args[2:])
 	}
 	return errUsage
 }
