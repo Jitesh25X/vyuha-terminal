@@ -364,3 +364,18 @@ def test_an_unchanged_file_is_flushed_again(tmp_path: Path, monkeypatch: pytest.
     w = lake.write_bars(tmp_path, "upstox", "1minute", 7, bars)
     path = tmp_path / w[0].path
     assert flushed == [path, path.parent]
+
+
+def test_muhurat_windows_keep_the_session_and_its_bars() -> None:
+    holidays = {date(2023, 11, 12): [(time(18, 15), time(19, 15))]}
+    rows = [["2023-11-12T18:15:00+05:30", 100.0, 101.0, 99.0, 100.0, 1, 0]]
+    dropped = dl.Dropped()
+    assert dl.normalise(rows, "1minute", holidays, dropped).height == 1
+    assert dropped.rejected == 0
+    # A known session with no bars is a gap; a plain holiday and a weekend aren't.
+    inst = dl.Instrument(1, "k", "NSE:X")
+    chunk = dl.Chunk(inst, date(2023, 11, 11), date(2023, 11, 13))
+    plain: dict[date, list[tuple[time, time]]] = {date(2023, 11, 13): []}
+    assert dl._trading_days_without_bars(lake.empty_bars(), chunk, {**holidays, **plain}) == [
+        date(2023, 11, 12)
+    ]

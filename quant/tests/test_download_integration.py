@@ -52,6 +52,8 @@ class FakeUpstox(ThreadingHTTPServer):
         self.expire_after: int | None = None
         self.corrupt_first: int = 0  # this many replies carry corrupt_row
         self.corrupt_row: list[Any] = ["garbage"]
+        self.no_bars_on: set[date] = set()  # a 200 with no candles for these days
+        self.no_bars_before: date | None = None  # as if listed on this date
         self.peers: set[str] = set()
         self.on_request: Callable[[], None] | None = None
 
@@ -94,6 +96,8 @@ class _Handler(BaseHTTPRequestHandler):
         if limited:
             return self._reply(429, {"status": "error"})
         _, _, _, _key, _unit, _value, to, frm = self.path.split("/")
+        missing = self.server.no_bars_on
+        before = self.server.no_bars_before
         if corrupt:
             return self._reply(200, {"status": "success", "data": {"candles": [self.server.corrupt_row]}})
         self._reply(
@@ -101,7 +105,12 @@ class _Handler(BaseHTTPRequestHandler):
             {
                 "status": "success",
                 "data": {
-                    "candles": _candles(unquote(_unit), date.fromisoformat(frm), date.fromisoformat(to))
+                    "candles": [
+                        row
+                        for row in _candles(unquote(_unit), date.fromisoformat(frm), date.fromisoformat(to))
+                        if (d := date.fromisoformat(row[0][:10])) not in missing
+                        and (before is None or d >= before)
+                    ]
                 },
             },
         )
@@ -158,6 +167,7 @@ async def _seed(
                VALUES ('owner', 'Owner', $1, 'x')""",
             role,
         )
+        await conn.execute("INSERT INTO exchange_holiday (exchange, day) VALUES ('NSE', '2015-01-26')")
         account: str = str(
             await conn.fetchval(
                 """INSERT INTO broker_account (broker, client_code, holder_name, api_key_enc, api_secret_enc,
@@ -648,3 +658,120 @@ def test_new_directories_are_flushed(tmp_path: Path, monkeypatch: pytest.MonkeyP
     flushed.clear()
     lake._make_dirs(tmp_path / "a" / "b")
     assert not flushed
+
+
+def _coverage(dsn: str) -> list[tuple[date, date]]:
+    async def read() -> list[tuple[date, date]]:
+        conn = await asyncpg.connect(dsn)
+        try:
+            rows = await conn.fetch("SELECT from_date, to_date FROM download_coverage ORDER BY from_date")
+        finally:
+            await conn.close()
+        return [(r["from_date"], r["to_date"]) for r in rows]
+
+    return asyncio.run(read())
+
+
+async def _sql(dsn: str, *statements: str) -> None:
+    conn = await asyncpg.connect(dsn)
+    try:
+        for statement in statements:
+            await conn.execute(statement)
+    finally:
+        await conn.close()
+
+
+def test_a_trading_day_with_no_bars_is_a_gap_and_a_rerun_retries_it(
+    dsn: str, fake: FakeUpstox, tmp_path: Path
+) -> None:
+    account = asyncio.run(_seed(dsn))
+    spec = _spec(
+        tmp_path, **{"from": "2024-02-01"}, to="2024-02-29", constituents_csv=None, symbols=["NSE:SYM0"]
+    )
+    fake.no_bars_on = {date(2024, 2, 14)}  # a Wednesday, and no holiday
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, log = _finish(p)
+    assert p.returncode == cli.EXIT_INCOMPLETE
+    assert report["days_without_bars"] == 1
+    assert report["chunks_incomplete"] == 1
+    assert _coverage(dsn) == []
+    assert "2024-02-14" in log
+
+    fake.no_bars_on = set()
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, _ = _finish(p)
+    assert p.returncode == 0
+    assert report["days_without_bars"] == 0
+    assert _coverage(dsn) == [(date(2024, 2, 1), date(2024, 2, 29))]
+
+
+def test_a_holiday_or_weekend_with_no_bars_is_covered(dsn: str, fake: FakeUpstox, tmp_path: Path) -> None:
+    account = asyncio.run(_seed(dsn))
+    asyncio.run(_sql(dsn, "INSERT INTO exchange_holiday (exchange, day) VALUES ('NSE', '2024-02-14')"))
+    spec = _spec(
+        tmp_path, **{"from": "2024-02-01"}, to="2024-02-29", constituents_csv=None, symbols=["NSE:SYM0"]
+    )
+    fake.no_bars_on = {date(2024, 2, 14)}
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, _ = _finish(p)
+    assert p.returncode == 0
+    assert report["days_without_bars"] == 0
+    assert _coverage(dsn) == [(date(2024, 2, 1), date(2024, 2, 29))]
+
+
+def test_days_before_an_instruments_first_bar_are_not_gaps(
+    dsn: str, fake: FakeUpstox, tmp_path: Path
+) -> None:
+    account = asyncio.run(_seed(dsn))
+    spec = _spec(
+        tmp_path, **{"from": "2024-01-01"}, to="2024-03-31", constituents_csv=None, symbols=["NSE:SYM0"]
+    )
+    fake.no_bars_before = date(2024, 2, 15)  # January empty, February half
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, _ = _finish(p)
+    assert p.returncode == 0
+    assert report["days_without_bars"] == 0
+    assert report["days_before_first_bar"] > 0
+    assert _coverage(dsn)[0][0] == date(2024, 1, 1)  # January was recorded once a bar proved it wasn't a gap
+
+    # A later hole is still a gap, even for that instrument.
+    later = _spec(
+        tmp_path, **{"from": "2024-04-01"}, to="2024-04-30", constituents_csv=None, symbols=["NSE:SYM0"]
+    )
+    fake.no_bars_on = {date(2024, 4, 10)}
+    p = _start(dsn, fake, tmp_path, later, account)
+    report, _ = _finish(p)
+    assert p.returncode == cli.EXIT_INCOMPLETE
+    assert report["days_without_bars"] == 1
+
+
+def test_an_instrument_with_no_bars_at_all_is_incomplete(dsn: str, fake: FakeUpstox, tmp_path: Path) -> None:
+    account = asyncio.run(_seed(dsn))
+    spec = _spec(
+        tmp_path, **{"from": "2024-02-01"}, to="2024-02-29", constituents_csv=None, symbols=["NSE:SYM0"]
+    )
+    fake.no_bars_before = date(2030, 1, 1)
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, _ = _finish(p)
+    assert p.returncode == cli.EXIT_INCOMPLETE
+    assert report["chunks_incomplete"] == 1
+    assert _coverage(dsn) == []
+
+
+def test_a_job_older_than_the_calendar_is_refused(dsn: str, fake: FakeUpstox, tmp_path: Path) -> None:
+    account = asyncio.run(_seed(dsn))
+    asyncio.run(
+        _sql(
+            dsn,
+            "DELETE FROM exchange_holiday",
+            "INSERT INTO exchange_holiday (exchange, day) VALUES ('NSE', '2025-01-26')",
+        )
+    )
+    spec = _spec(
+        tmp_path, **{"from": "2024-02-01"}, to="2024-02-29", constituents_csv=None, symbols=["NSE:SYM0"]
+    )
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, _ = _finish(p)
+    assert p.returncode == 1
+    assert "holidays seed" in report["error"]
+    assert fake.requests == []

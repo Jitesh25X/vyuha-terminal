@@ -4,7 +4,8 @@
 transaction with its catalogue rows and the job's progress, so after a kill the chunk is either recorded
 or fetched again: its bars merge away as duplicates and the catalogue catches up with the files. A re-run
 plans only the dates nobody has finished. A chunk with rejected rows (unreadable, invalid, or a whole day outside any
-known session) isn't recorded, so a re-run retries it.
+known session) or a trading day with no bars isn't recorded, so a re-run retries it. Days before an
+instrument's first bar aren't gaps: it wasn't listed yet.
 """
 
 from __future__ import annotations
@@ -101,10 +102,9 @@ class Totals:
     requests: int = 0
     http_429: int = 0
     new_bars: int = 0
-    chunks_incomplete: int = (
-        0  # had rejected rows (Dropped.rejected), so not recorded; a re-run fetches them again
-    )
-    days_without_bars: int = 0
+    chunks_incomplete: int = 0  # rejected rows or a gap, so not recorded; a re-run fetches them again
+    days_without_bars: int = 0  # trading days after the first bar with none: gaps, never filled
+    days_before_first_bar: int = 0  # not listed yet, or a broker hole at the very start: can't be told apart
     dropped: Dropped = field(default_factory=Dropped)
 
 
@@ -219,14 +219,40 @@ def _in_session(ts: datetime, holidays: dict[date, list[tuple[time, time]]]) -> 
     return any(a <= t < b for a, b in windows)
 
 
-def _weekdays_without_bars(bars: pl.DataFrame, chunk: Chunk, holidays: dict[date, Any]) -> list[date]:
+def _trading_days_without_bars(
+    bars: pl.DataFrame, chunk: Chunk, holidays: dict[date, list[tuple[time, time]]]
+) -> list[date]:
+    """Days the exchange calendar says traded, with no bars: a weekday that isn't a holiday, or a special session."""
     have = (
         set(bars["ts"].dt.convert_time_zone("Asia/Kolkata").dt.date().unique().to_list())
         if not bars.is_empty()
         else set()
     )
     days = (chunk.start + timedelta(days=i) for i in range((chunk.end - chunk.start).days + 1))
-    return [d for d in days if d.weekday() < 5 and d not in holidays and d not in have]
+    return [d for d in days if d not in have and (bool(holidays[d]) if d in holidays else d.weekday() < 5)]
+
+
+async def _first_stored_day(conn: db.Conn, interval: str, instrument_id: int) -> date | None:
+    first = await conn.fetchval(
+        "SELECT min(from_ts) FROM dataset WHERE source = $1 AND interval = $2 AND instrument_id = $3",
+        SOURCE,
+        interval,
+        instrument_id,
+    )
+    return first.astimezone(config.IST).date() if first is not None else None
+
+
+async def _record_coverage(conn: db.Conn, interval: str, chunk: Chunk, job_id: Any) -> None:
+    await conn.execute(
+        """INSERT INTO download_coverage (source, interval, instrument_id, from_date, to_date, job_id)
+           VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING""",
+        SOURCE,
+        interval,
+        chunk.instrument.id,
+        chunk.start,
+        chunk.end,
+        job_id,
+    )
 
 
 async def _instruments(conn: db.Conn, symbols: list[str]) -> list[Instrument]:
@@ -405,6 +431,11 @@ async def run(
         holidays = _sessions(
             await conn.fetch("SELECT day, special_session FROM exchange_holiday WHERE exchange = 'NSE'")
         )
+        if not holidays or min(holidays).year > spec.from_.year:
+            raise SpecError(
+                "the holiday calendar doesn't reach back to this job: every holiday would look like a gap. "
+                "Run `vyuha-quant holidays seed`"
+            )
         stored = {
             "interval": spec.interval,
             "from": spec.from_.isoformat(),
@@ -428,51 +459,63 @@ async def run(
         totals = Totals()
         try:
             client = UpstoxHistory(token, source_ip, AsyncLimiter(1, step), base_url=base_url)
+            first_days: dict[int, date | None] = {}
+            waiting: dict[int, list[Chunk]] = {}  # empty, with no bar yet to say whether it was listed
             for c in chunks:
+                iid = c.instrument.id
                 raw = await client.candles(c.instrument.upstox_key, limit, c.start, c.end)
                 rejected_before = totals.dropped.rejected
                 bars = normalise(raw, spec.interval, holidays, totals.dropped)
-                complete = totals.dropped.rejected == rejected_before
-                writes = write_bars(lake_dir, SOURCE, spec.interval, c.instrument.id, bars)
+                rejected = totals.dropped.rejected != rejected_before
+                writes = write_bars(lake_dir, SOURCE, spec.interval, iid, bars)
                 totals.new_bars += sum(w.new_rows for w in writes)
-                gaps = _weekdays_without_bars(bars, c, holidays)
+
+                if iid not in first_days:
+                    first_days[iid] = await _first_stored_day(conn, spec.interval, iid)
+                if not bars.is_empty():
+                    day = bars["ts"][0].astimezone(config.IST).date()
+                    first_days[iid] = min(day, first_days[iid] or day)
+                first = first_days[iid]
+                empty_days = _trading_days_without_bars(bars, c, holidays)
+                gaps = [d for d in empty_days if first is not None and d >= first]
                 totals.days_without_bars += len(gaps)
-                if gaps:  # logged, never filled
-                    log.warning(
-                        "no bars: %s %s %d weekday(s) from %s",
+                totals.days_before_first_bar += len(empty_days) - len(gaps)
+                if gaps:
+                    log.error(
+                        "no bars: %s %s %d trading day(s) from %s, not recorded",
                         c.instrument.label,
                         spec.interval,
                         len(gaps),
                         gaps[0],
                     )
-                if not complete:
-                    totals.chunks_incomplete += 1
+                if rejected:
                     log.error("rejected rows: %s %s..%s not recorded", c.instrument.label, c.start, c.end)
-                else:
-                    done += 1
+
+                wait = first is None and bool(empty_days) and not rejected
+                complete = not rejected and not gaps and not wait
+                settled = waiting.pop(iid, []) if first is not None else []
+                if wait:
+                    waiting.setdefault(iid, []).append(c)
+                elif not complete:
+                    totals.chunks_incomplete += 1
+                done += len(settled) + (1 if complete else 0)
                 async with conn.transaction():
                     for w in writes:
-                        await _upsert_dataset(conn, spec.interval, c.instrument.id, w)
-                    if complete:
-                        await conn.execute(
-                            """INSERT INTO download_coverage (source, interval, instrument_id, from_date, to_date, job_id)
-                               VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING""",
-                            SOURCE,
-                            spec.interval,
-                            c.instrument.id,
-                            c.start,
-                            c.end,
-                            job_id,
-                        )
+                        await _upsert_dataset(conn, spec.interval, iid, w)
+                    for ready in [*settled, *([c] if complete else [])]:
+                        await _record_coverage(conn, spec.interval, ready, job_id)
                     await conn.execute(
                         """UPDATE download_job SET updated_at = now(), progress = progress || $2 WHERE id = $1""",
                         job_id,
                         {
                             "done": done,
-                            "last_cursor": f"{c.instrument.id}:{c.end}",
+                            "last_cursor": f"{iid}:{c.end}",
                             "new_bars": totals.new_bars,
                         },
                     )
+            for held in waiting.values():  # no bar at all: a wrong key or a broker hole, never a success
+                totals.chunks_incomplete += len(held)
+                log.error("no bars at all: %s %s, not recorded", held[0].instrument.label, spec.interval)
         except Exception as e:
             # DownloadError text is written to be safe to store; anything else gets only its type.
             error = str(e) if isinstance(e, DownloadError) else f"INTERNAL: {type(e).__name__}"
@@ -484,7 +527,7 @@ async def run(
                 await client.aclose()
             log.info("download totals: %s", asdict(totals))
         if totals.chunks_incomplete:  # not done: stays resumable, and the CLI exits non-zero
-            error = f"DOWNLOAD_INCOMPLETE: {totals.chunks_incomplete} chunk(s) had rejected rows, run again"
+            error = f"DOWNLOAD_INCOMPLETE: {totals.chunks_incomplete} chunk(s) had rejected rows or gaps, run again"
             await _fail(conn, job_id, {**who, **asdict(totals)}, error)
         else:
             async with conn.transaction():

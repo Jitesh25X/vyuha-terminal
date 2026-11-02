@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
@@ -227,3 +228,39 @@ def test_holiday_seed_keeps_desk_overrides(dsn: str) -> None:
     # The library's calendar ends 2026-12-31, within 90 days of DAY1: admins are told to extend it.
     titles = [r["title"] for r in q(dsn, "SELECT title FROM alert_event")]
     assert titles == ["Holiday calendar coverage ending"] * 2
+
+
+def test_seed_covers_the_first_job_and_every_muhurat_session(dsn: str) -> None:
+    add_admin(dsn)
+    report = run(holidays.seed(dsn, DAY1))
+    assert report["muhurat_sessions"] == 5
+    rows = q(dsn, "SELECT day, description, special_session FROM exchange_holiday WHERE exchange = 'NSE'")
+    days = {r["day"]: r for r in rows}
+    assert min(days).year == 2015
+    want = {
+        date(2022, 10, 24): ("18:15", "19:15"),
+        date(2023, 11, 12): ("18:15", "19:15"),
+        date(2024, 11, 1): ("18:00", "19:00"),
+        date(2025, 10, 21): ("13:45", "14:45"),
+        date(2026, 11, 8): ("14:20", "15:30"),
+    }
+    for day, (start, end) in want.items():
+        assert json.loads(days[day]["special_session"]) == [{"open": start, "close": end}]
+        assert "archives.nseindia.com/content/circulars/" in days[day]["description"]
+    assert len([r for r in rows if r["special_session"] is not None]) == len(want)
+
+
+def test_seed_keeps_a_desks_special_session(dsn: str) -> None:
+    add_admin(dsn)
+    q(
+        dsn,
+        """INSERT INTO exchange_holiday (exchange, day, description, special_session) VALUES
+           ('NSE', '2024-11-01', 'desk', '[{"open": "18:01", "close": "19:01"}]')""",
+    )
+    run(holidays.seed(dsn, DAY1))
+    row = q(
+        dsn,
+        "SELECT description, special_session FROM exchange_holiday WHERE day = '2024-11-01' AND exchange = 'NSE'",
+    )[0]
+    assert row["description"] == "desk"
+    assert json.loads(row["special_session"]) == [{"open": "18:01", "close": "19:01"}]
