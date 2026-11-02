@@ -14,7 +14,9 @@ This file is the **single source of truth for what to build next**. Claude Code 
 
 Legend: `deps` = tasks that must be `[x]` first · `needs` = the **only** things you may install or download for this task · `done` = completion check.
 
-Current milestone: **M1**
+Current order (ADR-023, staging VM pending): **M4.1 → M2 → M4**. M1.12 and M3 are blocked: waiting on VM. A task marked **blocked** is skipped by rule 1 until its blocker clears.
+
+Current milestone: **M4.1, then M2**
 
 
 ## M0 — Foundations
@@ -122,20 +124,20 @@ Current milestone: **M1**
   - deps: M1.11b
   - needs: nothing new
   - done: `BM_CorePollTicks` within 3 % of the pre-M1.11b baseline (no inference) on the same machine, at 5,000 and 100 instruments; the 6 inference tests + ASan pass; before/after numbers recorded (owner 2026-11-02: replaces the absolute ≤ 80 ns / 18.0M ticks/s targets, which came from a different session and aren't reproducible here; official absolute baseline set at M1.12 on the staging VM) — 2026-11-02: done. Tests: debug 81/81, ASan+UBSan 71/71, lint-engine; the 6 inference scenarios + a feed-slot test. Interleaved A/B/C runs on the dev laptop (7 rounds × 2 s, median ns/tick, one session): 100 instruments — baseline 71.9, M1.11b 72.3 (+0.6 %), **M1.11c 73.3 (+2.0 %)**; 5,000 — baseline 108.0, M1.11b 134.5 (+24.6 %), **M1.11c 110.8 (+2.7 %)**. Laptop round-to-round spread 98–205 ns at 5,000, so only same-session relative numbers are meaningful here
-- [ ] **M1.12** **Staging:** VM with 2 static IPs, real Kite + Upstox sessions streaming Nifty 50 + NIFTY options
+- [ ] **M1.12** (**blocked: waiting on VM**, ADR-023) **Staging:** VM with 2 static IPs, real Kite + Upstox sessions streaming Nifty 50 + NIFTY options
   - deps: M1.11c
   - needs: Staging VM only; record only Nifty 50 + NIFTY options near expiries
   - done: Tick→screen p95 < 400 ms measured; `make bootstrap C=core` passes on the staging Ubuntu VM; engine benchmarks (`make bench`) run on the staging VM (Linux, core thread pinned) and recorded here as the official absolute baseline for future comparisons (no CI benchmark gating: shared runners are too noisy)
-  - notes: Owner, 2026-11-02. (1) Nightly first: report the latest nightly (sanitizers + fuzz) result before other work; if it failed, fix that first. (2) To resume: merge `main` into `m1.12-staging-wip` and resolve the conflicts, including the ADR numbering (ADR-021 is "Public without license" on main, so the staging ADR is ADR-022) and the Go module path (`github.com/Jitesh25X/vyuha-terminal/gateway` on main). Then stop and wait for the owner to provide the staging VM details.
+  - notes: Owner, 2026-11-02. (1) Nightly first: report the latest nightly (sanitizers + fuzz) result before other work; if it failed, fix that first. (2) To resume: merge `main` into `m1.12-staging-wip` and resolve the conflicts, including the ADR numbering (ADR-021 is "Public without license" on main, so the staging ADR is ADR-022) and the Go module path (`github.com/Jitesh25X/vyuha-terminal/gateway` on main). Then stop and wait for the owner to provide the staging VM details. (3) 2026-11-02: step 2 is done and the WIP is merged to `main` (PR #1), marked WIP in `docs/STAGING.md`, so there's no branch to resume; the rest is waiting on the VM details.
 
 **M1 exit:** live data from both brokers on staging; benchmarks meet NFRs.
-- [ ] M1 exit verified (`/milestone-exit`)
+- [ ] M1 exit verified (`/milestone-exit`) (**blocked: waiting on VM**)
 
 
 ## M2 — Paper OMS & risk gate
 
 - [ ] **M2.1** OMS state machine + `order_event` writer thread + recovery from Postgres
-  - deps: M1 exit
+  - deps: M1.11c, M4.1 (ADR-023)
   - needs: vcpkg: `rapidcheck`
   - done: Property tests: only legal transitions
 - [ ] **M2.2** RiskGate framework (`ApprovedOrder` construct-only-by-gate, rule table, GateContext)
@@ -172,13 +174,15 @@ Current milestone: **M1**
   - done: Playwright: keyboard-only paper trade flow; `OC` row + `B`/`S` opens a pre-filled ticket for that contract (F-MD-3 AC, deferred from M1.10)
 
 **M2 exit:** a full paper trading day on staging with ≥ 50 orders, zero illegal transitions, and every gate rule exercised by tests.
-- [ ] M2 exit verified (`/milestone-exit`)
+- [ ] M2 exit verified (`/milestone-exit`) (**blocked: waiting on VM**; needs the paper day on staging)
 
 
 ## M3 — Live execution
 
+**All of M3 is blocked: waiting on VM (ADR-023).** Resume when the owner sends the VM details, after M1.12.
+
 - [ ] **M3.1** Kite order adapter (place/modify/cancel, tags, market protection, order-update stream, positions/margins) with VCR fixtures
-  - deps: M2 exit
+  - deps: M2 exit, M1.12
   - needs: nothing new (recorded fixtures built from documented example payloads)
   - done: Contract tests
 - [ ] **M3.2** Upstox order adapter (same) + Portfolio Stream Feed
@@ -200,7 +204,7 @@ Current milestone: **M1**
 - [ ] **M3.6** `LIVE_TRADING_ENABLED` guard, live/paper UI distinctions, re-auth flows
   - deps: M3.5
   - needs: nothing new
-  - done: E2E
+  - done: E2E; live trading refuses an account with a private `static_ip` or no `public_static_ip`, and an egress check proves the public IP (added at M4.1: `docs/RUN_LOCAL.md` uses a LAN address, and nothing else stops that reaching live)
 - [ ] **M3.7** Compliance report `COMP`; `AUD` viewer
   - deps: M3.6
   - needs: nothing new
@@ -220,12 +224,20 @@ Current milestone: **M1**
 
 ## M4 — Data, strategies & backtesting
 
-- [ ] **M4.1** Download manager (Kite + Upstox historical, expired options), Parquet lake, dataset catalogue, `DL` panel
-  - deps: M3 exit
-  - needs: Python: aiolimiter, duckdb, pyarrow. **Data:** only the instruments/interval/range in the job spec (start with Nifty 50, 1-min, 2 years)
-  - done: F-RS-1 ACs
-- [ ] **M4.2** Cost schedule seeding (verified, with sources) + cost engine + contract-note tests
+- [x] **M4.1** Upstox historical downloader: job spec, rate-limit-aware chunked fetch, resume, validation, Parquet lake, dataset catalogue, adjusted view on read — 2026-11-02: done against a local fake Upstox server, real run is M4.1a. F-RS-1 ACs: (1) 50 symbols × 2 years × 1-minute: 1,200 requests, 0 HTTP 429 from a fake enforcing the 2,000-per-30-minutes rate (a client 3× too fast gets 429s), real `kill -9` part-way, resume finishes the same job refetching at most the interrupted chunk; (2) re-run: 0 requests, 0 new bars, and with coverage deleted a refetch leaves every file byte-identical; (3) raw never changed (stored row wins, adjusted view computed on read, IST dates). risk-reviewer BLOCK (P0: preflight accepted wildcard addresses; P1s: catalogue crash window, audit gaps, token use unattributed) → fixed → APPROVE. Quant 108 passed + 1 skipped on macOS (real-socket binding, needs 127.0.0.2), gateway tests + lint green
+  - deps: M1.1 (ADR-023: out of order, no M2/M3 dependency)
+  - needs: Python: aiolimiter. **Data:** only the job spec's range. First job: Nifty 50 constituents + NIFTY/BANKNIFTY index, 1-minute from Jan 2022, daily from 2015; nothing more
+  - done: F-RS-1 ACs against a local fake Upstox server (50 symbols × 2 years × 1-minute, no 429, kill -9 resume, re-run fetches 0 new bars, raw never changed)
+- [ ] **M4.1a** First real download on the owner's Upstox account (**blocked: waiting on owner**: Upstox account in `vyuhactl`, daily login, NSE constituents CSV; `docs/RUN_LOCAL.md §6`)
   - deps: M4.1
+  - needs: **Data:** the first job above only
+  - done: both jobs finish with `http_429` = 0; a re-run reports 0 requests; bar counts recorded here
+- [ ] **M4.1b** Rest of the download manager: Kite historical, expired options (`options_expired/`), `POST/GET /data/jobs` + `GET /data/datasets`, `DL` panel
+  - deps: M4.1, M2.9
+  - needs: nothing new. **Data:** only what a job spec names
+  - done: F-RS-1 description complete; API tests; Playwright: `DL` job builder + progress
+- [ ] **M4.2** Cost schedule seeding (verified, with sources) + cost engine + contract-note tests
+  - deps: M2.9 (ADR-023: M2 exit needs staging). Not M4.1b: the cost model needs no downloaded data (owner, 2026-11-02)
   - needs: nothing new
   - done: 5 contract-note tests pass to ₹0.01
 - [ ] **M4.3** nanobind bindings for core (clock, SimBroker, gate, OMS)
@@ -237,24 +249,29 @@ Current milestone: **M1**
   - needs: Python: numba (only if a benchmark shows it is needed)
   - done: F-RS-2 ACs
 - [ ] **M4.5** Backtest engine (fill models, sessions, expiry handling, look-ahead guards)
-  - deps: M4.4
+  - deps: M4.4, M4.1b (the `short_straddle_with_stop` golden test needs expired options)
   - needs: nothing new
   - done: Golden tests for 3 reference strategies
 - [ ] **M4.6** Metrics + report + artifacts; sweeps; walk-forward
   - deps: M4.5
   - needs: nothing new
   - done: F-RS-3 ACs
-- [ ] **M4.7** Strategy lifecycle + approval; paper/live strategy hosting via engine
+  - notes: The backtest report must show the warning "universe: today's Nifty 50 (survivorship bias)" while the universe comes from today's constituents CSV. Known limit, accepted by the owner 2026-11-02; historical constituent lists can come later.
+- [ ] **M4.7** Strategy lifecycle + approval; **paper** strategy hosting via engine
   - deps: M4.6
   - needs: nothing new
-  - done: F-RS-4 ACs
+  - done: F-RS-4 ACs (paper; approval rules tested without a live broker)
+- [ ] **M4.7b** **Live** strategy hosting via engine (**blocked: waiting on M3**, ADR-023)
+  - deps: M4.8, M3 exit
+  - needs: nothing new
+  - done: F-RS-4 ACs (live, owner's account)
 - [ ] **M4.8** Web: `STRAT` (Monaco), `BT` report, `PAY` payoff
   - deps: M4.7
   - needs: npm: @monaco-editor/react (Monaco loaded lazily)
   - done: E2E
 
 **M4 exit:** the same strategy file runs in backtest, paper and live (owner's account, 1 lot) with matching behaviour.
-- [ ] M4 exit verified (`/milestone-exit`)
+- [ ] M4 exit verified (`/milestone-exit`) (**blocked: waiting on M3**; needs M4.7b)
 
 
 ## M5 — Portfolio risk analytics
@@ -469,3 +486,5 @@ Current milestone: **M1**
 - 2026-10-30 — M1.11b — (1) `Tick.last_trade_ts_ns` = 27 (additive; `buf breaking` against main passes). Engine `Tick::last_trade_ts`: Upstox from `ltt` (every mode), Kite from full-mode bytes 44–48; otherwise `md::TradeClock` in the core loop infers it when *that feed's* cumulative day volume rises (fixed-capacity map keyed by (feed, instrument), 2 × `max_instruments`; ADR-020 feeds never compare with each other), carries the last time forward on every later tick, and re-bases on a volume drop (next session, reconnect) without inventing a trade. Broker times win. The value rides in `md_last`, so it survives gateway restarts; the hub now reads it instead of inferring (M1.10's per-gateway inference removed). (2) Done check: Kite/Upstox parser tests, 6 `TradeClock` unit tests, a core-loop stamping test, encoder round-trip incl. the worst-case 512-byte tick; `TestOptionChainLTPIVSurvivesGatewayRestart` (real NATS KV, fresh hub) passes with a fake quant and, with `VYUHA_TEST_QUANT_URL`, against a running `vyuha-quant serve` (CE IV from LTP after restart; PE without a known trade has none). (3) Verified locally only (owner: no uploads): engine debug 80/80 and ASan+UBSan 70/70, `make lint-engine`, 60 s fuzz of both parsers (~37M / 17M runs, clean), gateway 14/14 with integrations, quant 66, web 50, e2e 6/6 (60 fps), invariants. Linux/GCC (CI) not run. (4) **Cost:** `BM_CorePollTicks` 18.0M → 16.6M ticks/s at 100 instruments (−8 %), 13.8M → 7.4M at 5,000 (−46 %, ≈ 73 → 134 ns/tick): the extra map is a cache miss at large instrument counts. Far inside the 50 µs p99 normalize budget; if it matters later, keep the per-feed trade state in the last-value book's entry (already in cache) instead of a separate map. (5) Fake feed and fixtures unchanged (the Kite fixture already carried a last-trade time at offset 44).
 - 2026-10-31 — M1.12 (prep; task open until run on the VM) — (1) **Owner decision ADR-022:** Docker Compose (owner's choice over native systemd), with Vyuha's services on the host network so the loopback-only engine gRPC and quant API rules hold; data stores on the bridge, 127.0.0.1 ports. `deploy/staging/`: four Dockerfiles (digest-pinned bases), compose file, Caddyfile, `init-env.sh` (secrets never printed or on a command line), `roles.sql` (service login roles, verified in a rolled-back transaction: INSERT-only on audit_event), systemd timers for the 08:00 sync and 08:45 ban check (deferred from M1.1); `make staging-build`, `make proto-fresh`; runbook `docs/STAGING.md`. Compose config validated locally; **the images were not built here** (no base-image downloads before the VM, lean rule) — first build happens on the VM. (2) **Measuring tool for the done check:** `SYS` panel — tick → screen p50/p95/p99 + histogram from engine `recv_ts` to paint, on the server clock via Ping/Pong offset (lowest-RTT sample of the last 12, error ≤ RTT/2), plus exchange → screen; perf e2e asserts SYS p95 < 400 ms on the fake feed (16 ms there; no conflation). (3) **Daily broker login UI** (M1.8 had only the API): `GET /brokers/accounts` (mapped accounts; all for admin/risk; expired tokens read as `awaiting_login`; `can_login` per RBAC) and status-bar LOGIN buttons, plus the `/terminal?broker_login=…` toast; e2e follows the button to an intercepted Kite login URL (no request reaches Kite). (4) Still owner-only: provisioning the VM and IPs, broker app registration, daily logins, the 15-minute measurement and `make bootstrap C=core` on Ubuntu. Not covered: engine restart restoring sessions from stored tokens (log in again), ClickHouse per-service users, recording allowlist (the recorder stores whatever is subscribed — subscribe only the M1.12 universe).
 - 2026-11-02 — CI cost clean-up (owner request, before M1.12) — (1) `scripts/ci-changes.sh` (plain git) gates the service jobs: engine on `engine/` or `proto/`; gateway on `gateway/`, `proto/` or `db/`; quant on `quant/` or `db/`; web on `web/`, `gateway/`, `proto/` or `db/` (its e2e runs the gateway); Makefile, `scripts/`, workflows, the dev compose file or `.env.example` run everything, as do manual runs and unknown bases; docs-only changes run just the hygiene job. `ci-ok` treats path-skipped jobs as passing and still fails on any failure/cancel (or if `changes` itself fails). (2) Engine jobs moved to a reusable `engine.yml` (`workflow_call`, `presets` input): `ci.yml` runs the debug preset (tests + lint-engine); the new `nightly.yml` (03:00 IST, manual too, skipped when main had no commits in 26 h) runs ASan+UBSan and TSan and fuzzes both parsers for 10 min each (timeout 35, crash files kept on cancel). (3) Concurrency: superseded PR runs cancelled (ci, proto); nightly runs never overlap. (4) Caches were already keyed by lockfiles (a PR without dependency changes restores main's caches and saves nothing); the per-run clang install for fuzzing now happens nightly only. (5) Not validated with actionlint (its download was blocked here); reviewed by hand — the first run on the new repo is the real check.
+- 2026-11-02 — M4.1 — (1) **Split by owner's scope ("Upstox historical downloader"):** Kite, expired options, `POST/GET /data/*` and the `DL` panel moved to new M4.1b; the first real run is M4.1a, waiting on the owner's Upstox login. (2) **Token path:** `vyuhactl download run` decrypts the access token and passes it on stdin with an allowlisted environment, because Python would need `cryptography` (not on `needs`) and quant shouldn't hold `VYUHA_MASTER_KEY`. Every decrypt is audited (`broker.token.opened`). `gateway/CLAUDE.md` still says secrets are decrypted only for `StartSession`: owner to approve changing that rule. (3) **Pace, not buckets:** one request per 1.125 s, because a 1,600-per-30-minutes token bucket can send 3,200 in one window. (4) Migration 000007: `download_coverage` (finished ranges, including ones with no bars), unique `dataset.path`, and a CHECK refusing wildcard/multicast `static_ip`/`backup_static_ip`. (5) `to` is clamped to yesterday IST, since a recorded chunk is never refetched. (6) Not installed from the `needs` line: duckdb, pyarrow (Polars covers both). ClickHouse loading is not built (optional per STRATEGY_SDK §1). (7) **Constituents are a manual CSV** (ADR-019 approach), today's membership only, so history has survivorship bias. (8) **Known limits (reviewer P2s, not fixed):** `exchange_holiday.special_session` is empty and the table is seeded from 2025 on, so 1-minute special sessions are not stored until filled (chunks stay incomplete, see owner decisions below); a stopped job stays `running` with no terminal audit event until the next run; a relative `DATA_LAKE_DIR` depends on the working directory; changing `static_ip` locally is raw, unaudited SQL. (9) `RUN_LOCAL.md` steps checked on a throwaway database (migrate, account create, login refusal, plan on real instruments, gateway + engine boot). Upstox's acceptance of an `http://127.0.0.1` redirect and the browser login itself are unverified: no account exists in the dev database.
+- 2026-11-02 — M4.1 owner decisions — (1) **Token rule:** `gateway/CLAUDE.md` now allows decrypting secrets for `StartSession` and `vyuhactl download run` only, with conditions (stdin or pipe, zeroed, audited, never logged). `OpenAccessToken` returns bytes; the buffer is zeroed once the pipe has it, not at job end, since a job can run for an hour. Python can't zero its `str`, so its copy lasts until exit. (2) **Other decrypt sites found while writing that rule:** TOTP at login, API key for the broker login URL, API key + secret for the token exchange. They're older than the rule and needed for login, so they're unchanged and listed as DECISIONS D-16. (3) **Incomplete downloads:** `chunks_incomplete` > 0 now exits 3 through `vyuhactl`, reports `ok: false`, and leaves the job `failed` (`DOWNLOAD_INCOMPLETE`) with a `data.download.failed` audit event rather than `done`; a re-run resumes the same job. (4) **Deps:** M4.2 no longer depends on M4.1b; M4.5 does. (5) **Survivorship bias:** stays a known limit; M4.6's report must show the warning. (6) **Merged:** PR #1 (staging WIP) and this branch. (7) **risk-reviewer re-run on the four hardening changes: BLOCK** (P0: `::ffff:0.0.0.0` passed the Go check and the CHECK, and the broker token exchange would have bound it unpinned; P1s: the CHECK missed masked and mapped addresses; a failed `F_FULLFSYNC` could be hidden by the `fsync` fallback; tests missed backup/public IPs; `bad_ohlc` rows left a permanent hole reported as success). Fixed: `pinsOneHost` + a guard in `boundClient`, the CHECK in 000007 rewritten (it isn't on `main` or applied anywhere: dev was at 6), fallback only on "unsupported" errors, new directories flushed, failed chunks not counted in `progress.done`, pace override refused for a non-loopback API inside `run`, `UV_` allowlist. **A chunk is now incomplete if** it has `malformed` or `bad_ohlc` rows (now including negative volume/OI) **or a day whose bars all fall outside known sessions** (`session_days_unplaced`: a Muhurat session with no window in `exchange_holiday`). A stray 15:30 candle on a normal day stays a counted drop. Consequence: **until `exchange_holiday.special_session` covers them, the 2022+ 1-minute job exits 3 with those chunks left to retry**, so M4.1a's first run may need those windows filled. Not fixed (P2): a 200 with empty candles is covered forever and only reported as `days_without_bars` (owner decision); a duplicate timestamp with different prices keeps the first row; a resumed run overwrites `progress.new_bars`.

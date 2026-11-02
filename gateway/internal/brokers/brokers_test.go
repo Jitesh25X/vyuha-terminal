@@ -147,9 +147,39 @@ func TestExchangeRefusesStaticIPNotOnHost(t *testing.T) {
 	hit := false
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit = true }))
 	defer srv.Close()
-	c := boundClient(netip.MustParseAddr("203.0.113.7")) // TEST-NET-3, never local
-	_, err := exchangeKite(context.Background(), c, srv.URL, "k", "s", "rt")
-	if !errors.Is(err, ErrSourceIP) || hit {
-		t.Fatalf("err = %v, request reached server = %v", err, hit)
+	// TEST-NET-3 is never local; the others would bind and let the OS choose the source.
+	for _, ip := range []string{"203.0.113.7", "0.0.0.0", "::", "::ffff:0.0.0.0", "::ffff:224.0.0.1"} {
+		c := boundClient(netip.MustParseAddr(ip))
+		_, err := exchangeKite(context.Background(), c, srv.URL, "k", "s", "rt")
+		if !errors.Is(err, ErrSourceIP) || hit {
+			t.Fatalf("%s: err = %v, request reached server = %v", ip, err, hit)
+		}
+	}
+}
+
+func TestNewAccountRefusesAddressesThatPinNothing(t *testing.T) {
+	account := func() NewAccount {
+		return NewAccount{Broker: "upstox", ClientCode: "UP1", HolderName: "X", StaticIP: "10.0.0.5", APIKey: "k", APISecret: "s"}
+	}
+	fields := map[string]func(*NewAccount, string){
+		"static": func(a *NewAccount, ip string) { a.StaticIP = ip },
+		"public": func(a *NewAccount, ip string) { a.PublicIP = ip },
+		"backup": func(a *NewAccount, ip string) { a.BackupIP = ip },
+	}
+	for name, set := range fields {
+		for _, ip := range []string{"0.0.0.0", "::", "224.0.0.1", "ff02::1", "::ffff:0.0.0.0", "::ffff:224.0.0.1", "::%lo0"} {
+			a := account()
+			set(&a, ip)
+			if _, err := a.params(); err == nil {
+				t.Errorf("%s IP %s accepted", name, ip)
+			}
+		}
+		for _, ip := range []string{"10.0.0.6", "2001:db8::1", "::ffff:10.0.0.6"} {
+			a := account()
+			set(&a, ip)
+			if _, err := a.params(); err != nil {
+				t.Errorf("%s IP %s refused: %v", name, ip, err)
+			}
+		}
 	}
 }
