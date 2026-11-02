@@ -26,6 +26,12 @@ target_link_libraries(vyuha_tests PRIVATE vyuha::core vyuha::oms rapidcheck vyuh
 gtest_discover_tests(vyuha_tests DISCOVERY_TIMEOUT 60)
 target_compile_definitions(vyuha_tests PRIVATE VYUHA_FIXTURES_DIR="${PROJECT_SOURCE_DIR}/fixtures")
 
+# Order event writer and recovery on a real Postgres, in every preset (needs VYUHA_TEST_POSTGRES_URL).
+add_executable(vyuha_pg_tests pg_order_store_test.cc)
+target_link_libraries(vyuha_pg_tests PRIVATE vyuha_oms_pg libpqxx::pqxx vyuha_warnings Threads::Threads GTest::gtest_main)
+target_compile_definitions(vyuha_pg_tests PRIVATE VYUHA_MIGRATIONS_DIR="${PROJECT_SOURCE_DIR}/../db/migrations")
+gtest_discover_tests(vyuha_pg_tests DISCOVERY_TIMEOUT 60)
+
 # Reference tests against protoc-generated classes for the vendored Upstox schema. Not built with
 # sanitizers: vcpkg's abseil/protobuf aren't instrumented and abseil's layouts change under ASan.
 if(NOT VYUHA_SANITIZER)
@@ -44,8 +50,8 @@ if(NOT VYUHA_SANITIZER)
   gtest_discover_tests(vyuha_reference_tests DISCOVERY_TIMEOUT 60)
 
   # gRPC adapter end to end (in-process server + client stub).
-  add_executable(vyuha_rpc_tests engine_service_test.cc pg_instrument_directory_test.cc pg_order_store_test.cc)
-  target_link_libraries(vyuha_rpc_tests PRIVATE vyuha_rpc vyuha_pg vyuha_oms_pg libpqxx::pqxx vyuha_warnings GTest::gtest_main)
+  add_executable(vyuha_rpc_tests engine_service_test.cc pg_instrument_directory_test.cc)
+  target_link_libraries(vyuha_rpc_tests PRIVATE vyuha_rpc vyuha_pg libpqxx::pqxx vyuha_warnings GTest::gtest_main)
   target_compile_definitions(vyuha_rpc_tests PRIVATE VYUHA_MIGRATIONS_DIR="${PROJECT_SOURCE_DIR}/../db/migrations")
   gtest_discover_tests(vyuha_rpc_tests DISCOVERY_TIMEOUT 60)
 endif()
