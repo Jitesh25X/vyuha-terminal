@@ -104,7 +104,8 @@ func exitCode(err error) int {
 
 // jobEnvPrefixes is everything a download job may see of this process's environment.
 var jobEnvPrefixes = []string{
-	"PATH=", "HOME=", "USER=", "TMPDIR=", "LANG=", "LC_", "TZ=", "UV_", "VIRTUAL_ENV=",
+	"PATH=", "HOME=", "USER=", "TMPDIR=", "LANG=", "LC_", "TZ=", "VIRTUAL_ENV=",
+	"UV_CACHE_DIR=", "UV_PROJECT_ENVIRONMENT=", "UV_PYTHON=", "UV_FROZEN=", "UV_LOCKED=", "UV_NO_SYNC=", "UV_OFFLINE=", // not UV_PUBLISH_TOKEN or UV_INDEX_*
 	"VYUHA_ENV=", "POSTGRES_URL=", "DATA_LAKE_DIR=", "RISK_FREE_", "IV_", "UPSTOX_API_BASE=", "DOWNLOAD_PACE_S=",
 }
 

@@ -120,12 +120,20 @@ func (a NewAccount) params() (store.CreateBrokerAccountParams, error) {
 		if err != nil {
 			return p, fmt.Errorf("%s %q is not an IP address", f.name, f.raw)
 		}
-		if ip.IsUnspecified() || ip.IsMulticast() { // would bind without pinning the source address (invariant 4)
+		if !pinsOneHost(ip) {
 			return p, fmt.Errorf("%s %q must name one address of this host", f.name, f.raw)
 		}
 		*f.dst = &ip
 	}
 	return p, nil
+}
+
+// pinsOneHost reports whether binding to ip pins the source address (invariant 4). A wildcard or multicast
+// address doesn't, including its IPv4-mapped form: ::ffff:0.0.0.0 binds and lets the OS choose. The same
+// rule is on the database (migration 000007).
+func pinsOneHost(ip netip.Addr) bool {
+	ip = ip.Unmap().WithZone("")
+	return ip.IsValid() && !ip.IsUnspecified() && !ip.IsMulticast()
 }
 
 // ErrNoLiveToken means the account has no unexpired access token: the user must do the daily login.

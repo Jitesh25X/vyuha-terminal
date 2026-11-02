@@ -140,11 +140,12 @@ a crash or the 03:30 IST token expiry (`BROKER_TOKEN_EXPIRED`; log in first). A 
 0 requests. Each morning a re-run fetches only the days since the last one.
 
 The final JSON line reports `requests`, `http_429` (should be 0), `new_bars`, `days_without_bars` (logged,
-never filled), `dropped` (rows that failed validation) and `chunks_incomplete` (had unreadable rows).
+never filled), `dropped` (rows that failed validation) and `chunks_incomplete` (had rejected rows: unreadable, invalid, or a whole day outside any known session).
 
 **Exit code 3 means the download is incomplete**, and the report says `"ok": false`. `chunks_incomplete` chunks
-weren't recorded, so run the same command again to retry them. Exit code 1 is any other failure. Bars from before 2025 on special sessions such as
-Muhurat trading count as outside the session, because the holiday table has no such windows yet.
+weren't recorded, so run the same command again to retry them. Exit code 1 is any other failure. Sessions such as Muhurat
+trading have no windows in the holiday table yet, so a chunk holding one stays incomplete (exit 3,
+`session_days_unplaced` in the report) until those windows are filled.
 
 ## 7. Troubleshooting
 | Problem | Fix |

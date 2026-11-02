@@ -3,7 +3,8 @@
 `download_coverage` is the resume point. A chunk is written to the lake first and then recorded in one
 transaction with its catalogue rows and the job's progress, so after a kill the chunk is either recorded
 or fetched again: its bars merge away as duplicates and the catalogue catches up with the files. A re-run
-plans only the dates nobody has finished. A chunk with unreadable rows isn't recorded, so a re-run retries it.
+plans only the dates nobody has finished. A chunk with rejected rows (unreadable, invalid, or a whole day outside any
+known session) isn't recorded, so a re-run retries it.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import polars as pl
 from aiolimiter import AsyncLimiter
@@ -86,6 +88,12 @@ class Dropped:
     bad_ohlc: int = 0
     duplicates: int = 0
     malformed: int = 0
+    session_days_unplaced: int = 0  # days with bars but none inside a known session: a special session?
+
+    @property
+    def rejected(self) -> int:
+        """Drops that leave a hole in the chunk. Routine ones (a 15:30 candle, a duplicate) don't."""
+        return self.malformed + self.bad_ohlc + self.session_days_unplaced
 
 
 @dataclass(slots=True)
@@ -93,7 +101,9 @@ class Totals:
     requests: int = 0
     http_429: int = 0
     new_bars: int = 0
-    chunks_incomplete: int = 0  # had unreadable rows, so not recorded; a re-run fetches them again
+    chunks_incomplete: int = (
+        0  # had rejected rows (Dropped.rejected), so not recorded; a re-run fetches them again
+    )
     days_without_bars: int = 0
     dropped: Dropped = field(default_factory=Dropped)
 
@@ -171,6 +181,7 @@ def normalise(
 ) -> pl.DataFrame:
     """Validates one chunk: sorted, deduplicated, inside the session, sane OHLC. Bad rows are counted."""
     rows: dict[datetime, tuple[Any, ...]] = {}
+    outside_days: set[date] = set()
     for c in candles:
         try:
             parsed = datetime.fromisoformat(c[0])
@@ -182,16 +193,18 @@ def normalise(
         except (ValueError, TypeError, IndexError, ArithmeticError):
             dropped.malformed += 1
             continue
-        if not 0 < lo <= min(o, cl) <= max(o, cl) <= hi:
+        if not 0 < lo <= min(o, cl) <= max(o, cl) <= hi or volume < 0 or oi < 0:
             dropped.bad_ohlc += 1
             continue
         if interval != "day" and not _in_session(ts, holidays):
             dropped.outside_session += 1
+            outside_days.add(ts.date())
             continue
         if ts in rows:
             dropped.duplicates += 1
             continue
         rows[ts] = (ts.astimezone(UTC), o, hi, lo, cl, volume, oi)
+    dropped.session_days_unplaced += len(outside_days - {k.date() for k in rows})
     if not rows:
         return empty_bars()
     ordered = [rows[k] for k in sorted(rows)]
@@ -354,6 +367,8 @@ async def run(
     pace: float | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    if pace is not None and urlsplit(base_url).hostname not in ("127.0.0.1", "localhost"):
+        raise ValueError("a pace override is for a loopback API only: the real one gets the documented pace")
     conn = await db.connect(dsn)
     try:
         acct = await conn.fetchrow(
@@ -409,14 +424,15 @@ async def run(
             )
 
         step = pace if pace is not None else pace_seconds(UPSTOX_RATE)
-        client = UpstoxHistory(token, source_ip, AsyncLimiter(1, step), base_url=base_url)
+        client: UpstoxHistory | None = None
         totals = Totals()
         try:
+            client = UpstoxHistory(token, source_ip, AsyncLimiter(1, step), base_url=base_url)
             for c in chunks:
                 raw = await client.candles(c.instrument.upstox_key, limit, c.start, c.end)
-                malformed_before = totals.dropped.malformed
+                rejected_before = totals.dropped.rejected
                 bars = normalise(raw, spec.interval, holidays, totals.dropped)
-                complete = totals.dropped.malformed == malformed_before
+                complete = totals.dropped.rejected == rejected_before
                 writes = write_bars(lake_dir, SOURCE, spec.interval, c.instrument.id, bars)
                 totals.new_bars += sum(w.new_rows for w in writes)
                 gaps = _weekdays_without_bars(bars, c, holidays)
@@ -431,8 +447,9 @@ async def run(
                     )
                 if not complete:
                     totals.chunks_incomplete += 1
-                    log.error("unreadable rows: %s %s..%s not recorded", c.instrument.label, c.start, c.end)
-                done += 1
+                    log.error("rejected rows: %s %s..%s not recorded", c.instrument.label, c.start, c.end)
+                else:
+                    done += 1
                 async with conn.transaction():
                     for w in writes:
                         await _upsert_dataset(conn, spec.interval, c.instrument.id, w)
@@ -462,11 +479,12 @@ async def run(
             await _fail(conn, job_id, who, error)
             raise
         finally:
-            totals.requests, totals.http_429 = client.requests, client.rate_limited
-            await client.aclose()
+            if client is not None:
+                totals.requests, totals.http_429 = client.requests, client.rate_limited
+                await client.aclose()
             log.info("download totals: %s", asdict(totals))
         if totals.chunks_incomplete:  # not done: stays resumable, and the CLI exits non-zero
-            error = f"DOWNLOAD_INCOMPLETE: {totals.chunks_incomplete} chunk(s) had unreadable rows, run again"
+            error = f"DOWNLOAD_INCOMPLETE: {totals.chunks_incomplete} chunk(s) had rejected rows, run again"
             await _fail(conn, job_id, {**who, **asdict(totals)}, error)
         else:
             async with conn.transaction():

@@ -13,6 +13,8 @@ import (
 func TestPipeTokenUsesStdinOnly(t *testing.T) {
 	t.Setenv("VYUHA_MASTER_KEY", "master-key-value")
 	t.Setenv("ANTHROPIC_API_KEY", "other-secret-value")
+	t.Setenv("UV_PUBLISH_TOKEN", "publish-token-value")
+	t.Setenv("UV_INDEX_X_PASSWORD", "index-password-value")
 	t.Setenv("POSTGRES_URL", "postgres://kept")
 	dir := t.TempDir()
 	script := `cat > "$1/stdin"; printf '%s' "$*" > "$1/argv"; env > "$1/env"; echo job log; echo job error >&2`
@@ -45,7 +47,8 @@ func TestPipeTokenUsesStdinOnly(t *testing.T) {
 	if strings.Contains(logs, secret) {
 		t.Error("token visible in the logs")
 	}
-	if env := read("env"); strings.Contains(env, "master-key-value") || strings.Contains(env, "other-secret-value") {
+	if env := read("env"); strings.Contains(env, "master-key-value") || strings.Contains(env, "other-secret-value") ||
+		strings.Contains(env, "publish-token-value") || strings.Contains(env, "index-password-value") {
 		t.Error("the job received a secret from the environment")
 	}
 	if !strings.Contains(read("env"), "POSTGRES_URL=postgres://kept") {

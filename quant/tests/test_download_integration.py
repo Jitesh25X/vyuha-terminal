@@ -4,6 +4,8 @@ that enforces the documented limits (scaled to the test's pace), on a real datab
 from __future__ import annotations
 
 import asyncio
+import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -48,7 +50,8 @@ class FakeUpstox(ThreadingHTTPServer):
         self.times: deque[float] = deque()
         self.http_429 = 0
         self.expire_after: int | None = None
-        self.corrupt_first: int = 0  # this many replies carry an unreadable row
+        self.corrupt_first: int = 0  # this many replies carry corrupt_row
+        self.corrupt_row: list[Any] = ["garbage"]
         self.peers: set[str] = set()
         self.on_request: Callable[[], None] | None = None
 
@@ -92,7 +95,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reply(429, {"status": "error"})
         _, _, _, _key, _unit, _value, to, frm = self.path.split("/")
         if corrupt:
-            return self._reply(200, {"status": "success", "data": {"candles": [["garbage"]]}})
+            return self._reply(200, {"status": "success", "data": {"candles": [self.server.corrupt_row]}})
         self._reply(
             200,
             {
@@ -481,20 +484,35 @@ def test_crash_between_lake_write_and_commit_leaves_a_correct_catalogue(
         assert catalogue[rel] == (hashlib.sha256(f.read_bytes()).hexdigest(), pl.read_parquet(f).height)
 
 
-def test_unreadable_rows_keep_the_chunk_out_of_coverage_so_a_rerun_retries(
-    dsn: str, fake: FakeUpstox, tmp_path: Path
+@pytest.mark.parametrize(
+    ("row", "dropped_as"),
+    [
+        (["garbage"], "malformed"),
+        (["2024-02-01T09:15:00+05:30", 100.0, 90.0, 110.0, 100.0, 1, 0], "bad_ohlc"),  # high below low
+        (["2024-02-01T09:15:00+05:30", 100.0, 101.0, 99.0, 100.0, -1, 0], "bad_ohlc"),  # negative volume
+        (
+            ["2024-02-04T18:15:00+05:30", 100.0, 101.0, 99.0, 100.0, 1, 0],
+            "session_days_unplaced",
+        ),  # Muhurat-like
+    ],
+)
+def test_rejected_rows_keep_the_chunk_out_of_coverage_so_a_rerun_retries(
+    dsn: str, fake: FakeUpstox, tmp_path: Path, row: list[Any], dropped_as: str
 ) -> None:
     account = asyncio.run(_seed(dsn))
     spec = _spec(tmp_path, to="2024-02-29", constituents_csv=None, symbols=["NSE:SYM0"])
     fake.corrupt_first = 1
+    fake.corrupt_row = row
     p = _start(dsn, fake, tmp_path, spec, account)
     report, _ = _finish(p)
-    assert (report["chunks_incomplete"], report["dropped"]["malformed"]) == (1, 1)
+    assert (report["chunks_incomplete"], report["dropped"][dropped_as]) == (1, 1)
     assert p.returncode == cli.EXIT_INCOMPLETE  # a partial download never looks fine
     assert report["ok"] is False
     job = asyncio.run(_one(dsn, "SELECT status, error FROM download_job"))
     assert job["status"] == "failed"
     assert "DOWNLOAD_INCOMPLETE" in job["error"]
+    progress = asyncio.run(_one(dsn, "SELECT progress FROM download_job"))["progress"]
+    assert json.loads(progress)["done"] == report["chunks"] - 1  # a failed job never reads as fully done
     assert [e["action"] for e in asyncio.run(_audit_actions(dsn))] == [
         "data.download.start",
         "data.download.failed",
@@ -586,3 +604,47 @@ async def _insert_account(dsn: str, ip: str) -> None:
         )
     finally:
         await conn.close()
+
+
+def test_pace_override_is_refused_for_the_real_api(dsn: str, tmp_path: Path) -> None:
+    spec = download.JobSpec.model_validate({"interval": "day", "from": "2024-01-01", "symbols": ["NSE:SYM0"]})
+    with pytest.raises(ValueError, match="loopback"):
+        asyncio.run(
+            download.run(
+                dsn, spec, tmp_path, account="x", username="owner", token=TOKEN, lake_dir=tmp_path, pace=0.001
+            )
+        )
+
+
+def test_a_failed_flush_is_never_hidden_by_the_fsync_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing(errno_: int) -> Callable[[int, int], int]:
+        def fcntl_(_fd: int, _cmd: int) -> int:
+            raise OSError(errno_, "flush")
+
+        return fcntl_
+
+    synced: list[int] = []
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(os, "fsync", synced.append)
+    monkeypatch.setattr(fcntl, "F_FULLFSYNC", 51, raising=False)
+    f = tmp_path / "f"
+    f.write_bytes(b"x")
+    monkeypatch.setattr(fcntl, "fcntl", failing(errno.EIO))
+    with pytest.raises(OSError, match="flush"):
+        lake._flush(f)
+    assert not synced
+    monkeypatch.setattr(fcntl, "fcntl", failing(errno.ENOTSUP))
+    lake._flush(f)
+    assert len(synced) == 1
+
+
+def test_new_directories_are_flushed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    flushed: list[Path] = []
+    monkeypatch.setattr(lake, "_flush", flushed.append)
+    lake._make_dirs(tmp_path / "a" / "b")
+    assert flushed == [tmp_path / "a", tmp_path]
+    flushed.clear()
+    lake._make_dirs(tmp_path / "a" / "b")
+    assert not flushed

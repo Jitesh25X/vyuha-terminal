@@ -3,8 +3,10 @@ adjusted series is computed on read from separately stored corporate-action fact
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
+import logging
 import os
 import sys
 from collections.abc import Iterable
@@ -14,6 +16,8 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 
 import polars as pl
+
+log = logging.getLogger("vyuha.lake")
 
 IST_NAME = "Asia/Kolkata"
 PRICE_UNITS = Decimal(10_000)  # engine `Price`: ₹1 = 10,000 units
@@ -80,12 +84,15 @@ def write_bars(
         merged = existing
         if not fresh.is_empty():
             merged = pl.concat([existing, fresh.select(list(SCHEMA))]).sort("ts")
-            path.parent.mkdir(parents=True, exist_ok=True)
+            _make_dirs(path.parent)
             for stale in path.parent.glob(".part-0.*.tmp"):  # left by a killed run
                 stale.unlink()
             tmp = path.parent / f".part-0.{os.getpid()}.tmp"
             merged.write_parquet(tmp, compression="zstd", statistics=True)
             _replace(tmp, path)
+        else:  # a killed or failed run may have left this file's rename unflushed
+            _flush(path)
+            _flush(path.parent)
         out.append(
             PartitionWrite(
                 path=rel.as_posix(),
@@ -99,6 +106,21 @@ def write_bars(
     return out
 
 
+_FULLFSYNC_UNSUPPORTED = (errno.ENOTSUP, errno.EINVAL, errno.ENOTTY)
+
+
+def _make_dirs(path: Path) -> None:
+    """Creates path and flushes each new entry: a recorded chunk's file must survive power loss."""
+    new: list[Path] = []
+    p = path
+    while not p.exists():
+        new.append(p)
+        p = p.parent
+    path.mkdir(parents=True, exist_ok=True)
+    for d in new:
+        _flush(d.parent)
+
+
 def _flush(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY)
     try:
@@ -106,8 +128,10 @@ def _flush(path: Path) -> None:
             try:
                 fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
                 return
-            except OSError:  # a disk that doesn't support it
-                pass
+            except OSError as e:
+                if e.errno not in _FULLFSYNC_UNSUPPORTED:  # a real write failure: never record this chunk
+                    raise
+                log.warning("F_FULLFSYNC unsupported on this disk, using fsync")
         os.fsync(fd)
     finally:
         os.close(fd)

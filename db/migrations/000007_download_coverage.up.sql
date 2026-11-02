@@ -14,10 +14,12 @@ CREATE TABLE download_coverage (
   CHECK (from_date <= to_date)
 );
 
--- Invariant 4: a wildcard or multicast address binds without pinning the source, on every path.
+-- Invariant 4: a wildcard or multicast address binds without pinning the source, on every path. Tests
+-- host(ip), the address alone, so masked forms (0.0.0.0/8) and IPv4-mapped ones (::ffff:0.0.0.0) are refused
+-- too. Matches pinsOneHost in gateway/internal/brokers/accounts.go.
 ALTER TABLE broker_account
-  ADD CONSTRAINT broker_account_static_ip_one_host CHECK (static_ip IS NULL OR NOT (static_ip <<= '0.0.0.0/32' OR static_ip <<= '::/128' OR static_ip <<= '224.0.0.0/4' OR static_ip <<= 'ff00::/8')),
-  ADD CONSTRAINT broker_account_backup_static_ip_one_host CHECK (backup_static_ip IS NULL OR NOT (backup_static_ip <<= '0.0.0.0/32' OR backup_static_ip <<= '::/128' OR backup_static_ip <<= '224.0.0.0/4' OR backup_static_ip <<= 'ff00::/8'));
+  ADD CONSTRAINT broker_account_static_ip_one_host CHECK (static_ip IS NULL OR NOT host(static_ip)::inet <<= ANY (ARRAY['0.0.0.0/32', '::/128', '224.0.0.0/4', 'ff00::/8', '::ffff:0.0.0.0/128', '::ffff:224.0.0.0/100']::inet[])),
+  ADD CONSTRAINT broker_account_backup_static_ip_one_host CHECK (backup_static_ip IS NULL OR NOT host(backup_static_ip)::inet <<= ANY (ARRAY['0.0.0.0/32', '::/128', '224.0.0.0/4', 'ff00::/8', '::ffff:0.0.0.0/128', '::ffff:224.0.0.0/100']::inet[]));
 
 -- One catalogue row per lake file; a later chunk updates its row.
 CREATE UNIQUE INDEX dataset_path_uniq ON dataset(path);

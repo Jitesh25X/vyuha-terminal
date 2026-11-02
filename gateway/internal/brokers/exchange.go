@@ -42,11 +42,15 @@ type grant struct {
 // proxy would change the egress address.
 func boundClient(sourceIP netip.Addr) *http.Client {
 	d := &net.Dialer{Timeout: 5 * time.Second, LocalAddr: &net.TCPAddr{IP: sourceIP.AsSlice()}}
+	dial := d.DialContext
+	if !pinsOneHost(sourceIP) { // the OS would choose the source; reported as ErrSourceIP, nothing sent
+		dial = func(context.Context, string, string) (net.Conn, error) { return nil, syscall.EADDRNOTAVAIL }
+	}
 	return &http.Client{
 		Timeout: exchangeTimeout,
 		Transport: &http.Transport{
 			Proxy:               nil,
-			DialContext:         d.DialContext,
+			DialContext:         dial,
 			ForceAttemptHTTP2:   true,
 			TLSHandshakeTimeout: 5 * time.Second,
 			MaxIdleConns:        1,

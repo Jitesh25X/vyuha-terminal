@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -510,6 +511,13 @@ func TestOpenAccessToken(t *testing.T) {
 	if got := f.auditActions(id); len(got) == 0 || !strings.HasPrefix(got[len(got)-1], "broker.token.opened") {
 		t.Fatalf("audit = %v", got)
 	}
+	var opened int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM audit_event WHERE action = 'broker.token.opened' AND entity_id = $1`, id).Scan(&opened); err != nil || opened != 1 {
+		t.Fatalf("one decrypt, %d audit events, %v", opened, err)
+	}
+	if _, token, err := OpenAccessToken(ctx, failingAudit{f.pool}, f.env, id, "owner", "test", now); err == nil || token != nil {
+		t.Fatalf("audit failed but got token %q, err %v", token, err)
+	}
 	var leaks int
 	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM audit_event WHERE payload::text LIKE '%' || $1 || '%'`, secret).Scan(&leaks); err != nil || leaks != 0 {
 		t.Fatalf("token in the audit log: %d rows, %v", leaks, err)
@@ -517,5 +525,40 @@ func TestOpenAccessToken(t *testing.T) {
 	f.exec(`UPDATE broker_account SET status = 'disabled', token_expires_at = $1 WHERE id = $2`, expires.Add(time.Hour), id)
 	if _, _, err := OpenAccessToken(ctx, f.pool, f.env, id, "owner", "test", now); err == nil || errors.Is(err, ErrNoLiveToken) {
 		t.Fatalf("disabled: %v", err)
+	}
+}
+
+// failingAudit makes every audit insert fail, as a dead audit table would.
+type failingAudit struct{ store.DBTX }
+
+func (f failingAudit) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, "audit_event") {
+		return errRow{}
+	}
+	return f.DBTX.QueryRow(ctx, sql, args...)
+}
+
+type errRow struct{}
+
+func (errRow) Scan(...any) error { return errors.New("audit unavailable") }
+
+func TestDatabaseRefusesAddressesThatPinNothing(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	id := f.account("upstox", "UP1", "key", "secret", "127.0.0.1")
+	for _, column := range []string{"static_ip", "backup_static_ip"} {
+		for _, ip := range []string{
+			"0.0.0.0", "::", "224.0.0.1", "ff02::1", "::ffff:0.0.0.0", "::ffff:224.0.0.1",
+			"0.0.0.0/8", "0.0.0.0/0", "::/64", "224.0.0.1/2", "ff02::1/4",
+		} {
+			if _, err := f.pool.Exec(ctx, `UPDATE broker_account SET `+column+` = $1::inet WHERE id = $2`, ip, id); err == nil {
+				t.Errorf("%s = %s accepted", column, ip)
+			}
+		}
+		for _, ip := range []string{"10.0.0.6", "2001:db8::1", "::ffff:10.0.0.6"} {
+			if _, err := f.pool.Exec(ctx, `UPDATE broker_account SET `+column+` = $1::inet WHERE id = $2`, ip, id); err != nil {
+				t.Errorf("%s = %s refused: %v", column, ip, err)
+			}
+		}
 	}
 }

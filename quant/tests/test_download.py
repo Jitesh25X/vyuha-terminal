@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import httpx
 import polars as pl
@@ -340,3 +341,26 @@ def test_dev_overrides_are_refused_outside_dev() -> None:
         config.load({**base, "UPSTOX_API_BASE": "http://evil"})
     with pytest.raises(ValueError, match="dev only"):
         config.load({**base, "DOWNLOAD_PACE_S": "0"})
+
+
+def test_a_day_entirely_outside_the_session_is_rejected_but_a_stray_candle_is_not() -> None:
+    def bar(ts: str) -> list[Any]:
+        return [f"{ts}+05:30", 100.0, 101.0, 99.0, 100.0, 1, 0]
+
+    routine = dl.Dropped()
+    bars = dl.normalise([bar("2024-02-01T15:29:00"), bar("2024-02-01T15:30:00")], "1minute", {}, routine)
+    assert (bars.height, routine.outside_session, routine.rejected) == (1, 1, 0)
+    muhurat = dl.Dropped()
+    bars = dl.normalise([bar("2023-11-12T18:15:00"), bar("2023-11-12T18:16:00")], "1minute", {}, muhurat)
+    assert (bars.height, muhurat.outside_session, muhurat.rejected) == (0, 2, 1)
+
+
+def test_an_unchanged_file_is_flushed_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = [["2024-02-01T09:15:00+05:30", 100.0, 101.0, 99.0, 100.0, 1, 0]]
+    bars = dl.normalise(rows, "1minute", {}, dl.Dropped())
+    lake.write_bars(tmp_path, "upstox", "1minute", 7, bars)
+    flushed: list[Path] = []
+    monkeypatch.setattr(lake, "_flush", flushed.append)
+    w = lake.write_bars(tmp_path, "upstox", "1minute", 7, bars)
+    path = tmp_path / w[0].path
+    assert flushed == [path, path.parent]

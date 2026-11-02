@@ -117,6 +117,8 @@ class UpstoxHistory:
             # Decimal, not float: prices are money until they are int64 units (invariant 8).
             try:
                 candles: list[list[Any]] = json.loads(r.text, parse_float=Decimal)["data"]["candles"]
+                if not isinstance(candles, list):
+                    raise TypeError
             except (ValueError, KeyError, TypeError):
                 raise BrokerRejected(f"unreadable response for {key} {start}..{end}") from None
             return candles
