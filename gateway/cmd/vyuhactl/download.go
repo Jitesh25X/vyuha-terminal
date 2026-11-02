@@ -57,17 +57,49 @@ func runDownload(args []string) error {
 
 // pipeToken runs a job with the token on its stdin: argv and the environment are visible to other
 // processes. The job gets only the settings it needs, never VYUHA_MASTER_KEY or other .env secrets.
-func pipeToken(ctx context.Context, argv []string, token string) error {
+func pipeToken(ctx context.Context, argv []string, token []byte) error {
+	cmd, err := startWithToken(ctx, argv, token)
+	if err != nil {
+		return err
+	}
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("download job: %w", err)
+	}
+	return nil
+}
+
+// startWithToken zeroes the token as soon as the pipe has it, not when the job ends: a job can run for
+// hours. A failed write means the job has already gone, and Wait reports that.
+func startWithToken(ctx context.Context, argv []string, token []byte) (*exec.Cmd, error) {
+	defer clear(token)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // the operator's own command line
-	cmd.Stdin = strings.NewReader(token + "\n")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("download job: %w", err)
+	}
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	cmd.Env = jobEnv(os.Environ())
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = 10 * time.Second
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("download job: %w", err)
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("download job: %w", err)
 	}
-	return nil
+	line := append(make([]byte, 0, len(token)+1), token...)
+	line = append(line, '\n')
+	_, _ = stdin.Write(line)
+	clear(line)
+	_ = stdin.Close()
+	return cmd, nil
+}
+
+// exitCode is what vyuhactl exits with for err. A job's own code passes through, so a script sees the
+// downloader's 3 (incomplete) rather than a generic failure.
+func exitCode(err error) int {
+	var job *exec.ExitError
+	if errors.As(err, &job) && job.ExitCode() > 0 {
+		return job.ExitCode()
+	}
+	return 1
 }
 
 // jobEnvPrefixes is everything a download job may see of this process's environment.

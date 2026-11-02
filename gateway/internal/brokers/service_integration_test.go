@@ -493,14 +493,15 @@ func TestOpenAccessToken(t *testing.T) {
 	if _, _, err := OpenAccessToken(ctx, f.pool, f.env, "upstox:UP1", "owner", "test", now); !errors.Is(err, ErrNoLiveToken) {
 		t.Fatalf("no token yet: %v", err)
 	}
-	sealed, err := f.env.Seal([]byte("tok"), []byte("broker_account.access_token_enc:"+id))
+	const secret = "token-value-never-logged"
+	sealed, err := f.env.Seal([]byte(secret), []byte("broker_account.access_token_enc:"+id))
 	if err != nil {
 		t.Fatal(err)
 	}
 	expires := now.Add(time.Hour)
 	f.exec(`UPDATE broker_account SET access_token_enc = $1, token_expires_at = $2 WHERE id = $3`, sealed, expires, id)
 	gotID, token, err := OpenAccessToken(ctx, f.pool, f.env, "upstox:UP1", "owner", "test", now)
-	if err != nil || gotID != id || token != "tok" {
+	if err != nil || gotID != id || string(token) != secret {
 		t.Fatalf("got %q %q %v", gotID, token, err)
 	}
 	if _, _, err := OpenAccessToken(ctx, f.pool, f.env, id, "owner", "test", expires); !errors.Is(err, ErrNoLiveToken) {
@@ -508,6 +509,10 @@ func TestOpenAccessToken(t *testing.T) {
 	}
 	if got := f.auditActions(id); len(got) == 0 || !strings.HasPrefix(got[len(got)-1], "broker.token.opened") {
 		t.Fatalf("audit = %v", got)
+	}
+	var leaks int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM audit_event WHERE payload::text LIKE '%' || $1 || '%'`, secret).Scan(&leaks); err != nil || leaks != 0 {
+		t.Fatalf("token in the audit log: %d rows, %v", leaks, err)
 	}
 	f.exec(`UPDATE broker_account SET status = 'disabled', token_expires_at = $1 WHERE id = $2`, expires.Add(time.Hour), id)
 	if _, _, err := OpenAccessToken(ctx, f.pool, f.env, id, "owner", "test", now); err == nil || errors.Is(err, ErrNoLiveToken) {

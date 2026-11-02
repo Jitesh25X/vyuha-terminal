@@ -15,6 +15,8 @@ from . import config
 from .data import banlist, download, holidays
 from .data.instruments import sync
 
+EXIT_INCOMPLETE = 3  # a download finished with chunks it couldn't record: partial, never a success
+
 
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -139,6 +141,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         print(json.dumps({"ok": False, "error": f"{type(e).__name__}: {e}"}))
         return 1
+    if report.get("chunks_incomplete"):
+        print(json.dumps({"ok": False, **report}, default=str))
+        return EXIT_INCOMPLETE
     print(json.dumps({"ok": True, **report}, default=str))
     return 0
 

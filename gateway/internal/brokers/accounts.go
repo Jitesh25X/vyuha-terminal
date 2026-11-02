@@ -132,34 +132,36 @@ func (a NewAccount) params() (store.CreateBrokerAccountParams, error) {
 var ErrNoLiveToken = errors.New("brokers: no live access token: do the daily broker login first")
 
 // OpenAccessToken decrypts an account's current access token for a local job (vyuhactl download run)
-// and audits it; account is an id or broker:client_code. It returns the account id and the token.
-func OpenAccessToken(ctx context.Context, db store.DBTX, env *vcrypto.Envelope, account, requestedBy, purpose string, now time.Time) (string, string, error) {
+// and audits it; account is an id or broker:client_code. It returns the account id and the token, which
+// the caller must zero after use (see gateway/CLAUDE.md).
+func OpenAccessToken(ctx context.Context, db store.DBTX, env *vcrypto.Envelope, account, requestedBy, purpose string, now time.Time) (string, []byte, error) {
 	q := store.New(db)
 	aid, err := accountID(ctx, q, account)
 	if err != nil {
-		return "", "", err
+		return "", nil, err
 	}
 	acct, err := q.GetBrokerAccount(ctx, aid)
 	if err != nil {
-		return "", "", fmt.Errorf("brokers: account %s: %w", account, err)
+		return "", nil, fmt.Errorf("brokers: account %s: %w", account, err)
 	}
 	if acct.Status == store.AccountStatusDisabled {
-		return "", "", fmt.Errorf("brokers: account %s is disabled", account)
+		return "", nil, fmt.Errorf("brokers: account %s is disabled", account)
 	}
 	if acct.AccessTokenEnc == nil || !acct.TokenExpiresAt.Valid || !now.Before(acct.TokenExpiresAt.Time) {
-		return "", "", ErrNoLiveToken
+		return "", nil, ErrNoLiveToken
 	}
 	token, err := env.Open(acct.AccessTokenEnc, ad("access_token_enc", acct.ID))
 	if err != nil {
-		return "", "", fmt.Errorf("brokers: access token: %w", err)
+		return "", nil, fmt.Errorf("brokers: access token: %w", err)
 	}
 	if _, err := audit.Record(ctx, q, audit.Event{
 		ActorKind: audit.ActorSystem, Action: "broker.token.opened", Entity: "broker_account", EntityID: acct.ID.String(),
 		Payload: map[string]any{"requested_by": requestedBy, "purpose": purpose},
 	}); err != nil {
-		return "", "", fmt.Errorf("brokers: audit token use: %w", err)
+		clear(token)
+		return "", nil, fmt.Errorf("brokers: audit token use: %w", err)
 	}
-	return acct.ID.String(), string(token), nil
+	return acct.ID.String(), token, nil
 }
 
 func accountID(ctx context.Context, q *store.Queries, account string) (pgtype.UUID, error) {

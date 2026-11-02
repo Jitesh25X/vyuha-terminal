@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,6 +25,7 @@ import polars as pl
 import pytest
 from aiolimiter import AsyncLimiter
 
+from vyuha_quant import cli
 from vyuha_quant.data import download, lake, upstox_history
 from vyuha_quant.data.limits import UPSTOX_INTERVALS, UPSTOX_RATE, pace_seconds
 
@@ -49,6 +50,7 @@ class FakeUpstox(ThreadingHTTPServer):
         self.expire_after: int | None = None
         self.corrupt_first: int = 0  # this many replies carry an unreadable row
         self.peers: set[str] = set()
+        self.on_request: Callable[[], None] | None = None
 
     def over_limit(self, now: float) -> bool:
         self.times.append(now)
@@ -72,6 +74,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         assert self.headers["Authorization"] == f"Bearer {TOKEN}"
+        if self.server.on_request:
+            self.server.on_request()
         with self.server.lock:
             self.server.requests.append(self.path)
             self.server.peers.add(self.client_address[0])
@@ -215,6 +219,16 @@ def _start(
     p.stdin.write(token + "\n")
     p.stdin.close()
     return p
+
+
+def _exposed(pid: int) -> str:
+    """What other processes can read about a running job: its argv and, where the OS shows it, its env."""
+    proc = Path(f"/proc/{pid}")
+    if proc.exists():
+        return (proc / "cmdline").read_text() + (proc / "environ").read_text()
+    return subprocess.run(
+        ["ps", "eww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True
+    ).stdout
 
 
 def _finish(p: subprocess.Popen[str]) -> tuple[dict[str, Any], str]:
@@ -473,11 +487,47 @@ def test_unreadable_rows_keep_the_chunk_out_of_coverage_so_a_rerun_retries(
     account = asyncio.run(_seed(dsn))
     spec = _spec(tmp_path, to="2024-02-29", constituents_csv=None, symbols=["NSE:SYM0"])
     fake.corrupt_first = 1
-    report, _ = _finish(_start(dsn, fake, tmp_path, spec, account))
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, _ = _finish(p)
     assert (report["chunks_incomplete"], report["dropped"]["malformed"]) == (1, 1)
-    report, _ = _finish(_start(dsn, fake, tmp_path, spec, account))
+    assert p.returncode == cli.EXIT_INCOMPLETE  # a partial download never looks fine
+    assert report["ok"] is False
+    job = asyncio.run(_one(dsn, "SELECT status, error FROM download_job"))
+    assert job["status"] == "failed"
+    assert "DOWNLOAD_INCOMPLETE" in job["error"]
+    assert [e["action"] for e in asyncio.run(_audit_actions(dsn))] == [
+        "data.download.start",
+        "data.download.failed",
+    ]
+
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, _ = _finish(p)
     assert (report["chunks"], report["chunks_incomplete"]) == (1, 0)
     assert report["new_bars"] > 0
+    assert p.returncode == 0
+    assert report["ok"] is True
+    assert tuple(asyncio.run(_one(dsn, "SELECT count(*), min(status::text) FROM download_job"))) == (
+        1,
+        "done",
+    )
+
+
+def test_token_is_not_in_argv_env_or_logs(dsn: str, fake: FakeUpstox, tmp_path: Path) -> None:
+    account = asyncio.run(_seed(dsn))
+    spec = _spec(tmp_path, to="2024-02-29", constituents_csv=None, symbols=["NSE:SYM0"])
+    seen: list[str] = []
+    p: subprocess.Popen[str]
+    fake.on_request = lambda: seen.append(_exposed(p.pid))
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, log = _finish(p)
+    assert p.returncode == 0
+    assert seen  # looked while the job was holding the token
+    if sys.platform == "linux":
+        assert all("POSTGRES_URL=" in s for s in seen)  # the check can see the environment
+    assert not any(TOKEN in s for s in seen)
+    assert TOKEN not in log
+    assert TOKEN not in json.dumps(report)
+    assert TOKEN not in json.dumps(asyncio.run(_audit_actions(dsn)))
 
 
 def test_audit_names_account_and_user_on_every_run_and_records_failure(

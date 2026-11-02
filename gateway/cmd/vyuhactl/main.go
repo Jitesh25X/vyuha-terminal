@@ -42,7 +42,8 @@ const usage = `usage:
       (API key and secret are read from the terminal with echo off, or two lines of piped stdin; stored encrypted)
   vyuhactl account map -account ID|broker:client_code -user USERNAME [-trade] [-default]
   vyuhactl download run -account ID|broker:client_code -user USERNAME -spec FILE [-quant "uv run --project quant vyuha-quant"]
-      (runs or resumes a historical download; hands the live access token to the quant job on stdin)
+      (runs or resumes a historical download; hands the live access token to the quant job on stdin;
+      exits 3 if chunks are incomplete: run it again to retry them)
 Reads POSTGRES_URL etc. from the environment (VYUHA_ENV=dev defaults apply).`
 
 // errUsage makes main print the usage text.
@@ -54,7 +55,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, usage)
 		}
 		fmt.Fprintln(os.Stderr, "vyuhactl:", err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
 }
 

@@ -296,7 +296,7 @@ async def _upsert_dataset(tx: db.Conn, interval: str, instrument_id: int, w: Par
     )
 
 
-async def _fail(conn: db.Conn, job_id: Any, who: dict[str, str], error: str) -> None:
+async def _fail(conn: db.Conn, job_id: Any, who: dict[str, Any], error: str) -> None:
     """Best effort: the failure may be the database itself, and then a re-run resumes the job anyway."""
     try:
         async with conn.transaction():
@@ -465,11 +465,17 @@ async def run(
             totals.requests, totals.http_429 = client.requests, client.rate_limited
             await client.aclose()
             log.info("download totals: %s", asdict(totals))
-        async with conn.transaction():
-            await conn.execute(
-                "UPDATE download_job SET status = 'done', updated_at = now() WHERE id = $1", job_id
-            )
-            await db.audit(conn, "data.download.done", "download_job", str(job_id), {**who, **asdict(totals)})
+        if totals.chunks_incomplete:  # not done: stays resumable, and the CLI exits non-zero
+            error = f"DOWNLOAD_INCOMPLETE: {totals.chunks_incomplete} chunk(s) had unreadable rows, run again"
+            await _fail(conn, job_id, {**who, **asdict(totals)}, error)
+        else:
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE download_job SET status = 'done', updated_at = now() WHERE id = $1", job_id
+                )
+                await db.audit(
+                    conn, "data.download.done", "download_job", str(job_id), {**who, **asdict(totals)}
+                )
         return {"job_id": str(job_id), "to": to, "chunks": len(chunks), **asdict(totals)}
     finally:
         await conn.close()
