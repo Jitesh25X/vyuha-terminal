@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -101,10 +102,13 @@ def write_bars(
 def _flush(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY)
     try:
-        try:  # macOS: plain fsync leaves data in the drive's cache
-            fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
-        except (AttributeError, OSError):  # other systems, or a disk that doesn't support it
-            os.fsync(fd)
+        if sys.platform == "darwin":  # plain fsync leaves data in the drive's cache
+            try:
+                fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
+                return
+            except OSError:  # a disk that doesn't support it
+                pass
+        os.fsync(fd)
     finally:
         os.close(fd)
 
