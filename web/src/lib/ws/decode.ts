@@ -86,6 +86,8 @@ export class Merger {
   private prints: PrintLite[] = [];
   private errors: WsError[] = [];
   private system: SystemLite | undefined;
+  /** Ping/Pong round trips since the last takePongs() (clock offset estimation). */
+  private pongs: { clientMs: number; serverMs: number; recvMs: number }[] = [];
   /** Last trade seen per instrument, to turn conflated quotes into prints. */
   private lastTrade = new Map<number, { ts: number; price: number }>();
 
@@ -111,6 +113,9 @@ export class Merger {
         break;
       case "error":
         this.errors.push({ code: b.value.code, message: b.value.message, ids: idsIn(b.value.message) });
+        break;
+      case "pong":
+        this.pongs.push({ clientMs: n(b.value.clientTsMs), serverMs: n(b.value.serverTsMs), recvMs: Date.now() });
         break;
       default:
         break;
@@ -182,6 +187,12 @@ export class Merger {
     this.errors = [];
     this.system = undefined;
     return d;
+  }
+
+  takePongs(): { clientMs: number; serverMs: number; recvMs: number }[] {
+    const p = this.pongs;
+    this.pongs = [];
+    return p;
   }
 
   forget(ids: number[]): void {

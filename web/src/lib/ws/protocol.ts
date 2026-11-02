@@ -94,6 +94,8 @@ export interface Diff {
   conn?: ConnState;
   /** The server closed with 4401: the main thread refreshes the access token and restarts. */
   authExpired?: boolean;
+  /** Best recent estimate of server clock − browser clock (Ping/Pong), for tick → screen latency. */
+  clock?: { offsetMs: number; rttMs: number };
 }
 
 export type ToWorker =

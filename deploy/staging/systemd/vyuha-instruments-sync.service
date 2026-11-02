@@ -1,0 +1,9 @@
+[Unit]
+Description=Vyuha instrument master sync (F-MD-1)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vyuha/deploy/staging
+ExecStart=/usr/bin/docker compose run --rm --no-deps quant instruments sync

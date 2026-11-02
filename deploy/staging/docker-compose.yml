@@ -1,0 +1,168 @@
+# Staging/production stack on one VM (ARCHITECTURE §9, ADR-022). Run from this directory with the
+# generated .env next to it (./init-env.sh). Build images first: `make staging-build` (repo root).
+#
+# Networking: Postgres, NATS and ClickHouse run on the compose bridge with ports published on
+# 127.0.0.1 only. Vyuha's services run with network_mode: host — the engine binds each broker
+# account's static IP, and every internal hop (gateway → engine gRPC, gateway → quant API, services →
+# data stores) stays on loopback, which the gateway requires until mTLS (the engine gRPC carries
+# broker secrets; the quant API is unauthenticated). Caddy is the only listener on a public address.
+#
+# Secrets: each service gets only the variables it needs (no env_file); compose interpolates them from
+# .env (0600, never committed).
+name: vyuha
+
+x-app: &app
+  restart: unless-stopped
+  network_mode: host
+  logging:
+    driver: json-file
+    options: { max-size: "50m", max-file: "5" }
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: vyuha
+      POSTGRES_PASSWORD: ${PG_OWNER_PASSWORD:?run ./init-env.sh}
+      POSTGRES_DB: vyuha
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data, ./roles.sql:/opt/vyuha/roles.sql:ro]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vyuha"]
+      interval: 5s
+      retries: 20
+
+  nats:
+    image: nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
+    restart: unless-stopped
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]
+    volumes: [natsdata:/data]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 5s
+      retries: 20
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8@sha256:1ffa82edee000a42c09313bd9f1293d94c570aee74babc1b3ca9983a35fa597b
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: vyuha
+      CLICKHOUSE_PASSWORD: ${CH_PASSWORD:?run ./init-env.sh}
+      CLICKHOUSE_DB: vyuha
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports: ["127.0.0.1:8123:8123", "127.0.0.1:9000:9000"]
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes: [chdata:/var/lib/clickhouse, ../../db/clickhouse:/opt/vyuha/clickhouse:ro]
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user vyuha --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
+      interval: 5s
+      retries: 20
+
+  # One-shot: schema migrations as the owner role (docker compose run --rm migrate).
+  migrate:
+    <<: *app
+    image: vyuha/gateway:staging
+    restart: "no"
+    profiles: ["tools"]
+    entrypoint: ["/usr/local/bin/vyuhactl", "migrate", "up", "-dir", "/opt/vyuha/db/migrations"]
+    environment:
+      VYUHA_ENV: ${VYUHA_ENV}
+      POSTGRES_URL: postgres://vyuha:${PG_OWNER_PASSWORD}@127.0.0.1:5432/vyuha?sslmode=disable
+
+  # One-shot admin CLI (user/account creation): docker compose run --rm -it vyuhactl user create ...
+  vyuhactl:
+    <<: *app
+    image: vyuha/gateway:staging
+    restart: "no"
+    profiles: ["tools"]
+    entrypoint: ["/usr/local/bin/vyuhactl"]
+    environment:
+      VYUHA_ENV: ${VYUHA_ENV}
+      POSTGRES_URL: postgres://vyuha_gateway:${PG_GATEWAY_PASSWORD}@127.0.0.1:5432/vyuha?sslmode=disable
+      VYUHA_MASTER_KEY: ${VYUHA_MASTER_KEY}
+      TRUSTED_PROXIES: "none"
+      JWT_SIGNING_KEY_PATH: /run/secrets/jwt_ed25519.pem
+      PUBLIC_BASE_URL: https://${PUBLIC_HOST}
+      NATS_URL: nats://127.0.0.1:4222
+      CLICKHOUSE_URL: clickhouse://vyuha:${CH_PASSWORD}@127.0.0.1:9000/vyuha
+    volumes: [./secrets/jwt_ed25519.pem:/run/secrets/jwt_ed25519.pem:ro]
+
+  engine:
+    <<: *app
+    image: vyuha/engine:staging
+    build: { context: ../.., dockerfile: deploy/staging/engine.Dockerfile }
+    environment:
+      ENGINE_GRPC_ADDR: 127.0.0.1:7443
+      NATS_URL: nats://127.0.0.1:4222
+      POSTGRES_URL: postgres://vyuha_engine:${PG_ENGINE_PASSWORD}@127.0.0.1:5432/vyuha?sslmode=disable
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+
+  gateway:
+    <<: *app
+    image: vyuha/gateway:staging
+    build: { context: ../.., dockerfile: deploy/staging/gateway.Dockerfile }
+    environment:
+      VYUHA_ENV: ${VYUHA_ENV}
+      LIVE_TRADING_ENABLED: "false" # invariant 3: no order path exists before M2; the owner flips this, never a script
+      GATEWAY_HTTP_ADDR: 127.0.0.1:8080
+      TRUSTED_PROXIES: 127.0.0.1/32 # Caddy, same host
+      PUBLIC_BASE_URL: https://${PUBLIC_HOST}
+      POSTGRES_URL: postgres://vyuha_gateway:${PG_GATEWAY_PASSWORD}@127.0.0.1:5432/vyuha?sslmode=disable
+      VYUHA_MASTER_KEY: ${VYUHA_MASTER_KEY}
+      JWT_SIGNING_KEY_PATH: /run/secrets/jwt_ed25519.pem
+      ENGINE_GRPC_ADDR: 127.0.0.1:7443
+      QUANT_URL: http://127.0.0.1:8090
+      NATS_URL: nats://127.0.0.1:4222
+      CLICKHOUSE_URL: clickhouse://vyuha:${CH_PASSWORD}@127.0.0.1:9000/vyuha
+      LOG_LEVEL: info
+    volumes: [./secrets/jwt_ed25519.pem:/run/secrets/jwt_ed25519.pem:ro]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+
+  recorder:
+    <<: *app
+    image: vyuha/gateway:staging
+    entrypoint: ["/usr/local/bin/recorder"]
+    environment:
+      NATS_URL: nats://127.0.0.1:4222
+      CLICKHOUSE_URL: clickhouse://vyuha:${CH_PASSWORD}@127.0.0.1:9000/vyuha
+      RECORDER_METRICS_ADDR: 127.0.0.1:9466
+    depends_on:
+      nats: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+
+  quant:
+    <<: *app
+    image: vyuha/quant:staging
+    build: { context: ../.., dockerfile: deploy/staging/quant.Dockerfile }
+    environment:
+      VYUHA_ENV: ${VYUHA_ENV}
+      POSTGRES_URL: postgres://vyuha_quant:${PG_QUANT_PASSWORD}@127.0.0.1:5432/vyuha?sslmode=disable
+      QUANT_HTTP_ADDR: 127.0.0.1:8090
+      RISK_FREE_RATE: ${RISK_FREE_RATE}
+      RISK_FREE_RATE_AS_OF: ${RISK_FREE_RATE_AS_OF}
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  caddy:
+    <<: *app
+    image: vyuha/web:staging
+    build: { context: ../.., dockerfile: deploy/staging/web.Dockerfile }
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes: [caddydata:/data, caddyconfig:/config]
+    depends_on: [gateway]
+
+volumes:
+  pgdata: {}
+  natsdata: {}
+  chdata: {}
+  caddydata: {}
+  caddyconfig: {}

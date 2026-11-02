@@ -161,6 +161,24 @@ paths:
               schema: { $ref: "#/components/schemas/ReauthResponse" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "423": { $ref: "#/components/responses/Locked" }
+  /brokers/accounts:
+    get:
+      operationId: listBrokerAccounts
+      summary: Broker accounts the user can see, with session status and whether they may log them in
+      description: |
+        Traders and analysts see accounts they are mapped to (can_view); admins and risk managers see all.
+        `status` is `awaiting_login` once the stored access token has expired, whatever the last recorded
+        status. Secrets are never returned.
+      tags: [brokers]
+      responses:
+        "200":
+          description: Accounts
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/BrokerAccount" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /brokers/{account_id}/login-url:
     get:
       operationId: getBrokerLoginUrl
@@ -615,6 +633,18 @@ components:
         gamma: { type: number, format: double }
         theta: { type: number, format: double }
         vega: { type: number, format: double }
+    BrokerAccount:
+      type: object
+      required: [id, broker, client_code, holder_name, status, data_entitled, can_login]
+      properties:
+        id: { type: string, format: uuid }
+        broker: { type: string, enum: [zerodha, upstox, sim] }
+        client_code: { type: string }
+        holder_name: { type: string }
+        status: { type: string, enum: [disconnected, awaiting_login, connected, error, disabled] }
+        data_entitled: { type: boolean }
+        token_expires_at: { type: string, format: date-time }
+        can_login: { type: boolean, description: "The user may start this account's daily broker login" }
     BrokerLoginUrl:
       type: object
       required: [url]

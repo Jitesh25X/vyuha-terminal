@@ -74,4 +74,13 @@ test("1,000 rows × 4 Hz holds ≥ 55 fps with no long tasks", async ({ page, re
   expect(batches).toBeGreaterThanOrEqual(HZ * SECONDS);
   expect(result.fps).toBeGreaterThanOrEqual(55);
   expect(result.longTasks).toEqual([]);
+
+  // M1.12 measuring tool: SYS reports tick → screen percentiles from the same session (the fake
+  // feed stamps recvTs at send time, so this is network + worker + paint, without conflation).
+  await run(page, "SYS");
+  const sys = page.getByRole("region", { name: "Tick to screen latency" });
+  await expect(sys.getByTestId("p95")).toHaveText(/^\d+ ms$/);
+  const p95 = Number((await sys.getByTestId("p95").textContent())!.replace(" ms", ""));
+  console.log(`perf: SYS tick → screen p95 ${p95} ms`);
+  expect(p95).toBeLessThan(400);
 });

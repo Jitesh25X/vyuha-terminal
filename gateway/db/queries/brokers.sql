@@ -51,3 +51,14 @@ SELECT id, kite_token, upstox_key FROM instrument WHERE id = ANY(@ids::bigint[])
 
 -- name: IsExchangeHoliday :one
 SELECT EXISTS (SELECT 1 FROM exchange_holiday WHERE exchange = 'NSE' AND day = @day) AS holiday;
+
+-- name: ListMappedBrokerAccounts :many
+SELECT a.id, a.broker, a.client_code, a.holder_name, a.status, a.data_entitled, a.token_expires_at, m.can_trade
+FROM account_user_map m JOIN broker_account a ON a.id = m.account_id
+WHERE m.user_id = @user_id AND m.can_view
+ORDER BY a.broker, a.client_code;
+
+-- name: ListAllBrokerAccounts :many
+SELECT id, broker, client_code, holder_name, status, data_entitled, token_expires_at
+FROM broker_account
+ORDER BY broker, client_code;

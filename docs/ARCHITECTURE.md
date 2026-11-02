@@ -187,7 +187,7 @@ Feeds → intel `ingest` (poll 60 s) → dedupe/cluster → `extract` (fast LLM)
 
 ## 9. Deployment topology (MVP)
 - One VM: 8 vCPU, 32 GB RAM, 500 GB NVMe, Ubuntu 24.04 LTS, Mumbai region, N static public IPs.
-- `docker compose` with `network_mode: host` for `engine` only (so it can bind host IPs); the rest run on a bridge network.
+- `docker compose` (`deploy/staging/`, runbook `docs/STAGING.md`, ADR-022): Postgres, NATS and ClickHouse on a bridge network with ports on 127.0.0.1 only; engine, gateway, recorder, quant and Caddy with `network_mode: host`, so the engine binds account IPs and internal hops (engine gRPC, quant API) stay on loopback until mTLS. Scheduled jobs are host systemd timers.
 - Caddy terminates TLS for `gateway`. Access via Tailscale (recommended), or an IP allowlist.
 - Backups: nightly `pg_dump` + ClickHouse `BACKUP` + Neo4j dump + lake rsync → off-box storage, 30-day retention; restore drill each milestone from M3.
 - Observability: OTel SDKs in all services → Prometheus (metrics), Loki (logs), Grafana dashboards: engine latency histograms, risk gate rejects by code, OPS per account, WS clients, LLM tokens/cost.

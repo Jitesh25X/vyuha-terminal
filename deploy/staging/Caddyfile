@@ -1,0 +1,26 @@
+# Staging/production reverse proxy (host network: the gateway listens on 127.0.0.1:8080).
+# Restrict who can reach :443 at the cloud firewall (Tailscale or an IP allowlist, ARCHITECTURE §9).
+{
+	email {$ACME_EMAIL}
+}
+
+{$PUBLIC_HOST} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Content-Security-Policy "default-src 'self'; connect-src 'self' wss://{$PUBLIC_HOST}; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; worker-src 'self'; frame-ancestors 'none'"
+	}
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle /ws {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle {
+		root * /srv/web
+		try_files {path} /index.html
+		file_server
+	}
+}

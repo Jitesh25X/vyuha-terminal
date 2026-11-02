@@ -113,6 +113,10 @@ func (f *feed) serve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		switch b := m.GetBody().(type) {
+		case *wsv1.ClientMsg_Ping:
+			_ = send(&wsv1.ServerMsg{ReqId: m.GetReqId(), Body: &wsv1.ServerMsg_Pong{Pong: &wsv1.Pong{
+				ClientTsMs: b.Ping.GetClientTsMs(), ServerTsMs: time.Now().UnixMilli(),
+			}}})
 		case *wsv1.ClientMsg_Hello:
 			_ = send(&wsv1.ServerMsg{Body: &wsv1.ServerMsg_Welcome{Welcome: &wsv1.Welcome{UserId: "perf", Role: "trader", ServerTsMs: time.Now().UnixMilli()}}})
 		case *wsv1.ClientMsg_Subscribe:

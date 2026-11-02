@@ -18,6 +18,54 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for BrokerAccountBroker.
+const (
+	BrokerAccountBrokerSim     BrokerAccountBroker = "sim"
+	BrokerAccountBrokerUpstox  BrokerAccountBroker = "upstox"
+	BrokerAccountBrokerZerodha BrokerAccountBroker = "zerodha"
+)
+
+// Valid indicates whether the value is a known member of the BrokerAccountBroker enum.
+func (e BrokerAccountBroker) Valid() bool {
+	switch e {
+	case BrokerAccountBrokerSim:
+		return true
+	case BrokerAccountBrokerUpstox:
+		return true
+	case BrokerAccountBrokerZerodha:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for BrokerAccountStatus.
+const (
+	BrokerAccountStatusAwaitingLogin BrokerAccountStatus = "awaiting_login"
+	BrokerAccountStatusConnected     BrokerAccountStatus = "connected"
+	BrokerAccountStatusDisabled      BrokerAccountStatus = "disabled"
+	BrokerAccountStatusDisconnected  BrokerAccountStatus = "disconnected"
+	BrokerAccountStatusError         BrokerAccountStatus = "error"
+)
+
+// Valid indicates whether the value is a known member of the BrokerAccountStatus enum.
+func (e BrokerAccountStatus) Valid() bool {
+	switch e {
+	case BrokerAccountStatusAwaitingLogin:
+		return true
+	case BrokerAccountStatusConnected:
+		return true
+	case BrokerAccountStatusDisabled:
+		return true
+	case BrokerAccountStatusDisconnected:
+		return true
+	case BrokerAccountStatusError:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for CheckStatus.
 const (
 	CheckStatusFail CheckStatus = "fail"
@@ -305,6 +353,26 @@ func (e GetCandlesParamsInterval) Valid() bool {
 		return false
 	}
 }
+
+// BrokerAccount defines model for BrokerAccount.
+type BrokerAccount struct {
+	Broker BrokerAccountBroker `json:"broker"`
+
+	// CanLogin The user may start this account's daily broker login
+	CanLogin       bool                `json:"can_login"`
+	ClientCode     string              `json:"client_code"`
+	DataEntitled   bool                `json:"data_entitled"`
+	HolderName     string              `json:"holder_name"`
+	Id             openapi_types.UUID  `json:"id"`
+	Status         BrokerAccountStatus `json:"status"`
+	TokenExpiresAt *time.Time          `json:"token_expires_at,omitempty"`
+}
+
+// BrokerAccountBroker defines model for BrokerAccount.Broker.
+type BrokerAccountBroker string
+
+// BrokerAccountStatus defines model for BrokerAccount.Status.
+type BrokerAccountStatus string
 
 // BrokerLoginUrl defines model for BrokerLoginUrl.
 type BrokerLoginUrl struct {
@@ -695,6 +763,9 @@ type ServerInterface interface {
 	// RefreshSession Rotates the refresh cookie and returns a new access token
 	// (POST /auth/refresh)
 	RefreshSession(w http.ResponseWriter, r *http.Request, params RefreshSessionParams)
+	// ListBrokerAccounts Broker accounts the user can see, with session status and whether they may log them in
+	// (GET /brokers/accounts)
+	ListBrokerAccounts(w http.ResponseWriter, r *http.Request)
 	// BrokerCallbackUpstox Upstox OAuth redirect; exchanges the code and starts the engine session
 	// (GET /brokers/callback/upstox)
 	BrokerCallbackUpstox(w http.ResponseWriter, r *http.Request, params BrokerCallbackUpstoxParams)
@@ -867,6 +938,20 @@ func (siw *ServerInterfaceWrapper) RefreshSession(w http.ResponseWriter, r *http
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.RefreshSession(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListBrokerAccounts operation middleware
+func (siw *ServerInterfaceWrapper) ListBrokerAccounts(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListBrokerAccounts(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1426,6 +1511,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/refresh", wrapper.RefreshSession)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/logout", wrapper.Logout)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/reauth", wrapper.Reauth)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/brokers/accounts", wrapper.ListBrokerAccounts)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/brokers/{account_id}/login-url", wrapper.GetBrokerLoginUrl)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/brokers/callback/zerodha", wrapper.BrokerCallbackZerodha)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/brokers/callback/upstox", wrapper.BrokerCallbackUpstox)
@@ -2004,6 +2090,43 @@ func (response RefreshSession429ApplicationProblemPlusJSONResponse) VisitRefresh
 	return err
 }
 
+type ListBrokerAccountsRequestObject struct {
+}
+
+type ListBrokerAccountsResponseObject interface {
+	VisitListBrokerAccountsResponse(w http.ResponseWriter) error
+}
+
+type ListBrokerAccounts200JSONResponse []BrokerAccount
+
+func (response ListBrokerAccounts200JSONResponse) VisitListBrokerAccountsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListBrokerAccounts401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ListBrokerAccounts401ApplicationProblemPlusJSONResponse) VisitListBrokerAccountsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type BrokerCallbackUpstoxRequestObject struct {
 	Params BrokerCallbackUpstoxParams
 }
@@ -2519,6 +2642,9 @@ type StrictServerInterface interface {
 	// RefreshSession Rotates the refresh cookie and returns a new access token
 	// (POST /auth/refresh)
 	RefreshSession(ctx context.Context, request RefreshSessionRequestObject) (RefreshSessionResponseObject, error)
+	// ListBrokerAccounts Broker accounts the user can see, with session status and whether they may log them in
+	// (GET /brokers/accounts)
+	ListBrokerAccounts(ctx context.Context, request ListBrokerAccountsRequestObject) (ListBrokerAccountsResponseObject, error)
 	// BrokerCallbackUpstox Upstox OAuth redirect; exchanges the code and starts the engine session
 	// (GET /brokers/callback/upstox)
 	BrokerCallbackUpstox(ctx context.Context, request BrokerCallbackUpstoxRequestObject) (BrokerCallbackUpstoxResponseObject, error)
@@ -2790,6 +2916,30 @@ func (sh *strictHandler) RefreshSession(w http.ResponseWriter, r *http.Request, 
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(RefreshSessionResponseObject); ok {
 		if err := validResponse.VisitRefreshSessionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListBrokerAccounts operation middleware
+func (sh *strictHandler) ListBrokerAccounts(w http.ResponseWriter, r *http.Request) {
+	var request ListBrokerAccountsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListBrokerAccounts(ctx, request.(ListBrokerAccountsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListBrokerAccounts")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListBrokerAccountsResponseObject); ok {
+		if err := validResponse.VisitListBrokerAccountsResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

@@ -44,7 +44,7 @@ export const FUNCTIONS: readonly FunctionDef[] = [
   fn("AUD", "Audit", "none", "Audit log viewer + verify + export (risk+)"),
   fn("COMP", "Compliance", "none", "Daily compliance report (risk+)"),
   fn("ADM", "Admin", "none", "Users, accounts, IPs, feeds, costs (admin)"),
-  fn("SYS", "System", "none", "Service health, feed status, latency histograms"),
+  fn("SYS", "System", "none", "Feeds, engine and stream health; tick → screen latency p50/p95/p99 with histogram", () => import("../panels/SYS")),
   fn("HELP", "Help", "optional", "Function docs & keyboard map. HELP <FUNC> opens one function", () => import("../panels/HELP")),
 ];
 

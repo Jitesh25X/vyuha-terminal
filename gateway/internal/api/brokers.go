@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/google/uuid"
+
 	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/brokers"
 )
 
@@ -33,6 +35,31 @@ func (s *Server) GetBrokerLoginUrl(ctx context.Context, req GetBrokerLoginUrlReq
 			problem(http.StatusConflict, "BROKER_NO_LOGIN", "This account has no broker login", "")), nil
 	}
 	return nil, err
+}
+
+// ListBrokerAccounts lists the broker accounts the user can see, with login status.
+func (s *Server) ListBrokerAccounts(ctx context.Context, _ ListBrokerAccountsRequestObject) (ListBrokerAccountsResponseObject, error) {
+	if s.brokers == nil {
+		return nil, errors.New("broker login not configured")
+	}
+	accounts, err := s.brokers.Accounts(ctx, ClaimsFrom(ctx).Subject)
+	if errors.Is(err, brokers.ErrForbidden) {
+		return ListBrokerAccounts200JSONResponse{}, nil // inactive user: nothing to show
+	} else if err != nil {
+		return nil, err
+	}
+	out := make(ListBrokerAccounts200JSONResponse, len(accounts))
+	for i, a := range accounts {
+		id, err := uuid.Parse(a.ID)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = BrokerAccount{
+			Id: id, Broker: BrokerAccountBroker(a.Broker), ClientCode: a.ClientCode, HolderName: a.HolderName,
+			Status: BrokerAccountStatus(a.Status), DataEntitled: a.DataEntitled, CanLogin: a.CanLogin, TokenExpiresAt: a.TokenExpiresAt,
+		}
+	}
+	return out, nil
 }
 
 // BrokerCallbackZerodha completes a Kite Connect login.

@@ -1,0 +1,9 @@
+[Unit]
+Description=F&O ban list check before 09:00 IST on weekdays (ADR-019)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:45:00 Asia/Kolkata
+Persistent=true
+
+[Install]
+WantedBy=timers.target

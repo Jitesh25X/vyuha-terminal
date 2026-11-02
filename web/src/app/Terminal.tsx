@@ -2,7 +2,9 @@ import { useEffect, useRef } from "react";
 import { tinykeys } from "tinykeys";
 import { parseCommand } from "../commands/parse";
 import { refreshSession } from "../lib/api/client";
+import { BROKER_LOGIN_ERRORS } from "../lib/api/brokers";
 import { startMarketData, stopMarketData, subscribe } from "../lib/ws/client";
+import { pushToast } from "../stores/toasts";
 import type { User } from "../lib/api/types";
 import { StatusBar } from "../shell/StatusBar";
 import { Toasts } from "../shell/Toasts";
@@ -20,6 +22,20 @@ export function Terminal({ user, expiresAt }: { user: User; expiresAt: number })
     const t = setTimeout(() => void refreshSession(), Math.max(5_000, expiresAt - Date.now() - REFRESH_LEAD_MS));
     return () => clearTimeout(t);
   }, [expiresAt]);
+
+  // Back from a broker login (gateway callback → /terminal?broker_login=ok|error&…): tell the user,
+  // then drop the query so a reload doesn't repeat it.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    const outcome = q.get("broker_login");
+    if (!outcome) return;
+    if (outcome === "ok") pushToast("info", "Broker login complete — the session is starting");
+    else {
+      const code = q.get("code") ?? "INTERNAL";
+      pushToast("error", `Broker login failed: ${BROKER_LOGIN_ERRORS[code] ?? code}`);
+    }
+    window.history.replaceState(null, "", "/");
+  }, []);
 
   // Market-data stream for the session; the status bar's system channel is always on.
   useEffect(() => {

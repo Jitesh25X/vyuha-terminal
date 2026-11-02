@@ -54,7 +54,12 @@ printf '%s\n' "$password" | "$tmp/vyuhactl" user create -username "$user" -displ
 for u in e2e_md e2e_perf e2e_oc e2e_mov; do
   printf '%s\n' "$password" | "$tmp/vyuhactl" user create -username "$u" -display-name "E2E ${u#e2e_}" -role trader >/dev/null
 done
-# A few instruments for the market panels to resolve (no broker account is mapped: no entitlement).
+# A Kite account mapped to e2e_md with trading rights but no data entitlement: the status bar offers
+# its daily login (the test intercepts the broker URL; nothing reaches Kite), panels stay unentitled.
+printf 'e2e-kite-key\ne2e-kite-secret\n' | VYUHA_MASTER_KEY="$(sed -n 's/^VYUHA_MASTER_KEY=//p' "$tmp/env")" \
+  "$tmp/vyuhactl" account create -broker zerodha -client-code E2E001 -holder "E2E Desk" -static-ip 127.0.0.1 >/dev/null
+"$tmp/vyuhactl" account map -account zerodha:E2E001 -user e2e_md -trade >/dev/null
+# A few instruments for the market panels to resolve.
 "${compose[@]}" exec -T postgres psql -U vyuha -d "$db" -qc "INSERT INTO instrument (id, exchange, segment, symbol, tradingsymbol, name, tick_size, lot_size, valid_from, kite_token, upstox_key) VALUES
   (1001, 'NSE', 'EQ', 'RELIANCE', 'RELIANCE', 'Reliance Industries', 0.10, 1, '2026-01-01', 738561, 'NSE_EQ|INE002A01018'),
   (1002, 'NSE', 'EQ', 'INFY', 'INFY', 'Infosys', 0.10, 1, '2026-01-01', 408065, 'NSE_EQ|INE009A01021')" >/dev/null

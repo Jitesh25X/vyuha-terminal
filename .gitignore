@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 deploy/secrets/
+deploy/staging/secrets/
 *.pem
 *.key
 

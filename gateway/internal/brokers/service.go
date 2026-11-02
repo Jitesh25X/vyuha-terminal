@@ -388,3 +388,69 @@ func accountStatus(engineState string) store.AccountStatus {
 	}
 	return store.AccountStatusError
 }
+
+// AccountView is one broker account as the terminal sees it (no secrets).
+type AccountView struct {
+	ID, Broker, ClientCode, HolderName, Status string
+	DataEntitled, CanLogin                     bool
+	TokenExpiresAt                             *time.Time
+}
+
+// Accounts lists the accounts a user can see: mapped (can_view) ones, or all for admins and risk
+// managers. A stored token past its expiry reads as awaiting_login.
+func (s *Service) Accounts(ctx context.Context, userID string) ([]AccountView, error) {
+	var uid pgtype.UUID
+	if uid.Scan(userID) != nil {
+		return nil, ErrForbidden
+	}
+	user, err := s.q.GetUserAccess(ctx, uid)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !user.IsActive) {
+		return nil, ErrForbidden
+	} else if err != nil {
+		return nil, fmt.Errorf("brokers: load user: %w", err)
+	}
+	role := string(user.Role)
+	now := s.now()
+	view := func(id pgtype.UUID, broker store.BrokerKind, code, holder string, status store.AccountStatus,
+		entitled bool, expires pgtype.Timestamptz, m *rbac.Mapping,
+	) AccountView {
+		v := AccountView{
+			ID: id.String(), Broker: string(broker), ClientCode: code, HolderName: holder, Status: string(status),
+			DataEntitled: entitled, CanLogin: broker != store.BrokerKindSim && rbac.CanBrokerLogin(role, m),
+		}
+		if expires.Valid {
+			t := expires.Time
+			v.TokenExpiresAt = &t
+			if !now.Before(t) && status == store.AccountStatusConnected {
+				v.Status = string(store.AccountStatusAwaitingLogin)
+			}
+		}
+		return v
+	}
+	var out []AccountView
+	if rbac.SeesAllAccounts(role) {
+		rows, err := s.q.ListAllBrokerAccounts(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("brokers: list accounts: %w", err)
+		}
+		mapped := map[string]*rbac.Mapping{}
+		if mine, err := s.q.ListMappedBrokerAccounts(ctx, uid); err == nil {
+			for _, r := range mine {
+				mapped[r.ID.String()] = &rbac.Mapping{CanView: true, CanTrade: r.CanTrade}
+			}
+		}
+		for _, r := range rows {
+			out = append(out, view(r.ID, r.Broker, r.ClientCode, r.HolderName, r.Status, r.DataEntitled, r.TokenExpiresAt, mapped[r.ID.String()]))
+		}
+		return out, nil
+	}
+	rows, err := s.q.ListMappedBrokerAccounts(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("brokers: list accounts: %w", err)
+	}
+	for _, r := range rows {
+		out = append(out, view(r.ID, r.Broker, r.ClientCode, r.HolderName, r.Status, r.DataEntitled, r.TokenExpiresAt,
+			&rbac.Mapping{CanView: true, CanTrade: r.CanTrade}))
+	}
+	return out, nil
+}

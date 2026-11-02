@@ -443,3 +443,44 @@ func TestCreateAccountSealsSecretsAndMapsUsers(t *testing.T) {
 		t.Errorf("sim account: %v", err)
 	}
 }
+
+func TestAccountsListing(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	trader, viewer, admin := f.user("meera", "trader"), f.user("view", "analyst"), f.user("ops", "admin")
+	kite := f.account("zerodha", "ZK1001", "kite-key", "kite-secret", "127.0.0.1")
+	up := f.account("upstox", "UP2002", "up-key", "up-secret", "127.0.0.1")
+	sim := f.account("sim", "PAPER", "", "", "")
+	f.mapUser(kite, trader, true)
+	f.mapUser(up, viewer, false)
+	// Kite logged in yesterday: the token has expired since.
+	f.exec(`UPDATE broker_account SET status = 'connected', token_expires_at = $2 WHERE id = $1`, kite, f.now.Add(-time.Hour))
+
+	byID := func(user string) map[string]AccountView {
+		t.Helper()
+		got, err := f.svc.Accounts(ctx, user)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]AccountView{}
+		for _, a := range got {
+			m[a.ID] = a
+		}
+		return m
+	}
+	mine := byID(trader)
+	if len(mine) != 1 || !mine[kite].CanLogin || mine[kite].Status != "awaiting_login" || mine[kite].ClientCode != "ZK1001" {
+		t.Fatalf("trader sees %+v", mine)
+	}
+	if v := byID(viewer); len(v) != 1 || v[up].CanLogin {
+		t.Fatalf("analyst sees %+v (view only, no login)", v)
+	}
+	all := byID(admin)
+	if len(all) != 3 || !all[kite].CanLogin || !all[up].CanLogin || all[sim].CanLogin {
+		t.Fatalf("admin sees %+v (all accounts; sim has no broker login)", all)
+	}
+	f.exec(`UPDATE app_user SET is_active = false WHERE id = $1`, trader)
+	if _, err := f.svc.Accounts(ctx, trader); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("inactive user: %v", err)
+	}
+}
