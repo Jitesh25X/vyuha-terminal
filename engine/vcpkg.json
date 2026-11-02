@@ -19,7 +19,8 @@
       "description": "GoogleTest unit tests and Google Benchmark",
       "dependencies": [
         "gtest",
-        "benchmark"
+        "benchmark",
+        "rapidcheck"
       ]
     },
     "python": {

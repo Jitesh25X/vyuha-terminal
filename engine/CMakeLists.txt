@@ -73,6 +73,10 @@ add_library(vyuha_upstox
 add_library(vyuha::upstox ALIAS vyuha_upstox)
 
 # Market-data bus: protobuf encoders + NATS publisher (md.tick.*, md.bar.*, KV md_last).
+add_library(vyuha_oms STATIC src/oms/oms.cc)
+add_library(vyuha::oms ALIAS vyuha_oms)
+target_link_libraries(vyuha_oms PUBLIC vyuha::core PRIVATE vyuha_warnings)
+
 add_library(vyuha_bus src/bus/md_encode.cc src/bus/md_publisher.cc)
 add_library(vyuha::bus ALIAS vyuha_bus)
 target_link_libraries(vyuha_bus PUBLIC vyuha::core PRIVATE vyuha_warnings cnats::nats_static)
@@ -125,6 +129,9 @@ if(NOT VYUHA_SANITIZER)
   endif()
   add_library(vyuha_pg STATIC src/session/pg_instrument_directory.cc)
   target_link_libraries(vyuha_pg PUBLIC vyuha::session PRIVATE vyuha_warnings libpqxx::pqxx)
+
+  add_library(vyuha_oms_pg STATIC src/oms/pg_order_store.cc)
+  target_link_libraries(vyuha_oms_pg PUBLIC vyuha::oms PRIVATE vyuha_warnings libpqxx::pqxx)
 
   add_library(vyuha_rpc STATIC src/rpc/engine_service.cc)
   target_link_libraries(vyuha_rpc PUBLIC vyuha::session vyuha_engine_proto PRIVATE vyuha_warnings)
