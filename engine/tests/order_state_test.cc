@@ -1,8 +1,9 @@
-// F-EX-2: the transition table, checked against the PRD's list, written out here independently, and property
-// tests over random event sequences.
+// F-EX-2 (ADR-024): the transition table, checked against the PRD's list, written out here independently, and
+// property tests over random event sequences.
 
 #include "vyuha/oms/order_state.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <exception>  // rapidcheck's headers use std::exception_ptr without including it
 #include <map>
@@ -34,6 +35,15 @@ const std::map<std::pair<OrderStatus, OrderEvent>, OrderStatus>& listed() {
       {{kPartiallyFilled, E::kPartialFill}, kPartiallyFilled},
       {{kOpen, E::kFill}, kFilled},
       {{kPartiallyFilled, E::kFill}, kFilled},
+      {{kCancelPending, E::kPartialFill}, kPartiallyFilled},
+      {{kCancelPending, E::kFill}, kFilled},
+      {{kCancelPending, E::kCancelReject}, kOpen},
+      {{kModifyPending, E::kPartialFill}, kPartiallyFilled},
+      {{kModifyPending, E::kFill}, kFilled},
+      {{kModifyPending, E::kModifyReject}, kOpen},
+      {{kOpen, E::kBrokerCancel}, kCancelled},
+      {{kPartiallyFilled, E::kBrokerCancel}, kCancelled},
+      {{kOpen, E::kBrokerReject}, kBrokerRejected},
       {{kOpen, E::kCancelRequest}, kCancelPending},
       {{kPartiallyFilled, E::kCancelRequest}, kCancelPending},
       {{kCancelPending, E::kCancelConfirm}, kCancelled},
@@ -82,6 +92,8 @@ class RecordingSink final : public IOrderEventSink {
     return true;
   }
   [[nodiscard]] bool healthy() const noexcept override { return is_healthy; }
+  [[nodiscard]] std::uint64_t pushed() const noexcept override { return events.size(); }
+  [[nodiscard]] std::uint64_t durable() const noexcept override { return events.size(); }
   std::vector<OrderEventRecord> events;
   bool full{false};
   bool is_healthy{true};
@@ -103,9 +115,9 @@ EventDetails valid_details(const Order& o, OrderEvent event) {
   const std::int32_t left = o.details.qty - o.filled_qty;
   d.fill_price = Price::from_units(10'000);
   if (event == E::kFill) {
-    d.fill_qty = left;
+    d.fill_qty = left > 0 ? left : 1;  // on a filled order, a late fill
   } else if (event == E::kPartialFill) {
-    d.fill_qty = left > 1 ? 1 : 0;
+    d.fill_qty = 1;
   } else if (event == E::kReconcilePartial) {
     d.broker_filled_qty = o.filled_qty + (left > 1 ? 1 : 0);
   } else if (event == E::kReconcileCancelled) {
@@ -115,6 +127,13 @@ EventDetails valid_details(const Order& o, OrderEvent event) {
     d.reason_code = "R-TEST";
   }
   return d;
+}
+
+// A reconcile whose broker total can't be true of that state: "partly filled" with none or all of it, or
+// "cancelled" with all of it. Oms refuses these, and recovery raises a mismatch.
+bool contradictory_total(OrderEvent event, const EventDetails& d, std::int32_t qty) {
+  return (event == E::kReconcilePartial && (d.broker_filled_qty <= 0 || d.broker_filled_qty >= qty)) ||
+         (event == E::kReconcileCancelled && d.broker_filled_qty >= qty);
 }
 
 // An event the PRD lists for this status, if any: random walks would rarely get past NEW otherwise.
@@ -159,9 +178,10 @@ TEST(OrderState, StatusNamesRoundTrip) {
   EXPECT_FALSE(parse_status("nonsense").has_value());
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): one property, and its oracle is the point
 TEST(OmsProperty, OnlyListedTransitionsHappenAndEveryOneIsRecorded) {
-  std::set<OrderStatus> reached;
   std::uint64_t refused_illegal = 0;
+  std::uint64_t late_fills = 0;
   const bool ok = rc::check(
       "random event sequences",
       [&](const std::vector<std::pair<std::uint8_t, std::uint8_t>>& raw, std::uint8_t qty_raw) {
@@ -171,6 +191,7 @@ TEST(OmsProperty, OnlyListedTransitionsHappenAndEveryOneIsRecorded) {
         const auto handle = oms.create(order_of(1 + (qty_raw % 5)));
         RC_ASSERT(handle.has_value());
         std::uint64_t expected_illegal = 0;
+        std::uint64_t expected_mismatches = 0;
         bool was_unknown = false;
         for (const auto& [pick, arbitrary] : raw) {
           const Order before = oms.order(*handle);
@@ -181,17 +202,30 @@ TEST(OmsProperty, OnlyListedTransitionsHappenAndEveryOneIsRecorded) {
           const EventDetails details = valid_details(before, event);
           const auto result = oms.apply(*handle, event, details);
           const Order& after = oms.order(*handle);
-          const auto listing = listed().find({before.status, event});
-
-          if (listing == listed().end()) {  // the oracle is the PRD's list, not the code under test
+          const bool is_fill = event == E::kPartialFill || event == E::kFill;
+          if (is_fill) {
+            // A fill is a fact: always recorded. Which fill it is comes from the totals, and the list says
+            // what it does.
+            const std::int32_t total = before.filled_qty + details.fill_qty;
+            const OrderEvent actual = total >= before.details.qty ? E::kFill : E::kPartialFill;
+            const auto listing = listed().find({before.status, actual});
+            const bool mismatch = listing == listed().end() || total > before.details.qty;
+            RC_ASSERT(result.has_value());
+            RC_ASSERT(after.status == (listing != listed().end() ? listing->second : before.status));
+            RC_ASSERT(after.filled_qty == std::min(total, before.details.qty));
+            RC_ASSERT(sink.events.back().fill_qty == details.fill_qty);
+            RC_ASSERT((sink.events.back().reason_code.view() == kReconMismatch) == mismatch);
+            expected_mismatches += mismatch ? 1 : 0;
+            late_fills += mismatch ? 1 : 0;
+          } else if (const auto listing = listed().find({before.status, event}); listing == listed().end()) {
+            // The oracle is the PRD's list, not the code under test.
             ++expected_illegal;
             ++refused_illegal;
             RC_ASSERT(!result.has_value());
             RC_ASSERT(result.error().code == ErrorCode::kIllegalTransition);
           } else {
-            // Listed events succeed, bar the partial fill or reconcile that one lot left can't represent.
-            const bool unrepresentable = (event == E::kPartialFill && details.fill_qty == 0) ||
-                                         (event == E::kReconcilePartial && details.broker_filled_qty == 0);
+            // Listed events succeed, bar a broker total the order can't hold.
+            const bool unrepresentable = contradictory_total(event, details, before.details.qty);
             RC_ASSERT(result.has_value() != unrepresentable);
             if (result.has_value()) {
               RC_ASSERT(after.status == listing->second);
@@ -216,17 +250,38 @@ TEST(OmsProperty, OnlyListedTransitionsHappenAndEveryOneIsRecorded) {
           RC_ASSERT(after.status != kFilled || after.filled_qty == after.details.qty);
           was_unknown = was_unknown || before.status == kUnknown;
           RC_ASSERT(!was_unknown || (after.status != kApproved && after.status != kSent));  // never re-sent
-          reached.insert(after.status);
         }
         RC_ASSERT(oms.illegal_transitions() == expected_illegal);
+        RC_ASSERT(oms.recon_mismatches() == expected_mismatches);
       });
   EXPECT_TRUE(ok);
   EXPECT_GT(refused_illegal, 0U);
-  for (const OrderStatus s : all_statuses()) {
-    if (s != kNew) {
-      EXPECT_TRUE(reached.contains(s)) << "the walks never reached " << to_string(s);
+  EXPECT_GT(late_fills, 0U);
+}
+
+// The walks above are random, so this proves deterministically that the real Oms can reach every status.
+TEST(Oms, EveryStatusIsReachableThroughListedEvents) {
+  std::set<OrderStatus> reached{kNew};
+  std::vector<std::vector<OrderEvent>> walks{{}};
+  for (std::size_t next = 0; next < walks.size(); ++next) {
+    const std::vector<OrderEvent> walk = walks[next];
+    const FixedClock clock;
+    RecordingSink sink;
+    Oms oms(sink, clock, 1);
+    const OrderHandle handle = oms.create(order_of(3)).value();
+    for (const OrderEvent event : walk) {
+      ASSERT_TRUE(oms.apply(handle, event, valid_details(oms.order(handle), event)).has_value());
+    }
+    for (const OrderEvent event : all_events()) {
+      const auto listing = listed().find({oms.order(handle).status, event});
+      if (listing != listed().end() && reached.insert(listing->second).second) {
+        std::vector<OrderEvent> longer = walk;
+        longer.push_back(event);
+        walks.push_back(std::move(longer));
+      }
     }
   }
+  EXPECT_EQ(reached.size(), std::size_t{kOrderStatusCount});
 }
 
 TEST(OmsProperty, AFullSinkLeavesTheOrderUnchangedInEveryState) {
@@ -248,9 +303,10 @@ TEST(OmsProperty, AFullSinkLeavesTheOrderUnchangedInEveryState) {
     sink.full = true;
     const auto event = static_cast<OrderEvent>(raw % kOrderEventCount);
     const auto result = oms.apply(*handle, event, valid_details(before, event));
-    const bool one_left = before.details.qty - before.filled_qty == 1;
-    const bool needs_two = event == E::kPartialFill || event == E::kReconcilePartial;
-    const bool would_apply = listed().contains({before.status, event}) && (!one_left || !needs_two);
+    const EventDetails details = valid_details(before, event);
+    const bool is_fill = event == E::kPartialFill || event == E::kFill;
+    const bool would_apply = is_fill || (listed().contains({before.status, event}) &&
+                                         !contradictory_total(event, details, before.details.qty));
     RC_ASSERT(!result.has_value());
     if (would_apply) {
       RC_ASSERT(result.error().code == ErrorCode::kCapacityExceeded);
@@ -309,24 +365,114 @@ TEST(Oms, PoolFullIsAnErrorAndSinkFullLeavesNoOrder) {
   EXPECT_EQ(oms.create(order_of(1)).error().code, ErrorCode::kCapacityExceeded);
 }
 
-TEST(Oms, FillsAddUpAndAnOverfillIsRefused) {
+TEST(Oms, FillsAddUpWhicheverEventTheBrokerUpdateCameAs) {
   Walked w;
   walk_to_open(w, 10);
   const Price px = Price::from_units(10'000);
   EXPECT_FALSE(
-      w.oms.apply(w.handle, E::kPartialFill, {.fill_qty = 10, .fill_price = px}));  // that would complete it
-  EXPECT_FALSE(w.oms.apply(w.handle, E::kFill, {.fill_qty = 11, .fill_price = px}));
-  EXPECT_FALSE(w.oms.apply(w.handle, E::kFill, {.fill_qty = 9, .fill_price = px}));
-  EXPECT_FALSE(w.oms.apply(w.handle, E::kPartialFill, {.fill_qty = 0, .fill_price = px}));
+      w.oms.apply(w.handle, E::kPartialFill, {.fill_qty = 0, .fill_price = px}));  // no shares: garbage
   EXPECT_FALSE(w.oms.apply(w.handle, E::kPartialFill, {.fill_qty = -1, .fill_price = px}));
-  EXPECT_FALSE(w.oms.apply(w.handle, E::kPartialFill, {.fill_qty = 1}));  // no price
   EXPECT_EQ(w.oms.illegal_transitions(), 0U);
-  EXPECT_EQ(w.oms.refused_fills(), 6U);
+  EXPECT_EQ(w.oms.apply(w.handle, E::kFill, {.fill_qty = 3, .fill_price = px}), kPartiallyFilled);
   EXPECT_EQ(w.oms.apply(w.handle, E::kPartialFill, {.fill_qty = 3, .fill_price = px}), kPartiallyFilled);
-  EXPECT_EQ(w.oms.apply(w.handle, E::kPartialFill, {.fill_qty = 3, .fill_price = px}), kPartiallyFilled);
-  EXPECT_EQ(w.oms.apply(w.handle, E::kFill, {.fill_qty = 4, .fill_price = px}), kFilled);
+  EXPECT_EQ(w.oms.apply(w.handle, E::kPartialFill, {.fill_qty = 4, .fill_price = px}), kFilled);
   EXPECT_EQ(w.oms.order(w.handle).filled_qty, 10);
   EXPECT_EQ(w.oms.order(w.handle).broker_order_id.view(), "B1");
+  EXPECT_EQ(w.oms.recon_mismatches(), 0U);
+}
+
+TEST(Oms, AFillRacingACancelOrModifyIsAccepted) {
+  const Price px = Price::from_units(10'000);
+  Walked a;
+  walk_to_open(a, 10);
+  ASSERT_TRUE(a.oms.apply(a.handle, E::kCancelRequest));
+  EXPECT_EQ(a.oms.apply(a.handle, E::kPartialFill, {.fill_qty = 4, .fill_price = px}), kPartiallyFilled);
+  ASSERT_TRUE(a.oms.apply(a.handle, E::kCancelRequest));
+  EXPECT_EQ(a.oms.apply(a.handle, E::kFill, {.fill_qty = 6, .fill_price = px}), kFilled);
+  EXPECT_EQ(a.oms.recon_mismatches(), 0U);
+
+  Walked b;
+  walk_to_open(b, 10);
+  ASSERT_TRUE(b.oms.apply(b.handle, E::kModifyRequest));
+  EXPECT_EQ(b.oms.apply(b.handle, E::kPartialFill, {.fill_qty = 4, .fill_price = px}), kPartiallyFilled);
+  ASSERT_TRUE(b.oms.apply(b.handle, E::kModifyRequest));
+  EXPECT_EQ(b.oms.apply(b.handle, E::kModifyReject), kOpen);
+  EXPECT_EQ(b.oms.order(b.handle).filled_qty, 4);  // kept, though the status says OPEN
+  ASSERT_TRUE(b.oms.apply(b.handle, E::kCancelRequest));
+  EXPECT_EQ(b.oms.apply(b.handle, E::kCancelReject), kOpen);
+}
+
+TEST(Oms, BrokerInitiatedEndsKeepFilledQty) {
+  const Price px = Price::from_units(10'000);
+  Walked a;
+  walk_to_open(a, 10);
+  ASSERT_TRUE(a.oms.apply(a.handle, E::kPartialFill, {.fill_qty = 4, .fill_price = px}));
+  EXPECT_EQ(a.oms.apply(a.handle, E::kBrokerCancel, {.reason_code = "IOC_REMAINDER"}), kCancelled);
+  EXPECT_EQ(a.oms.order(a.handle).filled_qty, 4);
+
+  Walked b;
+  walk_to_open(b, 10);
+  EXPECT_EQ(b.oms.apply(b.handle, E::kBrokerReject, {.reason_code = "RMS"}), kBrokerRejected);
+}
+
+TEST(Oms, ALateFillOnATerminalOrderIsRecordedAndRaisesAMismatch) {
+  const Price px = Price::from_units(10'000);
+  Walked w;
+  walk_to_open(w, 10);
+  ASSERT_TRUE(w.oms.apply(w.handle, E::kBrokerCancel));
+  const std::size_t before = w.sink.events.size();
+  EXPECT_EQ(w.oms.apply(w.handle, E::kPartialFill, {.fill_qty = 2, .fill_price = px}), kCancelled);
+  EXPECT_EQ(w.oms.order(w.handle).filled_qty, 2);
+  EXPECT_EQ(w.oms.recon_mismatches(), 1U);
+  ASSERT_EQ(w.sink.events.size(), before + 1);
+  EXPECT_EQ(w.sink.events.back().reason_code.view(), kReconMismatch);
+  EXPECT_EQ(w.sink.events.back().from, kCancelled);
+  EXPECT_EQ(w.sink.events.back().to, kCancelled);
+  EXPECT_EQ(w.sink.events.back().fill_qty, 2);
+}
+
+TEST(Oms, AnOverfillIsRecordedInFullButCappedOnTheOrder) {
+  const Price px = Price::from_units(10'000);
+  Walked w;
+  walk_to_open(w, 10);
+  EXPECT_EQ(w.oms.apply(w.handle, E::kFill, {.fill_qty = 15, .fill_price = px}), kFilled);
+  EXPECT_EQ(w.oms.order(w.handle).filled_qty, 10);  // the column's CHECK; the event keeps the real number
+  EXPECT_EQ(w.sink.events.back().fill_qty, 15);
+  EXPECT_EQ(w.sink.events.back().reason_code.view(), kReconMismatch);
+  EXPECT_EQ(w.oms.apply(w.handle, E::kFill, {.fill_qty = 1, .fill_price = px}),
+            kFilled);  // and again, after FILLED
+  EXPECT_EQ(w.oms.recon_mismatches(), 2U);
+}
+
+TEST(Oms, AFillInAStateWithNoFillTransitionKeepsTheStatus) {
+  const Price px = Price::from_units(10'000);
+  Walked w;
+  w.handle = w.oms.create(order_of(10)).value();
+  ASSERT_TRUE(w.oms.apply(w.handle, E::kRiskApprove));
+  ASSERT_TRUE(w.oms.apply(w.handle, E::kSend));
+  EXPECT_EQ(w.oms.apply(w.handle, E::kPartialFill, {.fill_qty = 2, .fill_price = px}), kSent);
+  EXPECT_EQ(w.oms.order(w.handle).filled_qty, 2);
+  EXPECT_EQ(w.oms.recon_mismatches(), 1U);
+  EXPECT_EQ(w.oms.illegal_transitions(), 0U);
+}
+
+TEST(Oms, AZeroPriceFillIsStillAFillAndRaisesAMismatch) {
+  Walked w;
+  walk_to_open(w, 10);
+  EXPECT_EQ(w.oms.apply(w.handle, E::kPartialFill, {.fill_qty = 2}), kPartiallyFilled);
+  EXPECT_EQ(w.oms.recon_mismatches(), 1U);
+}
+
+TEST(Oms, AFullSinkRefusesAFillSoTheCallerRetries) {
+  Walked w;
+  walk_to_open(w, 10);
+  w.sink.full = true;
+  const EventDetails fill{.fill_qty = 2, .fill_price = Price::from_units(10'000)};
+  EXPECT_EQ(w.oms.apply(w.handle, E::kPartialFill, fill).error().code, ErrorCode::kCapacityExceeded);
+  EXPECT_EQ(w.oms.order(w.handle).filled_qty, 0);
+  EXPECT_EQ(w.oms.recon_mismatches(), 0U);
+  w.sink.full = false;
+  EXPECT_EQ(w.oms.apply(w.handle, E::kPartialFill, fill), kPartiallyFilled);
 }
 
 TEST(Oms, UnknownIsNeverSentAgain) {

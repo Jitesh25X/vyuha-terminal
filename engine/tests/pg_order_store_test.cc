@@ -297,6 +297,44 @@ TEST(PgOrderStore, EventsWaitOutAnOutageAndArriveInOrder) {
             1'767'000'000'123'456);
 }
 
+TEST(PgOrderStore, ALateFillIsStoredAndAlertsAdminsOnce) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  {
+    PgOrderEventWriter writer(db.url());
+    Oms oms(writer, clock, 1);
+    const OrderHandle h = oms.create(details(s, 1, 10)).value();
+    ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
+    ASSERT_TRUE(oms.apply(h, E::kSend));
+    ASSERT_TRUE(oms.apply(h, E::kBrokerAck, {.broker_order_id = "B1"}));
+    ASSERT_TRUE(oms.apply(h, E::kBrokerCancel, {.reason_code = "EXCHANGE_CANCEL"}));
+    ASSERT_TRUE(oms.apply(h, E::kPartialFill, {.fill_qty = 2, .fill_price = Price::from_units(24'500'000)}));
+    wait_written(writer, 6);
+  }
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  EXPECT_EQ(tx.query_value<std::string>("SELECT status::text FROM \"order\""), "CANCELLED");
+  EXPECT_EQ(tx.query_value<int>("SELECT filled_qty FROM \"order\""), 2);
+  const auto row = tx.exec(
+                         "SELECT from_status::text, to_status::text, reason_code, payload->>'fill_qty', "
+                         "payload->>'fill_price' FROM order_event WHERE seq = 6")
+                       .one_row();
+  EXPECT_EQ(row[0].as<std::string>(), "CANCELLED");
+  EXPECT_EQ(row[1].as<std::string>(), "CANCELLED");
+  EXPECT_EQ(row[2].as<std::string>(), "RECON_MISMATCH");
+  EXPECT_EQ(row[3].as<std::string>(), "2");
+  EXPECT_EQ(row[4].as<std::string>(), "2450.0000");
+  const auto alert = tx.exec("SELECT severity, title, body->>'fill_qty' FROM alert_event").one_row();
+  EXPECT_EQ(alert[0].as<std::string>(), "critical");
+  EXPECT_EQ(alert[1].as<std::string>(), "RECON_MISMATCH");
+  EXPECT_EQ(alert[2].as<std::string>(), "2");
+}
+
 TEST(PgOrderStore, ShutdownGivesUpInBoundedTimeAndErrorsDontLeakTheUrl) {
   const std::string dead = "postgres://u:secret-password@127.0.0.1:1/none?connect_timeout=1";
   const auto loaded = load_open_orders(dead);

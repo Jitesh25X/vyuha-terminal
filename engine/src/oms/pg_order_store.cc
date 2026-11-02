@@ -174,15 +174,24 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
                                   ? std::format(R"({{"filled_qty":{},"fill_qty":{},"fill_price":"{}"}})",
                                                 e.filled_qty, e.fill_qty, e.fill_price.to_string())
                                   : std::format(R"({{"filled_qty":{}}})", e.filled_qty);
-  // A retry after an unknown commit outcome finds the row already there.
-  tx.exec(
+  // A retry after an unknown commit finds the row already there, so nothing is written or alerted twice.
+  const pqxx::result inserted = tx.exec(
       R"(INSERT INTO order_event (order_id, seq, from_status, to_status, reason_code, payload, ts)
          VALUES ($1::uuid, $2, $3::order_status, $4::order_status, $5, $6::jsonb,
            'epoch'::timestamptz + $7::bigint * interval '1 microsecond')
-         ON CONFLICT (order_id, seq) DO NOTHING)",
+         ON CONFLICT (order_id, seq) DO NOTHING RETURNING id)",
       pqxx::params{id, e.seq,
                    e.from.has_value() ? std::optional{std::string(to_string(*e.from))} : std::nullopt,
                    std::string(to_string(e.to)), text(e.reason_code.view()), payload, micros});
+  if (e.reason_code.view() == kReconMismatch && !inserted.empty()) {
+    const std::string body =
+        std::format(R"({{"order_id":"{}","seq":{},"status":"{}","filled_qty":{},"fill_qty":{}}})", id, e.seq,
+                    to_string(e.to), e.filled_qty, e.fill_qty);
+    tx.exec(
+        R"(INSERT INTO alert_event (user_id, severity, title, body)
+           SELECT id, 'critical', 'RECON_MISMATCH', $1::jsonb FROM app_user WHERE role = 'admin' AND is_active)",
+        pqxx::params{body});
+  }
 }
 
 template <class T>
@@ -234,7 +243,13 @@ PgOrderEventWriter::PgOrderEventWriter(std::string url)
 
 PgOrderEventWriter::~PgOrderEventWriter() = default;
 
-bool PgOrderEventWriter::try_push(const OrderEventRecord& event) noexcept { return ring_->try_push(event); }
+bool PgOrderEventWriter::try_push(const OrderEventRecord& event) noexcept {
+  if (!ring_->try_push(event)) {
+    return false;
+  }
+  ++pushed_;
+  return true;
+}
 
 bool PgOrderEventWriter::flush(const std::vector<OrderEventRecord>& batch) {
   const auto log_failure = [&](std::string_view sqlstate) {

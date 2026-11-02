@@ -10,6 +10,7 @@ add_executable(vyuha_tests
   kite_parser_test.cc
   kite_ticker_test.cc
   md_publisher_test.cc
+  order_router_test.cc
   order_state_test.cc
   price_test.cc
   session_manager_test.cc
@@ -27,9 +28,13 @@ gtest_discover_tests(vyuha_tests DISCOVERY_TIMEOUT 60)
 target_compile_definitions(vyuha_tests PRIVATE VYUHA_FIXTURES_DIR="${PROJECT_SOURCE_DIR}/fixtures")
 
 # Order event writer and recovery on a real Postgres, in every preset (needs VYUHA_TEST_POSTGRES_URL).
-add_executable(vyuha_pg_tests pg_order_store_test.cc)
+add_executable(vyuha_oms_crash_child oms_crash_child.cc)
+target_link_libraries(vyuha_oms_crash_child PRIVATE vyuha_oms_pg vyuha_warnings Threads::Threads)
+add_executable(vyuha_pg_tests pg_order_store_test.cc oms_crash_test.cc)
 target_link_libraries(vyuha_pg_tests PRIVATE vyuha_oms_pg libpqxx::pqxx vyuha_warnings Threads::Threads GTest::gtest_main)
-target_compile_definitions(vyuha_pg_tests PRIVATE VYUHA_MIGRATIONS_DIR="${PROJECT_SOURCE_DIR}/../db/migrations")
+target_compile_definitions(vyuha_pg_tests PRIVATE VYUHA_MIGRATIONS_DIR="${PROJECT_SOURCE_DIR}/../db/migrations"
+                                                  VYUHA_OMS_CRASH_CHILD="$<TARGET_FILE:vyuha_oms_crash_child>")
+add_dependencies(vyuha_pg_tests vyuha_oms_crash_child)
 gtest_discover_tests(vyuha_pg_tests DISCOVERY_TIMEOUT 60)
 
 # Reference tests against protoc-generated classes for the vendored Upstox schema. Not built with

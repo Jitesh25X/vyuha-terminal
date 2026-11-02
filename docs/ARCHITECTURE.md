@@ -146,7 +146,7 @@ Broker WS → IO decode → SPSC ring → core normalize (canonical `Tick`, int6
 Recorder subscribes `md.>` → batches of 10k rows or 1 s → ClickHouse.
 
 ### 6.2 Order path
-UI ticket → `POST /orders` (gateway: authN, RBAC, account mapping, idempotency) → gRPC `Engine.SubmitIntent` → intent queue → **RiskGate** → OMS `APPROVED` → slicer/router → OPS token bucket → adapter REST → broker. Broker ack/updates → order-update stream/postback → ring → OMS transition → NATS `oms.order.<account>` + Postgres `order_event` → gateway → WS → blotter.
+UI ticket → `POST /orders` (gateway: authN, RBAC, account mapping, idempotency) → gRPC `Engine.SubmitIntent` → intent queue → **RiskGate** → OMS `APPROVED` (durable in Postgres before anything is sent, ADR-025; the router polls the writer, so Postgres stays off the core thread) → slicer/router → OPS token bucket → adapter REST → broker, with `client_order_id` in the broker tag. Broker ack/updates → order-update stream/postback → ring → OMS transition → NATS `oms.order.<account>` + Postgres `order_event` → gateway → WS → blotter.
 Strategy path: strategy host (quant) → NATS request `engine.intent` (same gRPC message) → same gate.
 AI path: copilot `draft_order_ticket` → WS message `ui.open_ticket` → human presses Ctrl+Enter → normal UI path.
 

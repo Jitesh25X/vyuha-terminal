@@ -1,5 +1,6 @@
 #include "vyuha/oms/oms.h"
 
+#include <algorithm>
 #include <array>
 
 #include "quill/LogMacros.h"
@@ -17,6 +18,7 @@ constexpr std::array<std::string_view, kOrderStatusCount> kStatusNames{
 
 constexpr Error kBadDetails{ErrorCode::kInvalidArgument, "oms: invalid event details"};
 constexpr Error kSinkFull{ErrorCode::kCapacityExceeded, "oms: event sink full"};
+constexpr Error kNoOrder{ErrorCode::kInvalidArgument, "oms: no such order"};
 
 [[nodiscard]] constexpr int hex_value(char c) noexcept {
   if (c >= '0' && c <= '9') {
@@ -154,50 +156,68 @@ std::expected<OrderStatus, Error> Oms::illegal(const Order& order, OrderEvent ev
 }
 
 // NOLINTNEXTLINE(bugprone-exception-escape)
-std::expected<std::int32_t, Error> Oms::filled_after(const Order& order, OrderEvent event,
-                                                     const EventDetails& details) noexcept {
-  const std::int32_t qty = order.details.qty;
-  const std::int32_t broker = details.broker_filled_qty;
-  switch (event) {
-    case OrderEvent::kPartialFill:
-    case OrderEvent::kFill: {
-      const std::int32_t left = qty - order.filled_qty;
-      const bool fits = event == OrderEvent::kFill ? details.fill_qty == left : details.fill_qty < left;
-      if (details.fill_qty <= 0 || details.fill_price.units() <= 0 || !fits) {
-        ++refused_fills_;
-        if (quill::Logger* logger = log::engine(); logger != nullptr) {
-          const auto id = order.details.id.to_chars();
-          LOG_ERROR(logger, "OMS_FILL_REFUSED order={} filled={} qty={} fill={}",
-                    std::string_view(id.data(), id.size()), order.filled_qty, qty, details.fill_qty);
-        }
-        return std::unexpected(kBadDetails);
-      }
-      return order.filled_qty + details.fill_qty;
-    }
-    case OrderEvent::kReconcilePartial:
-      if (broker <= 0 || broker >= qty || broker < order.filled_qty) {
-        return std::unexpected(kBadDetails);
-      }
-      return broker;
-    case OrderEvent::kReconcileCancelled:
-      if (broker >= qty || broker < order.filled_qty) {
-        return std::unexpected(kBadDetails);
-      }
-      return broker;
-    case OrderEvent::kReconcileFilled:
-      return qty;
-    default:
-      return order.filled_qty;
+std::expected<OrderStatus, Error> Oms::record(Order& order, OrderStatus to, std::int32_t filled,
+                                              const EventDetails& details, std::string_view reason) noexcept {
+  OrderEventRecord event;
+  FixedString<40> broker_id = order.broker_order_id;
+  if (!event.reason_code.assign(reason) ||
+      (!details.broker_order_id.empty() && !broker_id.assign(details.broker_order_id))) {
+    return std::unexpected(kBadDetails);
   }
+  event.order_id = order.details.id;
+  event.seq = order.seq + 1;
+  event.from = order.status;
+  event.to = to;
+  event.filled_qty = filled;
+  event.fill_qty = details.fill_qty;
+  event.fill_price = details.fill_price;
+  event.broker_order_id = broker_id;
+  event.ts = clock_->now();
+  if (!sink_->try_push(event)) {
+    return std::unexpected(kSinkFull);
+  }
+  order.status = to;
+  order.seq = event.seq;
+  order.filled_qty = filled;
+  order.broker_order_id = broker_id;
+  return order.status;
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape)
+std::expected<OrderStatus, Error> Oms::fill(Order& order, const EventDetails& details) noexcept {
+  if (details.fill_qty <= 0) {
+    return std::unexpected(kBadDetails);
+  }
+  const std::int64_t total = std::int64_t{order.filled_qty} + details.fill_qty;
+  const std::int32_t qty = order.details.qty;
+  const OrderEvent event = total >= qty ? OrderEvent::kFill : OrderEvent::kPartialFill;
+  const std::optional<OrderStatus> next = next_status(order.status, event);
+  const bool mismatch = !next.has_value() || total > qty || details.fill_price.units() <= 0;
+  const auto filled = static_cast<std::int32_t>(std::min<std::int64_t>(total, qty));
+  const auto recorded = record(order, next.value_or(order.status), filled, details,
+                               mismatch ? kReconMismatch : std::string_view{});
+  if (recorded.has_value() && mismatch) {
+    ++recon_mismatches_;
+    if (quill::Logger* logger = log::engine(); logger != nullptr) {
+      const auto id = order.details.id.to_chars();
+      LOG_ERROR(logger, "RECON_MISMATCH fill order={} status={} filled={} qty={} fill={}",
+                std::string_view(id.data(), id.size()), to_string(order.status), order.filled_qty, qty,
+                details.fill_qty);
+    }
+  }
+  return recorded;
 }
 
 // NOLINTNEXTLINE(bugprone-exception-escape)
 std::expected<OrderStatus, Error> Oms::apply(OrderHandle handle, OrderEvent event,
                                              const EventDetails& details) noexcept {
   if (handle >= orders_.size()) {
-    return std::unexpected(Error{ErrorCode::kInvalidArgument, "oms: no such order"});
+    return std::unexpected(kNoOrder);
   }
   Order& order = orders_[handle];
+  if (event == OrderEvent::kPartialFill || event == OrderEvent::kFill) {
+    return fill(order, details);
+  }
   const std::optional<OrderStatus> next = next_status(order.status, event);
   if (!next.has_value() ||
       (order.needs_reconcile && (event == OrderEvent::kSend || event == OrderEvent::kModifyRequest))) {
@@ -212,44 +232,73 @@ std::expected<OrderStatus, Error> Oms::apply(OrderHandle handle, OrderEvent even
     return std::unexpected(kBadDetails);
   }
 
-  const auto filled = filled_after(order, event, details);
-  if (!filled.has_value()) {
-    return std::unexpected(filled.error());
+  const std::int32_t qty = order.details.qty;
+  const std::int32_t broker = details.broker_filled_qty;
+  std::int32_t filled = order.filled_qty;
+  switch (event) {
+    case OrderEvent::kReconcilePartial:
+      if (broker <= 0 || broker >= qty || broker < order.filled_qty) {
+        return std::unexpected(kBadDetails);
+      }
+      filled = broker;
+      break;
+    case OrderEvent::kReconcileCancelled:
+      if (broker >= qty || broker < order.filled_qty) {
+        return std::unexpected(kBadDetails);
+      }
+      filled = broker;
+      break;
+    case OrderEvent::kReconcileFilled:
+      filled = qty;
+      break;
+    default:
+      break;
   }
 
-  OrderEventRecord record;
-  FixedString<40> broker_id = order.broker_order_id;
-  if (!record.reason_code.assign(details.reason_code) ||
-      (!details.broker_order_id.empty() && !broker_id.assign(details.broker_order_id))) {
-    return std::unexpected(kBadDetails);
+  // What reconciliation learned is a fill too: the event says how much, for the position projector.
+  EventDetails recorded = details;
+  recorded.fill_qty = filled - order.filled_qty;
+  if (recorded.fill_qty == 0) {
+    recorded.fill_price = Price{};
   }
-  record.order_id = order.details.id;
-  record.seq = order.seq + 1;
-  record.from = order.status;
-  record.to = *next;
-  record.filled_qty = *filled;
-  if (event == OrderEvent::kPartialFill || event == OrderEvent::kFill) {
-    record.fill_qty = details.fill_qty;
-    record.fill_price = details.fill_price;
-  }
-  record.broker_order_id = broker_id;
-  record.ts = clock_->now();
-  if (!sink_->try_push(record)) {
-    return std::unexpected(kSinkFull);
-  }
-  order.status = *next;
-  order.seq = record.seq;
-  order.filled_qty = *filled;
-  order.broker_order_id = broker_id;
-  if (event >= OrderEvent::kReconcileOpen) {
+  const auto result = record(order, *next, filled, recorded, details.reason_code);
+  if (result.has_value() && event >= OrderEvent::kReconcileOpen) {
     order.needs_reconcile = false;
   }
-  return order.status;
+  return result;
+}
+
+bool Oms::can_send(OrderHandle handle) const noexcept {
+  if (handle >= orders_.size()) {
+    return false;
+  }
+  const Order& order = orders_[handle];
+  return order.status == OrderStatus::kApproved && !order.needs_reconcile && sink_->healthy();
+}
+
+std::expected<OrderStatus, Error> Oms::record_sent(OrderHandle handle) noexcept {
+  if (handle >= orders_.size() || orders_[handle].status != OrderStatus::kApproved) {
+    return std::unexpected(kNoOrder);
+  }
+  return record(orders_[handle], OrderStatus::kSent, orders_[handle].filled_qty, {}, {});
+}
+
+std::expected<void, Error> Oms::raise_mismatch(OrderHandle handle) noexcept {
+  if (handle >= orders_.size()) {
+    return std::unexpected(kNoOrder);
+  }
+  Order& order = orders_[handle];
+  const auto recorded = record(order, order.status, order.filled_qty, {}, kReconMismatch);
+  if (!recorded.has_value()) {
+    return std::unexpected(recorded.error());
+  }
+  ++recon_mismatches_;
+  return {};
 }
 
 std::expected<void, Error> Oms::confirm_reconciled(OrderHandle handle) noexcept {
   if (handle >= orders_.size()) {
-    return std::unexpected(Error{ErrorCode::kInvalidArgument, "oms: no such order"});
+    return std::unexpected(kNoOrder);
   }
   orders_[handle].needs_reconcile = false;
   return {};

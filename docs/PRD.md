@@ -189,16 +189,21 @@ Functions: `Q` quote, `CH` chart (candles, volume, indicators, drawing), `DOM` d
 States and transitions (canonical, all transitions recorded as `order_event`):
 ```
 NEW → RiskCheck → RISK_REJECTED (terminal)
-NEW → RiskCheck → APPROVED → Send → SENT
+NEW → RiskCheck → APPROVED (durable before anything is sent) → Send → SENT
 SENT → BrokerAck → OPEN | BROKER_REJECTED (terminal)
-OPEN → PartialFill → PARTIALLY_FILLED
-OPEN | PARTIALLY_FILLED → Fill(complete) → FILLED (terminal)
+OPEN | PARTIALLY_FILLED | CANCEL_PENDING | MODIFY_PENDING → PartialFill → PARTIALLY_FILLED
+OPEN | PARTIALLY_FILLED | CANCEL_PENDING | MODIFY_PENDING → Fill(complete) → FILLED (terminal)
 OPEN | PARTIALLY_FILLED → CancelReq → CANCEL_PENDING → CANCELLED (terminal)
-OPEN | PARTIALLY_FILLED → ModifyReq → (risk check) → MODIFY_PENDING → OPEN
-SENT → Timeout(5s, no ack) → UNKNOWN → Reconcile → (actual broker state)
+CANCEL_PENDING → CancelRejected → OPEN
+OPEN | PARTIALLY_FILLED → ModifyReq → (risk check) → MODIFY_PENDING → ModifyConfirmed | ModifyRejected → OPEN
+OPEN | PARTIALLY_FILLED → BrokerCancel (IOC remainder, MIS auto square-off, exchange cancel) → CANCELLED (terminal), filled_qty kept
+OPEN → PostAckReject (RMS) → BROKER_REJECTED (terminal)
+SENT → Timeout(5s, no ack) → UNKNOWN → Reconcile → OPEN | PARTIALLY_FILLED | FILLED | CANCELLED | BROKER_REJECTED
 ```
 **Acceptance criteria:**
-- [ ] Every transition not listed above is rejected and logged as `OMS_ILLEGAL_TRANSITION` (property-based test).
+- [ ] Every transition not listed above is rejected and logged as `OMS_ILLEGAL_TRANSITION` (property-based test), except a fill (next line).
+- [ ] A broker fill is a fact: the OMS never refuses or drops one. A fill with no listed transition, including on an order already in a terminal state, or past the order's quantity, is still recorded: `filled_qty` and positions update, the status stays, and a `RECON_MISMATCH` alert is raised (ADR-024).
+- [ ] `NEW` and `APPROVED` are durable in Postgres before the adapter sends anything, and the broker order carries `client_order_id` in its tag. After a crash between persist and send, or between send and ack, the broker has exactly one order (ADR-025; crash test).
 - [ ] Given `UNKNOWN`, then reconciliation queries the broker order book within 2 s and resolves state; no duplicate re-send ever happens for an `UNKNOWN` order.
 - [ ] Every 60 s and on reconnect, engine reconciles open orders and positions against broker; mismatches create a `RECON_MISMATCH` alert with diff.
 
@@ -207,7 +212,7 @@ SENT → Timeout(5s, no ack) → UNKNOWN → Reconcile → (actual broker state)
 **Acceptance criteria:**
 - [ ] Given account `A` bound to IP `x.x.x.x` that is not present on the host, then the engine refuses to start `A`'s session with `STATIC_IP_NOT_ON_HOST` and alerts admin.
 - [ ] Per-account order rate is capped by a token bucket at `min(broker_limit, desk_ops_cap)`, default desk cap **8 orders/s per account per exchange** (below the 10 OPS registration threshold).
-- [ ] Every order carries the strategy tag (`manual`, `strat:<id>`, `ai-draft`) in the broker's tag field (truncated to broker max length) and in `order.tag`.
+- [ ] Every order carries `client_order_id` in the broker's tag field (truncated to broker max length) so reconciliation can find it (ADR-025), and the strategy tag (`manual`, `strat:<id>`, `ai-draft`) in `order.tag`.
 - [ ] Adapter contract tests run against recorded broker responses (VCR fixtures) — no live calls in CI.
 - [ ] Access tokens are held only in engine memory and encrypted in Postgres; never logged (log scrubber test).
 

@@ -112,11 +112,17 @@ class IOrderEventSink {
   IOrderEventSink& operator=(IOrderEventSink&&) = delete;
   virtual ~IOrderEventSink() = default;
   [[nodiscard]] virtual bool try_push(const OrderEventRecord& event) noexcept = 0;
-  // False while events aren't reaching storage: Oms refuses to send anything to a broker.
+  // False while events aren't reaching storage: nothing is sent to a broker.
   [[nodiscard]] virtual bool healthy() const noexcept { return true; }
+  // Events accepted so far, and how many of them are durable. Events are durable in the order they were
+  // pushed, so event N is durable once durable() >= N (ADR-025: persist before send).
+  [[nodiscard]] virtual std::uint64_t pushed() const noexcept = 0;
+  [[nodiscard]] virtual std::uint64_t durable() const noexcept = 0;
 };
 
 using OrderHandle = std::uint32_t;
+
+inline constexpr std::string_view kReconMismatch = "RECON_MISMATCH";
 
 struct EventDetails {
   std::string_view reason_code{};  // NOLINT(readability-redundant-member-init): partly filled by designators
@@ -146,37 +152,51 @@ class Oms {
   [[nodiscard]] std::expected<OrderHandle, Error> create(const OrderDetails& details) noexcept;
 
   // Applies one event and records it. Errors leave the order unchanged:
-  // kIllegalTransition (OMS_ILLEGAL_TRANSITION), kInvalidArgument (bad details, e.g. an overfill),
+  // kIllegalTransition (OMS_ILLEGAL_TRANSITION), kInvalidArgument (bad details),
   // kCapacityExceeded (sink full: retry), kOrderLogUnavailable (kSend while the sink is unhealthy).
+  //
+  // A fill (kPartialFill, kFill) is a broker fact: it is never refused or dropped, whatever the status. Which
+  // of the two it is comes from the totals. In a status with no fill transition, or past the order's qty, it
+  // is recorded with reason RECON_MISMATCH: filled_qty is updated (capped at qty; the event holds the real
+  // fill), the status stays, and the writer alerts admins. Only a fill of no shares is refused, as garbage.
   [[nodiscard]] std::expected<OrderStatus, Error> apply(OrderHandle handle, OrderEvent event,
                                                         const EventDetails& details = {}) noexcept;
 
   // Puts back an order read from Postgres, with no new event. It continues from the stored seq.
   [[nodiscard]] std::expected<OrderHandle, Error> restore(const RecoveredOrder& recovered) noexcept;
 
-  // The broker's order book matches this restored order, so it may be sent or modified again. A mismatch
-  // needs a transition F-EX-2 doesn't list yet (DECISIONS D-17). Records nothing: nothing changed.
+  // Whether kSend would be allowed now. The router checks this, sends, then calls record_sent.
+  [[nodiscard]] bool can_send(OrderHandle handle) const noexcept;
+  // Records that the adapter has the order. Only a full sink can refuse it: the order has gone, so the caller
+  // retries this and never sends again.
+  [[nodiscard]] std::expected<OrderStatus, Error> record_sent(OrderHandle handle) noexcept;
+  // Records a mismatch and alerts admins (RECON_MISMATCH), without changing the order.
+  [[nodiscard]] std::expected<void, Error> raise_mismatch(OrderHandle handle) noexcept;
+
+  // The broker's order book matches this restored order, so it may be sent or modified again.
+  // Records nothing: nothing changed.
   [[nodiscard]] std::expected<void, Error> confirm_reconciled(OrderHandle handle) noexcept;
 
   [[nodiscard]] const Order& order(OrderHandle handle) const noexcept { return orders_[handle]; }
   [[nodiscard]] std::size_t size() const noexcept { return orders_.size(); }
   // The M2 exit criterion: zero of these over a paper day.
   [[nodiscard]] std::uint64_t illegal_transitions() const noexcept { return illegal_; }
-  // Fills refused for their details (an overfill, usually a fill lost in a crash). The position may be wrong.
-  [[nodiscard]] std::uint64_t refused_fills() const noexcept { return refused_fills_; }
+  // RECON_MISMATCH events raised, including fills recorded out of turn.
+  [[nodiscard]] std::uint64_t recon_mismatches() const noexcept { return recon_mismatches_; }
 
  private:
   [[nodiscard]] std::expected<OrderStatus, Error> illegal(const Order& order, OrderEvent event) noexcept;
-  // The order's filled_qty after this event, or why the event's details are refused.
-  [[nodiscard]] std::expected<std::int32_t, Error> filled_after(const Order& order, OrderEvent event,
-                                                                const EventDetails& details) noexcept;
+  [[nodiscard]] std::expected<OrderStatus, Error> record(Order& order, OrderStatus to, std::int32_t filled,
+                                                         const EventDetails& details,
+                                                         std::string_view reason) noexcept;
+  [[nodiscard]] std::expected<OrderStatus, Error> fill(Order& order, const EventDetails& details) noexcept;
 
   IOrderEventSink* sink_;
   const IClock* clock_;
   std::vector<Order> orders_;
   std::size_t capacity_;
   std::uint64_t illegal_{0};
-  std::uint64_t refused_fills_{0};
+  std::uint64_t recon_mismatches_{0};
 };
 
 }  // namespace vyuha::oms

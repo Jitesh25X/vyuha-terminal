@@ -34,6 +34,8 @@ class PgOrderEventWriter final : public IOrderEventSink {
   // Core thread.
   [[nodiscard]] bool try_push(const OrderEventRecord& event) noexcept override;
 
+  [[nodiscard]] std::uint64_t pushed() const noexcept override { return pushed_; }  // core thread
+  [[nodiscard]] std::uint64_t durable() const noexcept override { return written(); }
   [[nodiscard]] std::uint64_t written() const noexcept { return written_.load(std::memory_order_acquire); }
   // False from a failed batch until the next one commits.
   [[nodiscard]] bool healthy() const noexcept override { return healthy_.load(std::memory_order_acquire); }
@@ -48,6 +50,7 @@ class PgOrderEventWriter final : public IOrderEventSink {
 
   std::string url_;
   std::unique_ptr<SpscRing<OrderEventRecord, kRingSize>> ring_;
+  std::uint64_t pushed_{0};
   std::atomic<std::uint64_t> written_{0};
   std::atomic<bool> healthy_{true};
   std::jthread thread_;

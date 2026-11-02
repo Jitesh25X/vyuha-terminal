@@ -35,7 +35,10 @@ enum class OrderEvent : std::uint8_t {
   kCancelConfirm,
   kModifyRequest,  // after the modify passed the risk check
   kModifyConfirm,
-  kAckTimeout,  // 5 s after Send without an ack
+  kCancelReject,  // the broker refused the cancel
+  kModifyReject,  // the broker refused the modify
+  kBrokerCancel,  // broker- or exchange-initiated: IOC remainder, MIS auto square-off, exchange cancel
+  kAckTimeout,    // 5 s after Send without an ack
   // Reconcile: what the broker's order book says about an UNKNOWN order.
   kReconcileOpen,
   kReconcilePartial,
@@ -43,9 +46,10 @@ enum class OrderEvent : std::uint8_t {
   kReconcileCancelled,
   kReconcileRejected,
 };
-inline constexpr std::uint8_t kOrderEventCount = 17;
+inline constexpr std::uint8_t kOrderEventCount = 20;
 
-// The F-EX-2 table. nullopt means the transition isn't listed, so it is illegal (OMS_ILLEGAL_TRANSITION).
+// The F-EX-2 table (ADR-024). nullopt means the transition isn't listed, so it is illegal
+// (OMS_ILLEGAL_TRANSITION), except that a fill is a broker fact and Oms records it anyway (RECON_MISMATCH).
 // There is no way from UNKNOWN to APPROVED or SENT: an UNKNOWN order is never re-sent.
 [[nodiscard]] constexpr std::optional<OrderStatus> next_status(OrderStatus from, OrderEvent event) noexcept {
   using enum OrderEvent;
@@ -79,13 +83,38 @@ inline constexpr std::uint8_t kOrderEventCount = 17;
           return OrderStatus::kCancelPending;
         case kModifyRequest:
           return OrderStatus::kModifyPending;
+        case kBrokerCancel:
+          return OrderStatus::kCancelled;
+        case kBrokerReject:  // a post-ack RMS reject; only from OPEN: a partly filled order has traded
+          return from == OrderStatus::kOpen ? std::optional{OrderStatus::kBrokerRejected} : std::nullopt;
         default:
           return std::nullopt;
       }
     case OrderStatus::kCancelPending:
-      return event == kCancelConfirm ? std::optional{OrderStatus::kCancelled} : std::nullopt;
+      switch (event) {
+        case kPartialFill:  // the fill raced the cancel
+          return OrderStatus::kPartiallyFilled;
+        case kFill:
+          return OrderStatus::kFilled;
+        case kCancelConfirm:
+          return OrderStatus::kCancelled;
+        case kCancelReject:
+          return OrderStatus::kOpen;
+        default:
+          return std::nullopt;
+      }
     case OrderStatus::kModifyPending:
-      return event == kModifyConfirm ? std::optional{OrderStatus::kOpen} : std::nullopt;
+      switch (event) {
+        case kPartialFill:  // a fill during the modify
+          return OrderStatus::kPartiallyFilled;
+        case kFill:
+          return OrderStatus::kFilled;
+        case kModifyConfirm:
+        case kModifyReject:
+          return OrderStatus::kOpen;
+        default:
+          return std::nullopt;
+      }
     case OrderStatus::kUnknown:
       switch (event) {
         case kReconcileOpen:
