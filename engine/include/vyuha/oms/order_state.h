@@ -20,8 +20,9 @@ enum class OrderStatus : std::uint8_t {
   kModifyPending,
   kBrokerRejected,
   kUnknown,
+  kExpired,  // APPROVED, never reached the broker, and the engine restarted: it never fires
 };
-inline constexpr std::uint8_t kOrderStatusCount = 12;
+inline constexpr std::uint8_t kOrderStatusCount = 13;
 
 enum class OrderEvent : std::uint8_t {
   kRiskReject,
@@ -39,14 +40,16 @@ enum class OrderEvent : std::uint8_t {
   kModifyReject,  // the broker refused the modify
   kBrokerCancel,  // broker- or exchange-initiated: IOC remainder, MIS auto square-off, exchange cancel
   kAckTimeout,    // 5 s after Send without an ack
-  // Reconcile: what the broker's order book says about an UNKNOWN order.
+  kExpire,        // the restart rule (ADR-025): recovery found an APPROVED order the broker doesn't have
+  // Reconcile: what the broker's order book says about an UNKNOWN order. Keep these last: Oms::apply treats
+  // anything from kReconcileOpen on as settling the order against the broker.
   kReconcileOpen,
   kReconcilePartial,
   kReconcileFilled,
   kReconcileCancelled,
   kReconcileRejected,
 };
-inline constexpr std::uint8_t kOrderEventCount = 20;
+inline constexpr std::uint8_t kOrderEventCount = 21;
 
 // The F-EX-2 table (ADR-024). nullopt means the transition isn't listed, so it is illegal
 // (OMS_ILLEGAL_TRANSITION), except that a fill is a broker fact and Oms records it anyway (RECON_MISMATCH).
@@ -69,6 +72,9 @@ inline constexpr std::uint8_t kOrderEventCount = 20;
       }
       return std::nullopt;
     case OrderStatus::kApproved:
+      if (event == kExpire) {
+        return OrderStatus::kExpired;
+      }
       return event == kSend ? std::optional{OrderStatus::kSent} : std::nullopt;
     case OrderStatus::kSent:
       switch (event) {
@@ -149,6 +155,7 @@ inline constexpr std::uint8_t kOrderEventCount = 20;
     case OrderStatus::kFilled:
     case OrderStatus::kCancelled:
     case OrderStatus::kBrokerRejected:
+    case OrderStatus::kExpired:
       return std::nullopt;
   }
   return std::nullopt;
@@ -156,7 +163,7 @@ inline constexpr std::uint8_t kOrderEventCount = 20;
 
 [[nodiscard]] constexpr bool is_terminal(OrderStatus s) noexcept {
   return s == OrderStatus::kRiskRejected || s == OrderStatus::kFilled || s == OrderStatus::kCancelled ||
-         s == OrderStatus::kBrokerRejected;
+         s == OrderStatus::kBrokerRejected || s == OrderStatus::kExpired;
 }
 
 [[nodiscard]] std::string_view to_string(OrderStatus s) noexcept;

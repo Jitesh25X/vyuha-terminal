@@ -1,5 +1,6 @@
-// D-18: kill the engine between persist and send, and between send and ack. After restart there must be
-// exactly one order at the broker. A real SIGKILL of a real process, on a real Postgres.
+// D-18 and the owner's restart rule: kill the engine between persist and send, between send and ack, and
+// during recovery. A restart sends nothing, ever: an order the broker has is adopted by its tag, and one it
+// lacks expires, with an audit row and an alert. A real SIGKILL of a real process, on a real Postgres.
 
 #include <spawn.h>
 #include <sys/wait.h>
@@ -84,6 +85,24 @@ std::string status_of(const std::string& url) {
   return tx.query_value<std::string>("SELECT status::text FROM \"order\"");
 }
 
+int count(const std::string& url, const std::string& sql) {
+  pqxx::connection c(url);
+  pqxx::read_transaction tx(c);
+  return tx.query_value<int>(sql);
+}
+
+int with_status(const std::string& url, const std::string& status) {
+  return count(url, "SELECT count(*) FROM \"order\" WHERE status = '" + status + "'");
+}
+
+int expiry_audits(const std::string& url) {
+  return count(url, "SELECT count(*) FROM audit_event WHERE action = 'order.expire'");
+}
+
+int expiry_alerts(const std::string& url) {
+  return count(url, "SELECT count(*) FROM alert_event WHERE title = 'ORDER_EXPIRED_ON_RESTART'");
+}
+
 class OmsCrash : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -115,7 +134,7 @@ class OmsCrash : public ::testing::Test {
   std::string broker_path_;
 };
 
-TEST_F(OmsCrash, BetweenPersistAndSendRestartSendsItOnce) {
+TEST_F(OmsCrash, BetweenPersistAndSendRestartExpiresItAndSendsNothing) {
   const Exit crashed = child("before_send", "place");
   ASSERT_TRUE(crashed.killed) << "exit " << crashed.code;
   EXPECT_TRUE(at_broker().empty());
@@ -123,11 +142,51 @@ TEST_F(OmsCrash, BetweenPersistAndSendRestartSendsItOnce) {
 
   const Exit restarted = child("none", "recover");
   EXPECT_EQ(restarted.code, 0);
-  EXPECT_EQ(at_broker().size(), 1U);
-  EXPECT_EQ(status_of(url()), "SENT");
+  EXPECT_TRUE(at_broker().empty());
+  EXPECT_EQ(status_of(url()), "EXPIRED");
+  EXPECT_EQ(expiry_audits(url()), 1);
+  EXPECT_EQ(expiry_alerts(url()), 1);
 
   EXPECT_EQ(child("none", "recover").code, 0);  // a second restart changes nothing
+  EXPECT_TRUE(at_broker().empty());
+  EXPECT_EQ(status_of(url()), "EXPIRED");
+  EXPECT_EQ(expiry_audits(url()), 1);
+  EXPECT_EQ(expiry_alerts(url()), 1);
+}
+
+// This child dies the moment anything calls send, so a clean exit proves recovery never tried.
+TEST_F(OmsCrash, RecoveryNeverCallsSend) {
+  ASSERT_TRUE(child("before_send", "place").killed);
+  const Exit restarted = child("before_send", "recover");
+  EXPECT_FALSE(restarted.killed);
+  EXPECT_EQ(restarted.code, 0);
+  EXPECT_EQ(status_of(url()), "EXPIRED");
+}
+
+TEST_F(OmsCrash, WithOrdersQueuedRestartSendsNoneOfThem) {
+  ASSERT_TRUE(child("before_send", "place_three").killed);
+  EXPECT_EQ(with_status(url(), "APPROVED"), 3);
+  EXPECT_EQ(child("before_send", "recover").code, 0);
+  EXPECT_TRUE(at_broker().empty());
+  EXPECT_EQ(with_status(url(), "EXPIRED"), 3);
+  EXPECT_EQ(expiry_audits(url()), 3);
+  EXPECT_EQ(expiry_alerts(url()), 3);
+}
+
+// The first of three reached the broker when the engine died: that one is adopted, and the others expire.
+TEST_F(OmsCrash, AfterOneOfThreeWentOutRestartAdoptsItAndExpiresTheRest) {
+  ASSERT_TRUE(child("after_send", "place_three").killed);
+  ASSERT_EQ(at_broker().size(), 1U);
+  EXPECT_EQ(with_status(url(), "APPROVED"), 3);
+  EXPECT_EQ(child("before_send", "recover").code, 0);
   EXPECT_EQ(at_broker().size(), 1U);
+  EXPECT_EQ(with_status(url(), "OPEN"), 1);
+  EXPECT_EQ(with_status(url(), "EXPIRED"), 2);
+  EXPECT_EQ(expiry_audits(url()), 2);
+  EXPECT_EQ(expiry_alerts(url()), 2);
+  EXPECT_EQ(count(url(), "SELECT count(*) FROM \"order\" WHERE broker_order_id = 'B-" + at_broker().front() +
+                             "' AND status = 'OPEN'"),
+            1);
 }
 
 TEST_F(OmsCrash, BetweenSendAndAckRestartFindsItByTagAndDoesntSendAgain) {
@@ -141,20 +200,34 @@ TEST_F(OmsCrash, BetweenSendAndAckRestartFindsItByTagAndDoesntSendAgain) {
   EXPECT_EQ(restarted.code, 0);
   EXPECT_EQ(at_broker().size(), 1U);
   EXPECT_EQ(status_of(url()), "OPEN");  // adopted, with the broker's id
+  EXPECT_EQ(expiry_audits(url()), 0);
+  EXPECT_EQ(expiry_alerts(url()), 0);
   pqxx::connection c(url());
   pqxx::read_transaction tx(c);
   EXPECT_EQ(tx.query_value<std::string>("SELECT broker_order_id FROM \"order\""), "B-" + at_broker().front());
 }
 
-TEST_F(OmsCrash, CrashingAgainDuringRecoveryStillLeavesOne) {
+// The expiry may or may not have reached Postgres when the second crash hit. Either way it ends the same,
+// once.
+TEST_F(OmsCrash, CrashingAgainDuringRecoveryStillExpiresItOnce) {
   ASSERT_TRUE(child("before_send", "place").killed);
-  ASSERT_TRUE(child("before_send", "recover").killed);
+  ASSERT_TRUE(child("after_recover", "recover").killed);
   EXPECT_TRUE(at_broker().empty());
-  ASSERT_TRUE(child("after_send", "recover").killed);
+  EXPECT_EQ(child("before_send", "recover").code, 0);
+  EXPECT_TRUE(at_broker().empty());
+  EXPECT_EQ(status_of(url()), "EXPIRED");
+  EXPECT_EQ(expiry_audits(url()), 1);
+  EXPECT_EQ(expiry_alerts(url()), 1);
+}
+
+TEST_F(OmsCrash, CrashingAgainDuringAdoptionStillLeavesOne) {
+  ASSERT_TRUE(child("after_send", "place").killed);
+  ASSERT_TRUE(child("after_recover", "recover").killed);
   EXPECT_EQ(at_broker().size(), 1U);
-  EXPECT_EQ(child("none", "recover").code, 0);
+  EXPECT_EQ(child("before_send", "recover").code, 0);
   EXPECT_EQ(at_broker().size(), 1U);
   EXPECT_EQ(status_of(url()), "OPEN");
+  EXPECT_EQ(expiry_audits(url()), 0);
 }
 
 TEST_F(OmsCrash, WithoutACrashItGoesOutOnce) {

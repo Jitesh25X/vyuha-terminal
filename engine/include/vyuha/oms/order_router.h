@@ -36,6 +36,10 @@ struct BrokerOrderView {
   std::int32_t filled_qty{0};
   Price average_price{};          // NOLINT(readability-redundant-member-init): partly filled by designators
   std::string broker_order_id{};  // NOLINT(readability-redundant-member-init)
+  // What the broker says the order now is. 0 or empty: the adapter didn't say. A modify changes these.
+  std::int32_t qty{0};
+  std::optional<Price> price{};          // NOLINT(readability-redundant-member-init)
+  std::optional<Price> trigger_price{};  // NOLINT(readability-redundant-member-init)
 };
 
 // The broker's order book, as reconciliation reads it. Not used on the core thread's hot path.
@@ -62,8 +66,7 @@ class OrderRouter {
  public:
   enum class Recovery : std::uint8_t {
     kResolved,    // matches the broker now
-    kQueued,      // the broker never got it: submitted, and goes out on poll
-    kUnresolved,  // a mismatch is raised, and the order stays blocked until someone looks
+    kUnresolved,  // a mismatch is raised or the sink is full, and the order stays blocked until retried
   };
 
   OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, std::size_t tag_limit,
@@ -87,8 +90,9 @@ class OrderRouter {
   };
   CancelAll cancel_all() noexcept;
 
-  // After a restart, for each restored order: find it at the broker by tag and settle it. Never sends a
-  // second copy: an order the broker has is adopted, and only an APPROVED order the broker lacks is sent.
+  // After a restart, for each restored order: find it at the broker by tag and settle it. Never sends or
+  // queues anything (the owner's restart rule, ADR-025): an order the broker has is adopted, and an APPROVED
+  // order it lacks becomes EXPIRED, because a stale order surfacing after a crash must never fire.
   [[nodiscard]] Recovery recover(OrderHandle handle, IBrokerOrderBook& book);
 
  private:

@@ -290,13 +290,106 @@ TEST(OrderRouter, ABusyAdapterIsReportedSoCancelAllCanBeRepeated) {
   EXPECT_EQ(r.oms.order(h).status, kCancelPending);
 }
 
-TEST(OrderRouterRecovery, ApprovedAndNotAtTheBrokerIsSentOnce) {
+// The restart rule: a stale order surfacing after a crash must never fire.
+TEST(OrderRouterRecovery, ApprovedAndNotAtTheBrokerExpiresAndIsNeverSent) {
   Rig r;
   const OrderHandle h = r.restored(kApproved);
-  EXPECT_EQ(r.router.recover(h, r.broker), Recovery::kQueued);
-  EXPECT_EQ(r.router.poll(), 1U);
+  EXPECT_EQ(r.router.recover(h, r.broker), Recovery::kResolved);
+  EXPECT_EQ(r.oms.order(h).status, kExpired);
+  EXPECT_EQ(r.sink.events.back().from, kApproved);
+  EXPECT_EQ(r.sink.events.back().to, kExpired);
+  EXPECT_EQ(r.sink.events.back().reason_code.view(), kExpiredOnRestart);
+
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_FALSE(r.oms.can_send(h));
+  EXPECT_FALSE(r.router.submit(h).has_value());  // nor can anyone queue it by hand
+  EXPECT_EQ(r.router.pending(), 0U);
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_TRUE(r.broker.tags.empty());
+}
+
+TEST(OrderRouterRecovery, ExpiryThatCantBeRecordedLeavesTheOrderBlocked) {
+  Rig r;
+  const OrderHandle h = r.restored(kApproved);
+  r.sink.full = true;
+  EXPECT_EQ(r.router.recover(h, r.broker), Recovery::kUnresolved);
+  EXPECT_EQ(r.oms.order(h).status, kApproved);
+  EXPECT_TRUE(r.oms.order(h).needs_reconcile);
+  EXPECT_FALSE(r.oms.can_send(h));
+  EXPECT_FALSE(r.router.submit(h).has_value());
+
+  r.sink.full = false;  // the next pass finishes the job
+  EXPECT_EQ(r.router.recover(h, r.broker), Recovery::kResolved);
+  EXPECT_EQ(r.oms.order(h).status, kExpired);
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_TRUE(r.broker.tags.empty());
+}
+
+TEST(OrderRouterRecovery, AdoptionThatCantBeRecordedLeavesTheOrderBlocked) {
+  Rig r;
+  r.broker.tags = {tag_of_client()};
+  const OrderHandle h = r.restored(kApproved);
+  r.sink.full = true;
+  EXPECT_EQ(r.router.recover(h, r.broker), Recovery::kUnresolved);
+  EXPECT_EQ(r.oms.order(h).status, kApproved);
+  EXPECT_FALSE(r.oms.can_send(h));  // the broker has it: this must not look sendable
+  EXPECT_FALSE(r.router.submit(h).has_value());
   EXPECT_EQ(r.broker.tags.size(), 1U);
-  EXPECT_EQ(r.oms.order(h).status, kSent);
+}
+
+// The broker's book can lag: a late fill on an expired order is a fact, so it's recorded and raised, not
+// lost.
+TEST(OrderRouterRecovery, AFillOnAnExpiredOrderIsRecordedAndRaised) {
+  Rig r;
+  const OrderHandle h = r.restored(kApproved);
+  ASSERT_EQ(r.router.recover(h, r.broker), Recovery::kResolved);
+  ASSERT_TRUE(r.oms.apply(h, E::kPartialFill, {.fill_qty = 2, .fill_price = Price::from_units(10'000)}));
+  EXPECT_EQ(r.oms.order(h).status, kExpired);
+  EXPECT_EQ(r.oms.order(h).filled_qty, 2);
+  EXPECT_EQ(r.sink.events.back().reason_code.view(), kReconMismatch);
+}
+
+// The confirm was lost in the crash, and the broker's book says what the order now is.
+TEST(OrderRouterRecovery, AModifyInFlightTakesTheBrokersValues) {
+  Rig r;
+  r.broker.tags = {tag_of_client()};
+  r.broker.view = {
+      .state = BrokerState::kOpen, .broker_order_id = "B1", .qty = 5, .price = Price::from_units(2'000'000)};
+  const OrderHandle h = r.restored(kModifyPending);
+  EXPECT_EQ(r.router.recover(h, r.broker), Recovery::kResolved);
+  EXPECT_EQ(r.oms.order(h).status, kOpen);
+  EXPECT_EQ(r.oms.order(h).details.qty, 5);
+  EXPECT_EQ(r.oms.order(h).details.price, Price::from_units(2'000'000));
+}
+
+TEST(OrderRouterRecovery, ABrokerQtyWeDontKnowAboutStaysBlocked) {
+  Rig r;
+  r.broker.tags = {tag_of_client()};
+  r.broker.view = {.state = BrokerState::kOpen, .broker_order_id = "B1", .qty = 20};
+  const OrderHandle h = r.restored(kOpen);
+  EXPECT_EQ(r.router.recover(h, r.broker), Recovery::kUnresolved);
+  EXPECT_EQ(r.oms.recon_mismatches(), 1U);
+  EXPECT_TRUE(r.oms.order(h).needs_reconcile);
+}
+
+TEST(OrderRouterRecovery, ANeverSentOrderAmongOthersExpiresAlone) {
+  Rig r;
+  const OrderHandle had = r.restored(kApproved);
+  RecoveredOrder other;
+  other.details = order_of(10, "0190a3b4-7c2d-7e11-8f00-000000000099");
+  other.details.id.bytes.fill(2);
+  other.status = kApproved;
+  other.seq = 2;
+  const OrderHandle lacked = r.oms.restore(other).value();
+  r.broker.tags = {tag_of_client()};
+  r.broker.view = {.state = BrokerState::kOpen, .broker_order_id = "B1"};
+  EXPECT_EQ(r.router.recover(had, r.broker), Recovery::kResolved);
+  EXPECT_EQ(r.router.recover(lacked, r.broker), Recovery::kResolved);
+  EXPECT_EQ(r.oms.order(had).status, kOpen);
+  EXPECT_EQ(r.oms.order(lacked).status, kExpired);
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_EQ(r.broker.tags.size(), 1U);
 }
 
 TEST(OrderRouterRecovery, ApprovedAndAtTheBrokerIsAdoptedNotSent) {

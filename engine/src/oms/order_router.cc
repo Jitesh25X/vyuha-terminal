@@ -151,6 +151,22 @@ OrderRouter::Recovery OrderRouter::reconcile_unknown(OrderHandle handle, const B
 
 OrderRouter::Recovery OrderRouter::catch_up(OrderHandle handle, const BrokerOrderView& broker) {
   using State = BrokerOrderView::State;
+  const OrderStatus before = oms_->order(handle).status;
+  const bool broker_gave_values =
+      broker.qty > 0 || broker.price.has_value() || broker.trigger_price.has_value();
+  if (before == OrderStatus::kModifyPending && broker_gave_values) {
+    // The answer to the modify may have been lost in the crash: the book says how it ended.
+    if (!oms_->apply(handle, OrderEvent::kModifyConfirm,
+                     {.modified_qty = broker.qty,
+                      .modified_price = broker.price,
+                      .modified_trigger = broker.trigger_price})
+             .has_value()) {
+      return unresolved(handle);
+    }
+  } else if ((before == OrderStatus::kOpen || before == OrderStatus::kPartiallyFilled) && broker.qty > 0 &&
+             broker.qty != oms_->order(handle).details.qty) {
+    return unresolved(handle);  // a modify we have no record of: never guess
+  }
   const std::int32_t missed = broker.filled_qty - oms_->order(handle).filled_qty;
   if (missed < 0) {
     return unresolved(handle);  // we hold more fills than the broker does
@@ -203,12 +219,14 @@ OrderRouter::Recovery OrderRouter::recover(OrderHandle handle, IBrokerOrderBook&
                  ? Recovery::kResolved
                  : Recovery::kUnresolved;
     case OrderStatus::kApproved:
-      if (!oms_->confirm_reconciled(handle).has_value()) {
-        return Recovery::kUnresolved;
+      if (broker ==
+          nullptr) {  // never reached the broker, and now it never will. Still blocked if unrecorded.
+        return oms_->apply(handle, OrderEvent::kExpire, {.reason_code = kExpiredOnRestart}).has_value()
+                   ? Recovery::kResolved
+                   : Recovery::kUnresolved;
       }
-      if (broker == nullptr) {  // never reached the broker: this is its first send, not a re-send
-        return submit(handle).has_value() ? Recovery::kQueued : Recovery::kUnresolved;
-      }
+      // needs_reconcile stays set until the reconcile below lands, so this can't look sendable if the sink is
+      // full. The broker has it: a send would be a second copy.
       if (!oms_->record_sent(handle).has_value() ||
           !oms_->apply(handle, OrderEvent::kAckTimeout).has_value()) {
         return Recovery::kUnresolved;
@@ -236,6 +254,7 @@ OrderRouter::Recovery OrderRouter::recover(OrderHandle handle, IBrokerOrderBook&
     case OrderStatus::kFilled:
     case OrderStatus::kCancelled:
     case OrderStatus::kBrokerRejected:
+    case OrderStatus::kExpired:
       return Recovery::kResolved;
   }
   return Recovery::kUnresolved;

@@ -30,6 +30,7 @@ const std::map<std::pair<OrderStatus, OrderEvent>, OrderStatus>& listed() {
       {{kNew, E::kRiskReject}, kRiskRejected},
       {{kNew, E::kRiskApprove}, kApproved},
       {{kApproved, E::kSend}, kSent},
+      {{kApproved, E::kExpire}, kExpired},
       {{kSent, E::kBrokerAck}, kOpen},
       {{kSent, E::kBrokerReject}, kBrokerRejected},
       {{kOpen, E::kPartialFill}, kPartiallyFilled},
@@ -133,7 +134,8 @@ EventDetails valid_details(const Order& o, OrderEvent event) {
   } else if (event == E::kReconcileCancelled) {
     d.broker_filled_qty = o.filled_qty;
   }
-  if (event == E::kRiskReject || event == E::kBrokerReject || event == E::kReconcileRejected) {
+  if (event == E::kRiskReject || event == E::kBrokerReject || event == E::kReconcileRejected ||
+      event == E::kExpire) {
     d.reason_code = "R-TEST";
   }
   return d;
@@ -169,6 +171,218 @@ TEST(OrderState, TableIsExactlyThePrdList) {
       }
     }
   }
+}
+
+constexpr Price kFillPrice = Price::from_units(10'000);
+
+struct Live {
+  FixedClock clock;
+  RecordingSink sink;
+  Oms oms{sink, clock, 4};
+  OrderHandle handle{0};
+  explicit Live(std::int32_t qty = 10) {
+    handle = oms.create(order_of(qty)).value();
+    EXPECT_TRUE(oms.apply(handle, E::kRiskApprove));
+    EXPECT_TRUE(oms.apply(handle, E::kSend));
+    EXPECT_TRUE(oms.apply(handle, E::kBrokerAck));
+  }
+  [[nodiscard]] const Order& order() const { return oms.order(handle); }
+  auto fill(std::int32_t n, std::string_view trade) {
+    return oms.apply(handle, E::kPartialFill,
+                     {.fill_qty = n, .fill_price = kFillPrice, .broker_trade_id = trade});
+  }
+};
+
+// One trade delivered by both postback and WebSocket must not count twice (positions read fill_qty).
+TEST(OmsTradeIds, ADuplicateTradeCountsOnceAndIsRecordedWithoutShares) {
+  Live l;
+  EXPECT_EQ(l.fill(3, "T1"), kPartiallyFilled);
+  EXPECT_EQ(l.fill(3, "T1"), kPartiallyFilled);
+  EXPECT_EQ(l.order().filled_qty, 3);
+  EXPECT_EQ(l.oms.duplicate_fills(), 1U);
+  EXPECT_EQ(l.oms.recon_mismatches(), 0U);
+  EXPECT_EQ(l.sink.events.back().reason_code.view(), kDuplicateFill);
+  EXPECT_EQ(l.sink.events.back().fill_qty, 0);
+  EXPECT_EQ(l.fill(7, "T2"), kFilled);  // the real last 7 still completes it
+  EXPECT_EQ(l.order().filled_qty, 10);
+}
+
+TEST(OmsTradeIds, ADuplicateAfterTheOrderEndedChangesNothing) {
+  Live l;
+  ASSERT_EQ(l.fill(10, "T1"), kFilled);
+  EXPECT_EQ(l.fill(10, "T1"), kFilled);
+  EXPECT_EQ(l.order().filled_qty, 10);
+  EXPECT_EQ(l.oms.recon_mismatches(), 0U);
+}
+
+// The trap: a fill the sink refused was never counted, so its retry is not a duplicate.
+TEST(OmsTradeIds, AFillRetriedAfterAFullSinkIsNotADuplicate) {
+  Live l;
+  l.sink.full = true;
+  EXPECT_FALSE(l.fill(3, "T1"));
+  EXPECT_EQ(l.order().filled_qty, 0);
+  l.sink.full = false;
+  EXPECT_EQ(l.fill(3, "T1"), kPartiallyFilled);
+  EXPECT_EQ(l.order().filled_qty, 3);
+  EXPECT_EQ(l.oms.duplicate_fills(), 0U);
+}
+
+TEST(OmsTradeIds, TheSameIdOnAnotherOrderIsItsOwnTrade) {
+  Live l;
+  OrderDetails other = order_of(5);
+  other.id.bytes.fill(9);
+  ASSERT_TRUE(other.client_order_id.assign("client-2"));
+  const OrderHandle h = l.oms.create(other).value();
+  ASSERT_TRUE(l.oms.apply(h, E::kRiskApprove));
+  ASSERT_TRUE(l.oms.apply(h, E::kSend));
+  ASSERT_TRUE(l.oms.apply(h, E::kBrokerAck));
+  EXPECT_EQ(l.fill(3, "T1"), kPartiallyFilled);
+  EXPECT_TRUE(
+      l.oms.apply(h, E::kPartialFill, {.fill_qty = 2, .fill_price = kFillPrice, .broker_trade_id = "T1"}));
+  EXPECT_EQ(l.oms.order(h).filled_qty, 2);
+}
+
+TEST(OmsTradeIds, TradesSeenBeforeARestartStayDuplicates) {
+  const FixedClock clock;
+  RecordingSink sink;
+  Oms oms{sink, clock, 4};
+  RecoveredOrder r;
+  r.details = order_of(10);
+  r.status = kPartiallyFilled;
+  r.seq = 5;
+  r.filled_qty = 3;
+  r.trade_ids = {"T1"};
+  const OrderHandle h = oms.restore(r).value();
+  EXPECT_EQ(oms.apply(h, E::kPartialFill, {.fill_qty = 3, .fill_price = kFillPrice, .broker_trade_id = "T1"}),
+            kPartiallyFilled);
+  EXPECT_EQ(oms.order(h).filled_qty, 3);
+  EXPECT_EQ(oms.duplicate_fills(), 1U);
+}
+
+// Past what the OMS can store, a fill is still a fact: recorded, and raised, never lost.
+TEST(OmsTradeIds, ATradeIdTooLongToStoreIsRecordedAndRaised) {
+  Live l;
+  const std::string too_long(41, 'x');
+  EXPECT_EQ(l.fill(3, too_long), kPartiallyFilled);
+  EXPECT_EQ(l.order().filled_qty, 3);
+  EXPECT_EQ(l.sink.events.back().reason_code.view(), kReconMismatch);
+}
+
+TEST(OmsTradeIds, ATradeTableFullOfTradesStillRecordsAndRaises) {
+  Live l(1'000'000);
+  std::uint64_t raised = 0;
+  for (int i = 0; i < 200; ++i) {
+    const std::string trade = "T" + std::to_string(i);
+    EXPECT_TRUE(l.fill(1, trade));
+    raised = l.oms.recon_mismatches();
+  }
+  EXPECT_EQ(l.order().filled_qty, 200);
+  EXPECT_GT(raised, 0U);  // a table for 4 orders can't hold 200 trades, and the desk hears about it
+}
+
+// A modify changes the order: what the OMS counts against, and what a restart restores (P1-7).
+TEST(OmsModify, RaisingQtyKeepsTheOrderOpenPastTheOldQty) {
+  Live l;
+  ASSERT_EQ(l.oms.apply(l.handle, E::kModifyRequest, {.modified_qty = 20}), kModifyPending);
+  EXPECT_EQ(l.sink.events.back().modify.row_qty, 20);  // the row must allow fills against the new qty
+  ASSERT_EQ(l.oms.apply(l.handle, E::kModifyConfirm), kOpen);
+  EXPECT_EQ(l.order().details.qty, 20);
+  EXPECT_EQ(l.fill(10, "T1"), kPartiallyFilled);  // not FILLED: 10 are still live at the broker
+  EXPECT_EQ(l.fill(10, "T2"), kFilled);
+}
+
+TEST(OmsModify, AFillBeforeTheConfirmCountsAgainstTheHigherQty) {
+  Live l;
+  ASSERT_TRUE(l.oms.apply(l.handle, E::kModifyRequest, {.modified_qty = 20}));
+  EXPECT_EQ(l.fill(10, "T1"), kPartiallyFilled);
+  EXPECT_EQ(l.oms.recon_mismatches(), 0U);
+  EXPECT_EQ(l.oms.apply(l.handle, E::kModifyConfirm), kPartiallyFilled);  // late: applied, status stays
+  EXPECT_EQ(l.order().details.qty, 20);
+  EXPECT_EQ(l.oms.illegal_transitions(), 0U);
+}
+
+TEST(OmsModify, LoweringQtyCompletesAtTheNewQty) {
+  Live l;
+  ASSERT_TRUE(l.oms.apply(l.handle, E::kModifyRequest, {.modified_qty = 5}));
+  EXPECT_EQ(l.sink.events.back().modify.row_qty, 0);  // the row keeps 10 until the broker confirms
+  ASSERT_EQ(l.oms.apply(l.handle, E::kModifyConfirm), kOpen);
+  EXPECT_EQ(l.order().details.qty, 5);
+  EXPECT_EQ(l.sink.events.back().modify.row_qty, 5);
+  EXPECT_EQ(l.fill(5, "T1"), kFilled);
+}
+
+TEST(OmsModify, AFillThatReachesTheLowerQtyBeforeTheConfirmCompletesOnConfirm) {
+  Live l;
+  ASSERT_TRUE(l.oms.apply(l.handle, E::kModifyRequest, {.modified_qty = 5}));
+  EXPECT_EQ(l.fill(5, "T1"), kPartiallyFilled);  // it might be refused, and then 5 are still live
+  EXPECT_EQ(l.oms.apply(l.handle, E::kModifyConfirm), kFilled);
+  EXPECT_EQ(l.order().details.qty, 5);
+}
+
+TEST(OmsModify, ARejectedModifyPutsEverythingBack) {
+  Live l;
+  ASSERT_TRUE(l.oms.apply(l.handle, E::kModifyRequest,
+                          {.modified_qty = 20, .modified_price = Price::from_units(2'000'000)}));
+  ASSERT_EQ(l.oms.apply(l.handle, E::kModifyReject), kOpen);
+  EXPECT_EQ(l.order().details.qty, 10);
+  EXPECT_EQ(l.sink.events.back().modify.row_qty, 10);
+  EXPECT_EQ(l.order().details.price, Price::from_units(1'000'000));
+  EXPECT_EQ(l.fill(10, "T1"), kFilled);
+}
+
+TEST(OmsModify, ARejectAfterFillsReachedTheOldQtyCompletesIt) {
+  Live l;
+  ASSERT_TRUE(l.oms.apply(l.handle, E::kModifyRequest, {.modified_qty = 20}));
+  ASSERT_EQ(l.fill(10, "T1"), kPartiallyFilled);
+  EXPECT_EQ(l.oms.apply(l.handle, E::kModifyReject), kFilled);
+  EXPECT_EQ(l.order().details.qty, 10);
+}
+
+TEST(OmsModify, PriceAndTriggerChangeOnlyOnConfirm) {
+  Live l;
+  const Price price = Price::from_units(2'000'000);
+  ASSERT_TRUE(l.oms.apply(l.handle, E::kModifyRequest, {.modified_price = price}));
+  EXPECT_EQ(l.order().details.price, Price::from_units(1'000'000));
+  EXPECT_FALSE(l.sink.events.back().modify.applied);
+  ASSERT_TRUE(l.oms.apply(l.handle, E::kModifyConfirm));
+  EXPECT_EQ(l.order().details.price, price);
+  EXPECT_TRUE(l.sink.events.back().modify.applied);
+  EXPECT_EQ(l.sink.events.back().modify.price, price);
+}
+
+TEST(OmsModify, ValuesThatCantBeTrueAreRefusedAndChangeNothing) {
+  Live l;
+  ASSERT_EQ(l.fill(4, "T1"), kPartiallyFilled);
+  EXPECT_FALSE(l.oms.apply(l.handle, E::kModifyRequest, {.modified_qty = 4}));  // nothing left to work
+  EXPECT_FALSE(l.oms.apply(l.handle, E::kModifyRequest, {.modified_qty = -1}));
+  EXPECT_FALSE(l.oms.apply(l.handle, E::kModifyRequest, {.modified_price = Price::from_units(0)}));
+  EXPECT_EQ(l.order().status, kPartiallyFilled);
+  EXPECT_EQ(l.order().details.qty, 10);
+}
+
+// A restored order that was never sent can't be cleared for sending (P1-5, the restart rule).
+TEST(OmsRestart, ConfirmReconciledIsRefusedForAnOrderThatWasNeverSent) {
+  for (const OrderStatus status : {kNew, kApproved}) {
+    const FixedClock clock;
+    RecordingSink sink;
+    Oms oms{sink, clock, 4};
+    RecoveredOrder r;
+    r.details = order_of(10);
+    r.status = status;
+    r.seq = 2;
+    const OrderHandle h = oms.restore(r).value();
+    EXPECT_FALSE(oms.confirm_reconciled(h).has_value());
+    EXPECT_TRUE(oms.order(h).needs_reconcile);
+    EXPECT_FALSE(oms.can_send(h));
+  }
+}
+
+TEST(OrderState, ExpiredIsTerminalAndTheStatusNumbersMatchTheProto) {
+  EXPECT_TRUE(is_terminal(kExpired));
+  EXPECT_EQ(static_cast<int>(kExpired), 13);  // orders.v1.ORDER_STATUS_EXPIRED
+  EXPECT_EQ(to_string(kExpired), "EXPIRED");
+  EXPECT_EQ(parse_status("EXPIRED"), kExpired);
+  EXPECT_FALSE(next_status(kExpired, E::kSend).has_value());
 }
 
 TEST(OrderState, TerminalStatesHaveNoWayOut) {

@@ -190,6 +190,7 @@ States and transitions (canonical, all transitions recorded as `order_event`):
 ```
 NEW → RiskCheck → RISK_REJECTED (terminal)
 NEW → RiskCheck → APPROVED (durable before anything is sent) → Send → SENT
+APPROVED → Restart, not at the broker → EXPIRED (terminal): it never fires
 SENT → BrokerAck → OPEN | BROKER_REJECTED (terminal)
 SENT → PartialFill → PARTIALLY_FILLED; SENT → Fill(complete) → FILLED (terminal): a fill can beat the ack
 SENT → BrokerCancel → CANCELLED (terminal): an IOC cancelled before the ack
@@ -198,7 +199,8 @@ OPEN | PARTIALLY_FILLED | CANCEL_PENDING | MODIFY_PENDING → PartialFill → PA
 OPEN | PARTIALLY_FILLED | CANCEL_PENDING | MODIFY_PENDING → Fill(complete) → FILLED (terminal)
 OPEN | PARTIALLY_FILLED → CancelReq → CANCEL_PENDING → CANCELLED (terminal)
 CANCEL_PENDING → CancelRejected → OPEN
-OPEN | PARTIALLY_FILLED → ModifyReq → (risk check) → MODIFY_PENDING → ModifyConfirmed | ModifyRejected → OPEN
+OPEN | PARTIALLY_FILLED → ModifyReq → (risk check) → MODIFY_PENDING → ModifyConfirmed | ModifyRejected → OPEN, or FILLED (terminal) if fills already reach the resulting qty
+Any status after a fill moved the order on → late ModifyConfirmed | ModifyRejected → values applied, status stays unless now complete
 OPEN | PARTIALLY_FILLED → BrokerCancel (IOC remainder, MIS auto square-off, exchange cancel) → CANCELLED (terminal), filled_qty kept
 OPEN → PostAckReject (RMS) → BROKER_REJECTED (terminal)
 SENT → Timeout(5s, no ack) → UNKNOWN → Reconcile → OPEN | PARTIALLY_FILLED | FILLED | CANCELLED | BROKER_REJECTED
@@ -207,7 +209,7 @@ SENT → Timeout(5s, no ack) → UNKNOWN → Reconcile → OPEN | PARTIALLY_FILL
 - [ ] Every transition not listed above is rejected and logged as `OMS_ILLEGAL_TRANSITION` (property-based test), except a fill (next line).
 - [ ] A broker fill is a fact: the OMS never refuses or drops one. A fill with no listed transition, including on an order already in a terminal state, or past the order's quantity, is still recorded: `filled_qty` and positions update, the status stays, and a `RECON_MISMATCH` alert is raised (ADR-024).
 - [ ] A duplicate `client_order_id` is caught at intake: the same body returns the existing order, a different body is `ORDER_DUP`. One that still reaches the writer fails alone with an alert, and no other order or cancel is held up. A kill-switch cancel-all never waits on the order log (ADR-025).
-- [ ] `NEW` and `APPROVED` are durable in Postgres before the adapter sends anything, and the broker order carries `client_order_id` in its tag. After a crash between persist and send, or between send and ack, the broker has exactly one order (ADR-025; crash test).
+- [ ] `NEW` and `APPROVED` are durable in Postgres before the adapter sends anything, and the broker order carries `client_order_id` in its tag. A restart sends nothing: an `APPROVED` order the broker has is adopted by its tag, and one it lacks becomes `EXPIRED` with an audit event and an alert to the owner. After a crash between persist and send the broker has no order; between send and ack it has exactly one (ADR-025; crash test).
 - [ ] Given `UNKNOWN`, then reconciliation queries the broker order book within 2 s and resolves state; no duplicate re-send ever happens for an `UNKNOWN` order.
 - [ ] Every 60 s and on reconnect, engine reconciles open orders and positions against broker; mismatches create a `RECON_MISMATCH` alert with diff.
 
