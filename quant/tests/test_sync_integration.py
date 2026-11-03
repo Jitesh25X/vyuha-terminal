@@ -247,7 +247,18 @@ def test_seed_covers_the_first_job_and_every_muhurat_session(dsn: str) -> None:
     for day, (start, end) in want.items():
         assert json.loads(days[day]["special_session"]) == [{"open": start, "close": end}]
         assert "archives.nseindia.com/content/circulars/" in days[day]["description"]
-    assert len([r for r in rows if r["special_session"] is not None]) == len(want)
+    # Saturdays, from the circulars: the library lists the first and last, and neither DR switchover.
+    saturdays = {
+        date(2024, 1, 20): [{"open": "09:15", "close": "15:30"}],
+        date(2024, 3, 2): [{"open": "09:15", "close": "10:00"}, {"open": "11:30", "close": "12:30"}],
+        date(2024, 5, 18): [{"open": "09:15", "close": "10:00"}, {"open": "11:30", "close": "12:30"}],
+        date(2025, 2, 1): [{"open": "09:15", "close": "15:30"}],
+    }
+    for day, windows in saturdays.items():
+        assert day.weekday() == 5
+        assert json.loads(days[day]["special_session"]) == windows
+        assert "archives.nseindia.com/content/circulars/" in days[day]["description"]
+    assert len([r for r in rows if r["special_session"] is not None]) == len(want) + len(saturdays)
 
 
 def test_seed_keeps_a_desks_special_session(dsn: str) -> None:

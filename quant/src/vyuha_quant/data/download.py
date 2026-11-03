@@ -104,6 +104,7 @@ class Totals:
     new_bars: int = 0
     chunks_incomplete: int = 0  # rejected rows or a gap, so not recorded; a re-run fetches them again
     days_without_bars: int = 0  # trading days after the first bar with none: gaps, never filled
+    days_known_gap: int = 0  # recorded by a person (`download known-gap`): no bars there, and that's true
     days_before_first_bar: int = 0  # not listed yet, or a broker hole at the very start: can't be told apart
     dropped: Dropped = field(default_factory=Dropped)
 
@@ -318,6 +319,50 @@ async def plan_report(dsn: str, spec: JobSpec, spec_dir: Path, now: datetime | N
     }
 
 
+async def _known_gaps(conn: db.Conn, instruments: list[int]) -> set[tuple[int, date]]:
+    rows = await conn.fetch(
+        "SELECT instrument_id, day FROM download_known_gap WHERE instrument_id = ANY($1::bigint[])",
+        instruments,
+    )
+    return {(r["instrument_id"], r["day"]) for r in rows}
+
+
+async def add_known_gap(dsn: str, symbol: str, day: date, reason: str, username: str) -> dict[str, Any]:
+    """A person records that an instrument has no bars on a day. One instrument, one day, audited, and only an
+    admin: a wrong entry would hide a real hole in the data for good."""
+    if not reason.strip():
+        raise SpecError("a known gap needs a reason")
+    conn = await db.connect(dsn)
+    try:
+        user_id = await conn.fetchval(
+            "SELECT id FROM app_user WHERE username = $1 AND is_active AND role = 'admin'", username
+        )
+        if user_id is None:
+            raise SpecError(f"{username} is not an active admin")
+        instrument = (await _instruments(conn, [symbol]))[0]
+        async with conn.transaction():
+            status: str = await conn.execute(
+                """INSERT INTO download_known_gap (instrument_id, day, reason, recorded_by)
+                   VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING""",
+                instrument.id,
+                day,
+                reason,
+                user_id,
+            )
+            added = status.split()[-1] == "1"
+            if added:
+                await db.audit(
+                    conn,
+                    "data.known_gap.add",
+                    "download_known_gap",
+                    f"{instrument.id}:{day}",
+                    {"symbol": symbol, "day": day.isoformat(), "reason": reason, "requested_by": username},
+                )
+    finally:
+        await conn.close()
+    return {"symbol": symbol, "day": day.isoformat(), "added": added}
+
+
 async def _upsert_dataset(tx: db.Conn, interval: str, instrument_id: int, w: PartitionWrite) -> None:
     await tx.execute(
         """INSERT INTO dataset (kind, interval, source, instrument_id, from_ts, to_ts, path, row_count, sha256)
@@ -459,6 +504,7 @@ async def run(
         totals = Totals()
         try:
             client = UpstoxHistory(token, source_ip, AsyncLimiter(1, step), base_url=base_url)
+            known_gaps = await _known_gaps(conn, [i.id for i in items])
             first_days: dict[int, date | None] = {}
             waiting: dict[int, list[Chunk]] = {}  # empty, with no bar yet to say whether it was listed
             for c in chunks:
@@ -476,7 +522,9 @@ async def run(
                     day = bars["ts"][0].astimezone(config.IST).date()
                     first_days[iid] = min(day, first_days[iid] or day)
                 first = first_days[iid]
-                empty_days = _trading_days_without_bars(bars, c, holidays)
+                all_empty = _trading_days_without_bars(bars, c, holidays)
+                empty_days = [d for d in all_empty if (iid, d) not in known_gaps]
+                totals.days_known_gap += len(all_empty) - len(empty_days)
                 gaps = [d for d in empty_days if first is not None and d >= first]
                 totals.days_without_bars += len(gaps)
                 totals.days_before_first_bar += len(empty_days) - len(gaps)

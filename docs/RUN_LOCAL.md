@@ -145,7 +145,9 @@ never filled), `dropped` (rows that failed validation) and `chunks_incomplete` (
 **Exit code 3 means the download is incomplete**, and the report says `"ok": false`. `chunks_incomplete` chunks
 weren't recorded, so run the same command again to retry them. Exit code 1 is any other failure. A trading day with no bars counts as a gap too (`days_without_bars`), so a chunk holding one is retried; days
 before an instrument's first bar count as not yet listed (`days_before_first_bar`). Muhurat sessions from 2022
-are in `holidays seed`, with the NSE circular each came from.
+and Saturday sessions from 2024 are in `holidays seed`, with the NSE circular each came from. A stock that really
+has no bars on a day (suspended, or no trades) exits 3 on every run until an admin records it, for that instrument and
+that day: `uv run vyuha-quant download known-gap --symbol NSE:X --day 2024-02-14 --reason "suspended" --user owner`.
 
 ## 7. Troubleshooting
 | Problem | Fix |

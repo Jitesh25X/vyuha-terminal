@@ -53,6 +53,7 @@ class FakeUpstox(ThreadingHTTPServer):
         self.corrupt_first: int = 0  # this many replies carry corrupt_row
         self.corrupt_row: list[Any] = ["garbage"]
         self.no_bars_on: set[date] = set()  # a 200 with no candles for these days
+        self.weekend_sessions: set[date] = set()  # weekend days it does serve bars for
         self.no_bars_before: date | None = None  # as if listed on this date
         self.peers: set[str] = set()
         self.on_request: Callable[[], None] | None = None
@@ -107,7 +108,12 @@ class _Handler(BaseHTTPRequestHandler):
                 "data": {
                     "candles": [
                         row
-                        for row in _candles(unquote(_unit), date.fromisoformat(frm), date.fromisoformat(to))
+                        for row in _candles(
+                            unquote(_unit),
+                            date.fromisoformat(frm),
+                            date.fromisoformat(to),
+                            frozenset(self.server.weekend_sessions),
+                        )
                         if (d := date.fromisoformat(row[0][:10])) not in missing
                         and (before is None or d >= before)
                     ]
@@ -116,12 +122,12 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
 
-def _candles(unit: str, frm: date, to: date) -> list[list[Any]]:
+def _candles(unit: str, frm: date, to: date, sessions: frozenset[date] = frozenset()) -> list[list[Any]]:
     """Newest first (as the broker sends them): three bars per weekday, two of them float-unfriendly."""
     out: list[list[Any]] = []
     d = to
     while d >= frm:
-        if d.weekday() < 5:
+        if d.weekday() < 5 or d in sessions:
             if unit == "days":
                 out.append([f"{d}T00:00:00+05:30", 100.05, 101.1, 99.95, 100.1, 1000, 0])
             else:
@@ -717,6 +723,107 @@ def test_a_holiday_or_weekend_with_no_bars_is_covered(dsn: str, fake: FakeUpstox
     assert p.returncode == 0
     assert report["days_without_bars"] == 0
     assert _coverage(dsn) == [(date(2024, 2, 1), date(2024, 2, 29))]
+
+
+# The holidays seed's Saturdays, with no bars from the broker: a hole, not a closed market.
+def test_an_empty_weekend_session_is_a_gap_and_a_rerun_retries_it(
+    dsn: str, fake: FakeUpstox, tmp_path: Path
+) -> None:
+    account = asyncio.run(_seed(dsn))
+    asyncio.run(
+        _sql(
+            dsn,
+            """INSERT INTO exchange_holiday (exchange, day, special_session)
+               VALUES ('NSE', '2024-01-20', '[{"open": "09:15", "close": "15:30"}]')""",
+        )
+    )
+    spec = _spec(
+        tmp_path, **{"from": "2024-01-08"}, to="2024-01-31", constituents_csv=None, symbols=["NSE:SYM0"]
+    )
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, log = _finish(p)
+    assert p.returncode == cli.EXIT_INCOMPLETE
+    assert report["days_without_bars"] == 1
+    assert _coverage(dsn) == []
+    assert "2024-01-20" in log
+
+    fake.weekend_sessions = {date(2024, 1, 20)}
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, _ = _finish(p)
+    assert p.returncode == 0
+    assert _coverage(dsn) == [(date(2024, 1, 8), date(2024, 1, 31))]
+
+
+def _known_gap(dsn: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "vyuha_quant.cli", "download", "known-gap", *args],
+        env={**os.environ, "POSTGRES_URL": dsn},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+# A suspended stock has no bars on a day, on every run. The owner's rule: a person records it, for that instrument
+# and that day, and nothing else clears.
+def test_a_recorded_known_gap_clears_that_day_for_that_instrument_only(
+    dsn: str, fake: FakeUpstox, tmp_path: Path
+) -> None:
+    account = asyncio.run(_seed(dsn))
+    spec = _spec(
+        tmp_path,
+        **{"from": "2024-02-01"},
+        to="2024-02-29",
+        constituents_csv=None,
+        symbols=["NSE:SYM0", "NSE:SYM1"],
+    )
+    fake.no_bars_on = {date(2024, 2, 14)}  # every instrument, on every run
+    p = _start(dsn, fake, tmp_path, spec, account)
+    _, _ = _finish(p)
+    assert p.returncode == cli.EXIT_INCOMPLETE
+
+    args = ["--symbol", "NSE:SYM0", "--day", "2024-02-14", "--reason", "suspended by NSE", "--user", "owner"]
+    done = _known_gap(dsn, *args)
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout)["added"] is True
+    assert json.loads(_known_gap(dsn, *args).stdout)["added"] is False  # once, and audited once
+    audits = asyncio.run(_one(dsn, "SELECT count(*) FROM audit_event WHERE action = 'data.known_gap.add'"))
+    assert audits["count"] == 1
+
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, log = _finish(p)
+    assert p.returncode == cli.EXIT_INCOMPLETE  # SYM1 has the same hole, and nobody has vouched for it
+    assert report["days_known_gap"] == 1
+    assert report["days_without_bars"] == 1
+    assert "NSE:SYM1" in log
+
+    other = _known_gap(
+        dsn, "--symbol", "NSE:SYM1", "--day", "2024-02-14", "--reason", "suspended", "--user", "owner"
+    )
+    assert other.returncode == 0, other.stderr
+    p = _start(dsn, fake, tmp_path, spec, account)
+    report, _ = _finish(p)
+    assert p.returncode == 0
+    assert report["days_without_bars"] == 0
+
+
+@pytest.mark.parametrize(
+    ("symbol", "reason", "role"),
+    [("NSE:SYM0", "   ", "admin"), ("NSE:NOPE", "why", "admin"), ("NSE:SYM0", "why", "trader")],
+)
+def test_a_known_gap_needs_a_reason_a_real_instrument_and_an_admin(
+    dsn: str, symbol: str, reason: str, role: str
+) -> None:
+    asyncio.run(_seed(dsn, role=role))
+    done = _known_gap(dsn, "--symbol", symbol, "--day", "2024-02-14", "--reason", reason, "--user", "owner")
+    assert done.returncode != 0
+    assert asyncio.run(_one(dsn, "SELECT count(*) FROM download_known_gap"))["count"] == 0
+    assert (
+        asyncio.run(_one(dsn, "SELECT count(*) FROM audit_event WHERE action = 'data.known_gap.add'"))[
+            "count"
+        ]
+        == 0
+    )
 
 
 def test_days_before_an_instruments_first_bar_are_not_gaps(
