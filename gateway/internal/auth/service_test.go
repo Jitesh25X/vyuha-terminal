@@ -340,9 +340,13 @@ func TestWrongTOTPCountsTowardsLockout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	opened := f.totpOpenedRows()
 	for i := 1; i <= 4; i++ {
 		_, err := f.svc.VerifyMFA(f.ctx, lr.MFAToken, "000000", f.meta)
 		wantErr(t, err, ErrInvalidCredentials)
+	}
+	if got := f.totpOpenedRows(); got != opened+4 { // a wrong guess decrypts the seed too
+		t.Fatalf("auth.totp.opened rows = %d, want %d", got, opened+4)
 	}
 	// A correct password in between must not reset the counter.
 	if _, err := f.svc.Login(f.ctx, username, testPassword, f.meta); err != nil {
