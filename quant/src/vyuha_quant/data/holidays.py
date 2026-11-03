@@ -37,13 +37,15 @@ MUHURAT = (
     SpecialSession(date(2025, 10, 21), (("13:45", "14:45"),), "CMTR70319.pdf"),
     SpecialSession(date(2026, 11, 8), (("14:20", "15:30"),), "CMTR76941.pdf"),
 )
-# Saturdays the capital market segment traded, read from each NSE circular. Only sessions from 2022, where intraday
+# Weekend days the capital market segment traded, read from each NSE circular. Only sessions from 2022, where intraday
 # data starts; earlier ones are listed for the owner in docs/TASKS.md. 2024-01-20 says "regular market timings".
 WEEKEND_SESSIONS = (
     SpecialSession(date(2024, 1, 20), _REGULAR, "MSD60340.pdf"),
     SpecialSession(date(2024, 3, 2), (("09:15", "10:00"), ("11:30", "12:30")), "MSD60677.pdf"),
     SpecialSession(date(2024, 5, 18), (("09:15", "10:00"), ("11:30", "12:30")), "MSD61893.pdf"),
     SpecialSession(date(2025, 2, 1), _REGULAR, "CMTR65729.pdf"),
+    # A Sunday. Standard timings as NSE's circular is quoted in the press; CMTR72349 itself not read (docs/TASKS.md).
+    SpecialSession(date(2026, 2, 1), _REGULAR, "CMTR72349.pdf"),
 )
 # Warn admins when the library's calendar ends sooner than this (next year's list not in it yet).
 COVERAGE_WARN_DAYS = 90
