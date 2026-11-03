@@ -418,6 +418,14 @@ TEST(OrderState, StatusNamesRoundTrip) {
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity): one property, and its oracle is the point
+// The PRD's row for a modify's answer: OPEN, or FILLED if fills already reach the resulting qty.
+OrderStatus status_after(OrderStatus listed_status, OrderEvent event, const Order& before,
+                         const Order& after) {
+  const bool answer = event == E::kModifyConfirm || event == E::kModifyReject;
+  return answer && before.filled_qty >= after.details.qty ? kFilled : listed_status;
+}
+
+// NOLINTNEXTLINE(readability-function-cognitive-complexity): one oracle, read top to bottom
 TEST(OmsProperty, OnlyListedTransitionsHappenAndEveryOneIsRecorded) {
   std::uint64_t refused_illegal = 0;
   std::uint64_t late_fills = 0;
@@ -467,7 +475,7 @@ TEST(OmsProperty, OnlyListedTransitionsHappenAndEveryOneIsRecorded) {
             const bool unrepresentable = contradictory_total(event, details, before.details.qty);
             RC_ASSERT(result.has_value() != unrepresentable);
             if (result.has_value()) {
-              RC_ASSERT(after.status == listing->second);
+              RC_ASSERT(after.status == status_after(listing->second, event, before, after));
             }
           }
           if (result.has_value()) {
