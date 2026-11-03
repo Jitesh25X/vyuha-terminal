@@ -1,6 +1,8 @@
 #include "vyuha/oms/order_router.h"
 
+#include <algorithm>
 #include <cctype>
+#include <cstddef>
 
 #include "quill/LogMacros.h"
 #include "vyuha/util/log.h"
@@ -67,10 +69,11 @@ std::size_t OrderRouter::poll() noexcept {
       next.sent = true;
       ++sent;
     }
-    if (!oms_->record_sent(next.handle).has_value()) {
+    const auto recorded = oms_->record_sent(next.handle);
+    if (!recorded.has_value() && recorded.error().code == ErrorCode::kCapacityExceeded) {
       break;  // the sink is full: try again on the next poll, and never send again
     }
-    ++head_;
+    ++head_;  // anything else won't change by retrying, and mustn't hold up the orders behind it
   }
   if (head_ == pending_.size()) {
     pending_.clear();
@@ -89,12 +92,21 @@ void OrderRouter::drain_refused() noexcept {
 // NOLINTNEXTLINE(bugprone-exception-escape): erasing from a reserved vector doesn't allocate
 OrderRouter::CancelAll OrderRouter::cancel_all() noexcept {
   CancelAll out;
-  std::erase_if(pending_, [](const Pending& p) { return !p.sent; });  // those never reach the broker
+  pending_.erase(pending_.begin(),
+                 pending_.begin() + static_cast<std::ptrdiff_t>(head_));  // already finished
   head_ = 0;
+  std::erase_if(pending_, [](const Pending& p) { return !p.sent; });  // those never reach the broker
   for (OrderHandle handle = 0; handle < oms_->size(); ++handle) {
     const Order& order = oms_->order(handle);
     const OrderStatus status = order.status;
-    if (status == OrderStatus::kNew || status == OrderStatus::kApproved || is_terminal(status)) {
+    // APPROVED means "maybe" (ADR-025): handed over with SENT not recorded yet, or restored and not
+    // reconciled.
+    const bool maybe_at_broker =
+        status == OrderStatus::kApproved &&
+        (order.needs_reconcile ||
+         std::ranges::any_of(pending_, [handle](const Pending& p) { return p.sent && p.handle == handle; }));
+    if (status == OrderStatus::kNew || (status == OrderStatus::kApproved && !maybe_at_broker) ||
+        is_terminal(status)) {
       continue;
     }
     ++out.asked;
@@ -124,13 +136,24 @@ OrderRouter::Recovery OrderRouter::unresolved(OrderHandle handle) {
 
 OrderRouter::Recovery OrderRouter::reconcile_unknown(OrderHandle handle, const BrokerOrderView& broker) {
   using State = BrokerOrderView::State;
+  const Order& order = oms_->order(handle);
+  const std::int32_t qty = order.details.qty;
+  const std::int32_t filled = broker.filled_qty;
+  // A book that can't be true of this order: a modify or fills we have no record of. Never guess (ADR-024).
+  const bool contradicts = (broker.qty > 0 && broker.qty != qty) || filled < order.filled_qty ||
+                           filled > qty || (broker.state == State::kOpen && filled >= qty) ||
+                           (broker.state == State::kFilled && filled != qty) ||
+                           (broker.state == State::kRejected && filled > 0);
+  if (contradicts) {
+    return unresolved(handle);
+  }
   EventDetails details{.broker_order_id = broker.broker_order_id,
                        .fill_price = broker.average_price,
                        .broker_filled_qty = broker.filled_qty};
   OrderEvent event = OrderEvent::kReconcileOpen;
   switch (broker.state) {
-    case State::kOpen:
-      event = OrderEvent::kReconcileOpen;
+    case State::kOpen:  // open with fills is what partly filled means
+      event = filled > 0 ? OrderEvent::kReconcilePartial : OrderEvent::kReconcileOpen;
       break;
     case State::kPartiallyFilled:
       event = OrderEvent::kReconcilePartial;
@@ -204,13 +227,23 @@ OrderRouter::Recovery OrderRouter::catch_up(OrderHandle handle, const BrokerOrde
 
 OrderRouter::Recovery OrderRouter::recover(OrderHandle handle, IBrokerOrderBook& book) {
   const Order& order = oms_->order(handle);
-  const std::vector<BrokerOrderView> found =
-      book.find_by_tag(broker_tag(order.details.client_order_id.view(), tag_limit_));
+  const auto looked_up = book.find_by_tag(broker_tag(order.details.client_order_id.view(), tag_limit_));
+  if (!looked_up.has_value()) {
+    // No answer isn't "not there": expiring on it would disown a live order. It stays blocked: try again.
+    if (quill::Logger* logger = log::engine(); logger != nullptr) {
+      LOG_ERROR(logger, "recovery: the broker's order book couldn't be read");
+    }
+    return Recovery::kUnresolved;
+  }
+  const std::vector<BrokerOrderView>& found = *looked_up;
   if (found.size() > 1) {
     return unresolved(handle);  // never guess which one is ours
   }
-  const BrokerOrderView* broker = found.empty() ? nullptr : found.data();
-  switch (order.status) {
+  return settle(handle, found.empty() ? nullptr : found.data());
+}
+
+OrderRouter::Recovery OrderRouter::settle(OrderHandle handle, const BrokerOrderView* broker) {
+  switch (oms_->order(handle).status) {
     case OrderStatus::kNew:
       if (broker != nullptr) {  // it can't have been sent: APPROVED was never durable
         return unresolved(handle);

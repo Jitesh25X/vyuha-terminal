@@ -154,6 +154,24 @@ TEST_F(OmsCrash, BetweenPersistAndSendRestartExpiresItAndSendsNothing) {
   EXPECT_EQ(expiry_alerts(url()), 1);
 }
 
+// The one way an expired order could fire: a caller replaying the same order id after a restart, which intake
+// can't catch, since it only knows this run. It's refused at the writer, and the next restart still works.
+TEST_F(OmsCrash, ReplayingAnExpiredOrderSendsNothingAndTheNextRestartWorks) {
+  ASSERT_TRUE(child("before_send", "place").killed);
+  ASSERT_EQ(child("none", "recover").code, 0);
+  ASSERT_EQ(status_of(url()), "EXPIRED");
+
+  EXPECT_EQ(child("none", "place").code, 0);
+  EXPECT_TRUE(at_broker().empty());
+  EXPECT_EQ(status_of(url()), "EXPIRED");
+  EXPECT_EQ(count(url(), "SELECT count(*) FROM order_event"), 3);
+  EXPECT_EQ(count(url(), "SELECT count(*) FROM alert_event WHERE title = 'ORDER_EVENT_REFUSED'"), 1);
+
+  EXPECT_EQ(child("none", "recover").code, 0);
+  EXPECT_TRUE(at_broker().empty());
+  EXPECT_EQ(status_of(url()), "EXPIRED");
+}
+
 // This child dies the moment anything calls send, so a clean exit proves recovery never tried.
 TEST_F(OmsCrash, RecoveryNeverCallsSend) {
   ASSERT_TRUE(child("before_send", "place").killed);

@@ -70,7 +70,11 @@ class FakeBroker final : public IOrderSender, public IBrokerOrderBook {
     cancels.push_back(order.details.id);
     return true;
   }
-  [[nodiscard]] std::vector<BrokerOrderView> find_by_tag(std::string_view tag) override {
+  [[nodiscard]] std::expected<std::vector<BrokerOrderView>, Error> find_by_tag(
+      std::string_view tag) override {
+    if (book_down) {
+      return std::unexpected(Error{ErrorCode::kInvalidArgument, "test: book down"});
+    }
     std::vector<BrokerOrderView> out;
     for (const auto& t : tags) {
       if (t == tag) {
@@ -83,6 +87,7 @@ class FakeBroker final : public IOrderSender, public IBrokerOrderBook {
   std::vector<Uuid> cancels;
   BrokerOrderView view;
   bool busy{false};
+  bool book_down{false};
 };
 
 constexpr std::size_t kTagLimit = 20;
@@ -347,6 +352,120 @@ TEST(OrderRouterRecovery, AFillOnAnExpiredOrderIsRecordedAndRaised) {
   EXPECT_EQ(r.oms.order(h).status, kExpired);
   EXPECT_EQ(r.oms.order(h).filled_qty, 2);
   EXPECT_EQ(r.sink.events.back().reason_code.view(), kReconMismatch);
+}
+
+// A failed read isn't "not at the broker": expiring on it would disown a live order at every restart.
+TEST(OrderRouterRecovery, ABookThatCantBeReadChangesNothing) {
+  for (const OrderStatus status : {kApproved, kSent, kUnknown, kOpen}) {
+    Rig r;
+    r.broker.book_down = true;
+    const OrderHandle h = r.restored(status);
+    const std::size_t events = r.sink.events.size();
+    EXPECT_EQ(r.router.recover(h, r.broker), Recovery::kUnresolved);
+    EXPECT_EQ(r.oms.order(h).status, status);
+    EXPECT_EQ(r.sink.events.size(), events);
+    EXPECT_TRUE(r.oms.order(h).needs_reconcile);
+    EXPECT_FALSE(r.oms.can_send(h));
+  }
+}
+
+// A book that can't be true of this order must never settle it (positions read these events).
+TEST(OrderRouterRecovery, ABookThatContradictsTheOrderStaysBlocked) {
+  struct Case {
+    const char* name;
+    BrokerState state;
+    std::int32_t filled;
+    std::int32_t broker_qty;
+  };
+  for (const Case& c : {Case{"filled, under our qty", BrokerState::kFilled, 5, 0},
+                        Case{"filled, past our qty", BrokerState::kFilled, 15, 0},
+                        Case{"another qty", BrokerState::kOpen, 0, 15},
+                        Case{"open with all of it filled", BrokerState::kOpen, 10, 0},
+                        Case{"rejected, but it traded", BrokerState::kRejected, 2, 0},
+                        Case{"partly filled, past our qty", BrokerState::kPartiallyFilled, 12, 0}}) {
+    for (const OrderStatus status : {kApproved, kSent, kUnknown}) {
+      Rig r;
+      r.broker.tags = {tag_of_client()};
+      r.broker.view = {.state = c.state,
+                       .filled_qty = c.filled,
+                       .average_price = Price::from_units(10'000),
+                       .qty = c.broker_qty};
+      const OrderHandle h = r.restored(status);
+      EXPECT_EQ(r.router.recover(h, r.broker), Recovery::kUnresolved) << c.name;
+      EXPECT_EQ(r.oms.order(h).filled_qty, 0) << c.name;
+      EXPECT_EQ(r.oms.recon_mismatches(), 1U) << c.name;
+      EXPECT_TRUE(r.oms.order(h).needs_reconcile) << c.name;
+      EXPECT_EQ(r.oms.order(h).status, kUnknown) << c.name;  // handed over, never sent again
+    }
+  }
+}
+
+TEST(OrderRouterRecovery, OpenWithFillsIsPartlyFilled) {
+  Rig r;
+  r.broker.tags = {tag_of_client()};
+  r.broker.view = {.state = BrokerState::kOpen, .filled_qty = 5, .average_price = Price::from_units(10'000)};
+  const OrderHandle h = r.restored(kSent);
+  EXPECT_EQ(r.router.recover(h, r.broker), Recovery::kResolved);
+  EXPECT_EQ(r.oms.order(h).status, kPartiallyFilled);
+  EXPECT_EQ(r.oms.order(h).filled_qty, 5);
+  EXPECT_EQ(r.sink.events.back().fill_qty, 5);
+}
+
+// The kill switch's flatten orders queue behind whatever went before, so nothing here may wedge the queue.
+TEST(OrderRouter, NewOrdersStillGoOutAfterCancelAll) {
+  Rig r;
+  const OrderHandle sent = r.approved();
+  ASSERT_TRUE(r.router.submit(sent));
+  r.sink.durable_count = r.sink.events.size();
+  ASSERT_EQ(r.router.poll(), 1U);
+
+  OrderDetails queued_details = order_of(10, "client-queued");
+  queued_details.id.bytes.fill(2);
+  const OrderHandle queued = r.oms.create(queued_details).value();
+  ASSERT_TRUE(r.oms.apply(queued, E::kRiskApprove));
+  ASSERT_TRUE(r.router.submit(queued));
+  ASSERT_TRUE(r.router.cancel_all().failed == 0U);
+  EXPECT_EQ(r.router.pending(), 0U);
+
+  OrderDetails later_details = order_of(10, "client-later");
+  later_details.id.bytes.fill(3);
+  const OrderHandle later = r.oms.create(later_details).value();
+  ASSERT_TRUE(r.oms.apply(later, E::kRiskApprove));
+  ASSERT_TRUE(r.router.submit(later));
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 1U);
+  EXPECT_EQ(r.oms.order(later).status, kSent);
+  EXPECT_EQ(r.oms.order(queued).status, kApproved);  // never went out
+  EXPECT_EQ(r.router.pending(), 0U);
+}
+
+TEST(OrderRouter, CancelAllAsksForAnOrderHandedOverButNotYetRecorded) {
+  Rig r;
+  const OrderHandle h = r.approved();
+  ASSERT_TRUE(r.router.submit(h));
+  r.sink.durable_count = r.sink.events.size();
+  r.sink.full = true;  // the adapter takes it, and SENT can't be recorded
+  ASSERT_EQ(r.router.poll(), 1U);
+  ASSERT_EQ(r.oms.order(h).status, kApproved);
+  const auto out = r.router.cancel_all();
+  EXPECT_EQ(out.asked, 1U);
+  EXPECT_EQ(r.broker.cancels.size(), 1U);
+  EXPECT_EQ(r.router.poll(), 0U);  // never sent twice
+  EXPECT_EQ(r.broker.tags.size(), 1U);
+}
+
+TEST(OrderRouter, CancelAllAsksForARestoredApprovedOrderButNotAQueuedOne) {
+  Rig r;
+  const OrderHandle restored = r.restored(kApproved);
+  OrderDetails queued_details = order_of(10, "client-queued");
+  queued_details.id.bytes.fill(2);
+  const OrderHandle queued = r.oms.create(queued_details).value();
+  ASSERT_TRUE(r.oms.apply(queued, E::kRiskApprove));
+  ASSERT_TRUE(r.router.submit(queued));
+  const auto out = r.router.cancel_all();
+  EXPECT_EQ(out.asked, 1U);
+  ASSERT_EQ(r.broker.cancels.size(), 1U);
+  EXPECT_EQ(r.broker.cancels.front(), r.oms.order(restored).details.id);
 }
 
 // The confirm was lost in the crash, and the broker's book says what the order now is.

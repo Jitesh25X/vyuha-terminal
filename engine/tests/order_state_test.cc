@@ -338,6 +338,19 @@ TEST(OmsModify, ARejectAfterFillsReachedTheOldQtyCompletesIt) {
   EXPECT_EQ(l.order().details.qty, 10);
 }
 
+// A fill moves the order off MODIFY_PENDING with the modify still out. A second one would lose what to go
+// back to.
+TEST(OmsModify, OneAtATimeEvenAfterAFillMovedTheOrderOn) {
+  Live l;
+  ASSERT_TRUE(l.oms.apply(l.handle, E::kModifyRequest, {.modified_qty = 15}));
+  ASSERT_EQ(l.fill(1, "T1"), kPartiallyFilled);
+  EXPECT_FALSE(l.oms.apply(l.handle, E::kModifyRequest, {.modified_qty = 12}));
+  EXPECT_EQ(l.order().details.qty, 15);
+  EXPECT_EQ(l.oms.apply(l.handle, E::kModifyReject), kPartiallyFilled);
+  EXPECT_EQ(l.order().details.qty, 10);
+  EXPECT_TRUE(l.oms.apply(l.handle, E::kModifyRequest, {.modified_qty = 12}));  // now it may
+}
+
 TEST(OmsModify, PriceAndTriggerChangeOnlyOnConfirm) {
   Live l;
   const Price price = Price::from_units(2'000'000);

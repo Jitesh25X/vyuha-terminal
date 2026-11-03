@@ -450,6 +450,39 @@ TEST(PgOrderStore, TradeIdsAndModifiesSurviveARestart) {
   EXPECT_EQ(oms.duplicate_fills(), 1U);
 }
 
+// A different event with a seq that's taken must not touch the row: it would make a finished order look live.
+TEST(PgOrderStore, ADifferentEventOnATakenSeqIsRefusedAndChangesNothing) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  PgOrderEventWriter writer(db.url());
+  Oms oms(writer, clock, 1);
+  const OrderHandle h = oms.create(details(s, 1, 10)).value();
+  ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
+  ASSERT_TRUE(oms.apply(h, E::kExpire, {.reason_code = kExpiredOnRestart}));
+  wait_written(writer, 3);
+
+  OrderEventRecord replay;
+  replay.order_id = details(s, 1, 10).id;
+  replay.seq = 3;
+  replay.from = kApproved;
+  replay.to = kSent;
+  replay.ts = clock.now();
+  ASSERT_TRUE(writer.try_push(replay));
+  wait_written(writer, 4);
+  EXPECT_TRUE(writer.healthy());  // it failed alone
+
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  EXPECT_EQ(tx.query_value<std::string>("SELECT status::text FROM \"order\""), "EXPIRED");
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM order_event"), 3);
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM alert_event WHERE title = 'ORDER_EVENT_REFUSED'"), 1);
+}
+
 TEST(PgOrderStore, ARetriedExpiryChangesNothing) {
   const std::string admin = admin_url();
   if (admin.empty()) {
@@ -470,6 +503,7 @@ TEST(PgOrderStore, ARetriedExpiryChangesNothing) {
     event.seq = oms.order(h).seq;
     event.from = kApproved;
     event.to = kExpired;
+    event.ts = clock.now();
     ASSERT_TRUE(event.reason_code.assign(kExpiredOnRestart));
     ASSERT_TRUE(writer.try_push(event));  // as after a commit whose result was lost
     wait_written(writer, 4);

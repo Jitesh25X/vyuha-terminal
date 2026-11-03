@@ -435,6 +435,9 @@ std::expected<OrderStatus, Error> Oms::modify_request(Order& order, OrderStatus 
   if (details.modified_qty != 0 && details.modified_qty <= order.filled_qty) {
     return std::unexpected(kBadDetails);  // nothing would be left to work: that's a cancel
   }
+  if (order.modify_out) {
+    return std::unexpected(kBadDetails);  // one at a time: a second would lose what to go back to
+  }
   OrderDetails& live = order.details;
   ModifyRecord modify{
       .qty = details.modified_qty, .price = details.modified_price, .trigger = details.modified_trigger};

@@ -26,7 +26,9 @@ class IOrderSender {
   IOrderSender& operator=(IOrderSender&&) = delete;
   virtual ~IOrderSender() = default;
   [[nodiscard]] virtual bool send(const Order& order, std::string_view broker_tag) noexcept = 0;
-  // Asks the broker to cancel. Repeating it is harmless.
+  // Asks the broker to cancel. Repeating it is harmless. The order may have no broker_order_id yet (handed
+  // over with no ack, or restored and not reconciled): find it by broker_tag, or return false, never true for
+  // nothing.
   [[nodiscard]] virtual bool cancel(const Order& order) noexcept = 0;
 };
 
@@ -51,8 +53,10 @@ class IBrokerOrderBook {
   IBrokerOrderBook(IBrokerOrderBook&&) = delete;
   IBrokerOrderBook& operator=(IBrokerOrderBook&&) = delete;
   virtual ~IBrokerOrderBook() = default;
-  // Every order the broker has with this tag.
-  [[nodiscard]] virtual std::vector<BrokerOrderView> find_by_tag(std::string_view broker_tag) = 0;
+  // Every order the broker has with this tag. An error means the book couldn't be read, which isn't "none":
+  // an adapter must never report a failed read as an empty list, because recovery expires on empty.
+  [[nodiscard]] virtual std::expected<std::vector<BrokerOrderView>, Error> find_by_tag(
+      std::string_view broker_tag) = 0;
 };
 
 // client_order_id in the broker's tag field (ADR-025): its letters and digits, keeping the last `limit`. The
@@ -80,8 +84,8 @@ class OrderRouter {
 
   // Cancels everything the broker may hold, for the kill switch (M2.7). Nothing here waits on or is refused
   // by the order log: a cancel only reduces risk, so an outage, a full ring or a refused order can't stop
-  // one. Unsent orders leave the queue. false from the adapter is counted in `failed`: call again, repeats
-  // are harmless.
+  // one. Unsent orders leave the queue. An APPROVED order is asked too if it may be at the broker. false from
+  // the adapter is counted in `failed`: call again, repeats are harmless.
   struct CancelAll {
     std::size_t asked{0};
     std::size_t failed{0};
@@ -104,6 +108,8 @@ class OrderRouter {
 
   [[nodiscard]] Recovery reconcile_unknown(OrderHandle handle, const BrokerOrderView& broker);
   [[nodiscard]] Recovery catch_up(OrderHandle handle, const BrokerOrderView& broker);
+  [[nodiscard]] Recovery settle(OrderHandle handle,
+                                const BrokerOrderView* broker);  // nullptr: not at the broker
   [[nodiscard]] Recovery unresolved(OrderHandle handle);
   void drain_refused() noexcept;
 
