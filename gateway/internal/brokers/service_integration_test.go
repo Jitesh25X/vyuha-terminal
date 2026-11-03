@@ -12,8 +12,10 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,6 +68,8 @@ type fixture struct {
 	observed []*enginev1.SessionInfo
 	kiteUser string // user_id the fake Kite returns
 	now      time.Time
+
+	kiteExchanges atomic.Int64 // token exchanges the fake Kite has seen
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -81,6 +85,7 @@ func newFixture(t *testing.T) *fixture {
 		now: time.Date(2026, 10, 29, 3, 0, 0, 0, time.UTC)}
 
 	kite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.kiteExchanges.Add(1)
 		_ = r.ParseForm()
 		if r.PostForm.Get("checksum") != kiteChecksum("kite-key", r.PostForm.Get("request_token"), "kite-secret") {
 			w.WriteHeader(http.StatusForbidden)
@@ -597,6 +602,61 @@ func TestEveryBrokerSecretDecryptIsAudited(t *testing.T) {
 	var leaks int
 	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM audit_event WHERE payload::text LIKE '%key-value%' OR payload::text LIKE '%secret-value%'`).Scan(&leaks); err != nil || leaks != 0 {
 		t.Fatalf("secret in the audit log: %d rows, %v", leaks, err)
+	}
+}
+
+// D-16 for the token exchange: both secrets audited, and neither used without its row.
+func TestCallbackAuditsBothSecretsBeforeAnyExchange(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	admin := f.user("admin_user", "admin")
+	acct := f.account("zerodha", "ZK1001", "kite-key", "kite-secret", "127.0.0.1")
+	login := func() string {
+		t.Helper()
+		u, err := f.svc.LoginURL(ctx, admin, acct)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, state := stateOf(t, u)
+		return state
+	}
+	exchangeRows := func() []string {
+		t.Helper()
+		rows, err := f.pool.Query(ctx, `SELECT payload->>'field' FROM audit_event WHERE action = 'broker.secret.opened'
+			AND entity_id = $1 AND payload->>'purpose' = 'broker_token_exchange_and_start_session' ORDER BY id`, acct)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var field string
+			if err := rows.Scan(&field); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, field)
+		}
+		return out
+	}
+
+	// A dead audit table: no exchange, and the secrets go nowhere.
+	broken := *f.svc
+	broken.q = store.New(failingAudit{f.pool})
+	if _, err := broken.Callback(ctx, Zerodha, CallbackParams{State: login(), Status: "success", RequestToken: "rt"}, netip.Addr{}); err == nil {
+		t.Fatal("audit failed but the callback went through")
+	}
+	if got := f.kiteExchanges.Load(); got != 0 {
+		t.Fatalf("%d exchanges with no audit row", got)
+	}
+
+	if _, err := f.svc.Callback(ctx, Zerodha, CallbackParams{State: login(), Status: "success", RequestToken: "rt"}, netip.Addr{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.kiteExchanges.Load(); got != 1 {
+		t.Fatalf("exchanges = %d, want 1", got)
+	}
+	if got := exchangeRows(); !slices.Equal(got, []string{"api_key_enc", "api_secret_enc"}) {
+		t.Fatalf("exchange decrypts audited: %v", got)
 	}
 }
 
