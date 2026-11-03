@@ -46,12 +46,14 @@ std::expected<void, Error> OrderRouter::submit(OrderHandle handle) noexcept {
 // NOLINTNEXTLINE(bugprone-exception-escape): the tag fits small-string storage or the engine stops
 std::size_t OrderRouter::poll() noexcept {
   std::size_t sent = 0;
+  drain_refused();
   while (head_ < pending_.size()) {
     Pending& next = pending_[head_];
     if (!next.sent) {
       if (sink_->durable() < next.ticket || !sink_->healthy()) {
         break;
       }
+      drain_refused();  // after durable(): a refused order's events count as durable, and it must not go out
       const Order& order = oms_->order(next.handle);
       if (!oms_->can_send(next.handle)) {  // cancelled or otherwise moved on while it waited
         ++head_;
@@ -75,6 +77,40 @@ std::size_t OrderRouter::poll() noexcept {
     head_ = 0;
   }
   return sent;
+}
+
+void OrderRouter::drain_refused() noexcept {
+  Uuid refused;
+  while (sink_->try_pop_refused(refused)) {
+    oms_->refuse(refused);
+  }
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape): erasing from a reserved vector doesn't allocate
+OrderRouter::CancelAll OrderRouter::cancel_all() noexcept {
+  CancelAll out;
+  std::erase_if(pending_, [](const Pending& p) { return !p.sent; });  // those never reach the broker
+  head_ = 0;
+  for (OrderHandle handle = 0; handle < oms_->size(); ++handle) {
+    const Order& order = oms_->order(handle);
+    const OrderStatus status = order.status;
+    if (status == OrderStatus::kNew || status == OrderStatus::kApproved || is_terminal(status)) {
+      continue;
+    }
+    ++out.asked;
+    if (!sender_->cancel(order)) {
+      ++out.failed;
+      continue;
+    }
+    if (status == OrderStatus::kOpen || status == OrderStatus::kPartiallyFilled) {
+      // The broker has been asked either way. A full sink only leaves the status behind until the ack or the
+      // next call: it never holds up the cancel itself.
+      if (!oms_->apply(handle, OrderEvent::kCancelRequest).has_value()) {
+        ++out.unrecorded;
+      }
+    }
+  }
+  return out;
 }
 
 OrderRouter::Recovery OrderRouter::unresolved(OrderHandle handle) {

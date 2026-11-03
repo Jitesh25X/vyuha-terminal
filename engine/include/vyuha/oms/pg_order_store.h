@@ -8,7 +8,9 @@
 #include <memory>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "vyuha/core/error.h"
@@ -37,19 +39,27 @@ class PgOrderEventWriter final : public IOrderEventSink {
   [[nodiscard]] std::uint64_t pushed() const noexcept override { return pushed_; }  // core thread
   [[nodiscard]] std::uint64_t durable() const noexcept override { return written(); }
   [[nodiscard]] std::uint64_t written() const noexcept { return written_.load(std::memory_order_acquire); }
+  [[nodiscard]] bool try_pop_refused(Uuid& order_id) noexcept override { return refused_->try_pop(order_id); }
   // False from a failed batch until the next one commits.
   [[nodiscard]] bool healthy() const noexcept override { return healthy_.load(std::memory_order_acquire); }
 
  private:
   static constexpr std::size_t kRingSize = 16'384;
   static constexpr std::size_t kBatchSize = 256;
+  static constexpr std::size_t kRefusedRingSize = 1'024;
   static constexpr std::chrono::seconds kShutdownRetry{5};
 
   void run(const std::stop_token& stop);
-  [[nodiscard]] bool flush(const std::vector<OrderEventRecord>& batch);
+  [[nodiscard]] bool flush(const std::vector<OrderEventRecord>& batch, const std::stop_token& stop);
+  // After a data error: one event at a time, so the bad one fails alone. False on anything that isn't a data
+  // error.
+  [[nodiscard]] bool flush_each(const std::vector<OrderEventRecord>& batch, const std::stop_token& stop);
+  void quarantine(const OrderEventRecord& event, std::string_view sqlstate, const std::stop_token& stop);
 
   std::string url_;
   std::unique_ptr<SpscRing<OrderEventRecord, kRingSize>> ring_;
+  std::unique_ptr<SpscRing<Uuid, kRefusedRingSize>> refused_;
+  std::unordered_set<std::string> quarantined_;  // writer thread only: their later events are skipped
   std::uint64_t pushed_{0};
   std::atomic<std::uint64_t> written_{0};
   std::atomic<bool> healthy_{true};

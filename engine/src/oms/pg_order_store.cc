@@ -114,6 +114,19 @@ namespace {
 
 constexpr Nanos kNanosPerMicro = 1000;
 
+constexpr const char* kStatementTimeout = "SET LOCAL statement_timeout = '5s'";
+
+// Classes 22 and 23: this row will never go in, however often it's retried.
+[[nodiscard]] bool is_data_error(std::string_view sqlstate) noexcept {
+  return sqlstate.starts_with("22") || sqlstate.starts_with("23");
+}
+
+void log_retry(std::size_t events, std::string_view sqlstate) {
+  if (quill::Logger* logger = log::engine(); logger != nullptr) {
+    LOG_ERROR(logger, "order events: batch of {} not written, retrying (sqlstate {})", events, sqlstate);
+  }
+}
+
 // The writer must not hang on a dead host: it holds up shutdown.
 [[nodiscard]] std::string with_timeouts(const std::string& url) {
   if (url.find("connect_timeout=") != std::string::npos) {
@@ -239,6 +252,7 @@ constexpr Error kUnreadable{ErrorCode::kOrderRecovery, "oms: an open order in Po
 PgOrderEventWriter::PgOrderEventWriter(std::string url)
     : url_(std::move(url)),
       ring_(std::make_unique<SpscRing<OrderEventRecord, kRingSize>>()),
+      refused_(std::make_unique<SpscRing<Uuid, kRefusedRingSize>>()),
       thread_([this](const std::stop_token& stop) { run(stop); }) {}
 
 PgOrderEventWriter::~PgOrderEventWriter() = default;
@@ -251,29 +265,105 @@ bool PgOrderEventWriter::try_push(const OrderEventRecord& event) noexcept {
   return true;
 }
 
-bool PgOrderEventWriter::flush(const std::vector<OrderEventRecord>& batch) {
-  const auto log_failure = [&](std::string_view sqlstate) {
-    if (quill::Logger* logger = log::engine(); logger != nullptr) {
-      LOG_ERROR(logger, "order events: batch of {} not written, retrying (sqlstate {})", batch.size(),
-                sqlstate);
-    }
-  };
+bool PgOrderEventWriter::flush(const std::vector<OrderEventRecord>& batch, const std::stop_token& stop) {
   try {
     pqxx::connection conn(with_timeouts(url_));
     pqxx::work tx(conn);
-    tx.exec("SET LOCAL statement_timeout = '5s'");
+    tx.exec(kStatementTimeout);
     for (const OrderEventRecord& e : batch) {
-      write_event(tx, e);
+      if (!quarantined_.contains(e.order_id.to_string())) {
+        write_event(tx, e);
+      }
     }
     tx.commit();
     return true;
   } catch (const pqxx::sql_error& e) {  // the code alone: messages can echo row values
-    log_failure(
-        e.sqlstate());  // a data error (22, 23) won't clear by itself, and nothing is sent until it does
+    if (is_data_error(e.sqlstate())) {
+      return flush_each(batch, stop);
+    }
+    log_retry(batch.size(), e.sqlstate());
   } catch (const std::exception&) {  // the message may echo connection details
-    log_failure("none: connection");
+    log_retry(batch.size(), "none: connection");
   }
   return false;
+}
+
+bool PgOrderEventWriter::flush_each(const std::vector<OrderEventRecord>& batch, const std::stop_token& stop) {
+  const auto write_one = [this](const OrderEventRecord& e) {
+    pqxx::connection conn(with_timeouts(url_));
+    pqxx::work tx(conn);
+    tx.exec(kStatementTimeout);
+    write_event(tx, e);
+    tx.commit();
+  };
+  try {
+    for (const OrderEventRecord& e : batch) {
+      if (quarantined_.contains(e.order_id.to_string())) {
+        continue;
+      }
+      try {
+        write_one(e);
+      } catch (const pqxx::sql_error& first) {
+        if (!is_data_error(first.sqlstate())) {
+          throw;
+        }
+        const std::string sqlstate(first.sqlstate());
+        // A live order keeps its history: the broker's id is the one part that can clash
+        // (order_broker_id_uniq).
+        OrderEventRecord without_id = e;
+        without_id.broker_order_id = {};
+        try {
+          if (!e.from.has_value() || e.broker_order_id.empty()) {
+            throw;
+          }
+          write_one(without_id);
+        } catch (const pqxx::sql_error& second) {
+          if (!is_data_error(second.sqlstate())) {
+            throw;
+          }
+          quarantine(e, sqlstate, stop);
+        }
+      }
+    }
+    return true;
+  } catch (const pqxx::sql_error& e) {
+    log_retry(batch.size(), e.sqlstate());
+  } catch (const std::exception&) {
+    log_retry(batch.size(), "none: connection");
+  }
+  return false;
+}
+
+// One order fails, and only that one: it never goes out, admins hear about it, and the queue moves on.
+void PgOrderEventWriter::quarantine(const OrderEventRecord& event, std::string_view sqlstate,
+                                    const std::stop_token& stop) {
+  const std::string id = event.order_id.to_string();
+  quarantined_.insert(id);
+  if (quill::Logger* logger = log::engine(); logger != nullptr) {
+    LOG_ERROR(logger, "ORDER_EVENT_REFUSED order={} seq={} sqlstate={}", id, event.seq, sqlstate);
+  }
+  try {
+    pqxx::connection conn(with_timeouts(url_));
+    pqxx::work tx(conn);
+    tx.exec(
+        R"(INSERT INTO alert_event (user_id, severity, title, body)
+           SELECT id, 'critical', 'ORDER_EVENT_REFUSED',
+                  jsonb_build_object('order_id', $1::text, 'seq', $2::int, 'sqlstate', $3::text,
+                                     'client_order_id', $4::text)
+           FROM app_user WHERE role = 'admin' AND is_active)",
+        pqxx::params{id, event.seq, std::string(sqlstate),
+                     std::string(event.details.client_order_id.view())});
+    tx.commit();
+  } catch (const std::exception&) {  // the log line above stands; the order is refused either way
+    if (quill::Logger* logger = log::engine(); logger != nullptr) {
+      LOG_ERROR(logger, "ORDER_EVENT_REFUSED alert not written for order={}", id);
+    }
+  }
+  // Before durable() moves past this event, so the router can't take it for persisted. Shutting down, nobody
+  // reads.
+  while (!refused_->try_push(event.order_id) && !stop.stop_requested()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
 }
 
 void PgOrderEventWriter::run(const std::stop_token& stop) {
@@ -294,7 +384,7 @@ void PgOrderEventWriter::run(const std::stop_token& stop) {
       std::this_thread::sleep_for(kIdle);
       continue;
     }
-    if (flush(batch)) {
+    if (flush(batch, stop)) {
       written_.fetch_add(batch.size(), std::memory_order_acq_rel);
       healthy_.store(true, std::memory_order_release);
       backoff.reset();

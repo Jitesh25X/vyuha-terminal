@@ -26,6 +26,8 @@ class IOrderSender {
   IOrderSender& operator=(IOrderSender&&) = delete;
   virtual ~IOrderSender() = default;
   [[nodiscard]] virtual bool send(const Order& order, std::string_view broker_tag) noexcept = 0;
+  // Asks the broker to cancel. Repeating it is harmless.
+  [[nodiscard]] virtual bool cancel(const Order& order) noexcept = 0;
 };
 
 struct BrokerOrderView {
@@ -73,6 +75,18 @@ class OrderRouter {
   std::size_t poll() noexcept;
   [[nodiscard]] std::size_t pending() const noexcept { return pending_.size() - head_; }
 
+  // Cancels everything the broker may hold, for the kill switch (M2.7). Nothing here waits on or is refused
+  // by the order log: a cancel only reduces risk, so an outage, a full ring or a refused order can't stop
+  // one. Unsent orders leave the queue. false from the adapter is counted in `failed`: call again, repeats
+  // are harmless.
+  struct CancelAll {
+    std::size_t asked{0};
+    std::size_t failed{0};
+    std::size_t unrecorded{
+        0};  // asked, but the ring was full: the status catches up on the ack or the next call
+  };
+  CancelAll cancel_all() noexcept;
+
   // After a restart, for each restored order: find it at the broker by tag and settle it. Never sends a
   // second copy: an order the broker has is adopted, and only an APPROVED order the broker lacks is sent.
   [[nodiscard]] Recovery recover(OrderHandle handle, IBrokerOrderBook& book);
@@ -87,6 +101,7 @@ class OrderRouter {
   [[nodiscard]] Recovery reconcile_unknown(OrderHandle handle, const BrokerOrderView& broker);
   [[nodiscard]] Recovery catch_up(OrderHandle handle, const BrokerOrderView& broker);
   [[nodiscard]] Recovery unresolved(OrderHandle handle);
+  void drain_refused() noexcept;
 
   Oms* oms_;
   IOrderEventSink* sink_;

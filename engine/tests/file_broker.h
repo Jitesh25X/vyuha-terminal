@@ -41,6 +41,8 @@ class FileBroker final : public oms::IOrderSender, public oms::IBrokerOrderBook 
     return ok;
   }
 
+  [[nodiscard]] bool cancel(const oms::Order& /*order*/) noexcept override { return true; }
+
   [[nodiscard]] std::vector<oms::BrokerOrderView> find_by_tag(std::string_view tag) override {
     std::vector<oms::BrokerOrderView> out;
     for (const std::string& line : lines()) {

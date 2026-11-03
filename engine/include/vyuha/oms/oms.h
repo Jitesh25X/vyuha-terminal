@@ -118,11 +118,21 @@ class IOrderEventSink {
   // pushed, so event N is durable once durable() >= N (ADR-025: persist before send).
   [[nodiscard]] virtual std::uint64_t pushed() const noexcept = 0;
   [[nodiscard]] virtual std::uint64_t durable() const noexcept = 0;
+  // An order storage has refused for good (a duplicate client_order_id that got past intake). Reported before
+  // durable() passes its events, so whoever saw them durable can also see this.
+  [[nodiscard]] virtual bool try_pop_refused(Uuid& /*order_id*/) noexcept { return false; }
 };
 
 using OrderHandle = std::uint32_t;
 
 inline constexpr std::string_view kReconMismatch = "RECON_MISMATCH";
+inline constexpr std::string_view kLateAck = "LATE_ACK";
+
+struct Intake {
+  OrderHandle handle{0};
+  bool existing{
+      false};  // the same request came before: nothing new was created, and nothing is to be submitted
+};
 
 struct EventDetails {
   std::string_view reason_code{};  // NOLINT(readability-redundant-member-init): partly filled by designators
@@ -147,8 +157,13 @@ class Oms {
  public:
   Oms(IOrderEventSink& sink, const IClock& clock, std::size_t capacity);
 
-  // Records NEW. kInvalidArgument if the order couldn't be stored; kCapacityExceeded if the pool or sink is
-  // full.
+  // Idempotent on client_order_id: the same request returns the existing order and records nothing; a
+  // different one is kOrderDup (ORDER_DUP). Otherwise records NEW. kInvalidArgument if the order couldn't be
+  // stored; kCapacityExceeded if the pool or sink is full. It knows the orders of this run and open ones
+  // restored into it; a terminal order of an earlier run is the gateway's check against Postgres (M2.8), and
+  // failing that the writer refuses only the duplicate.
+  [[nodiscard]] std::expected<Intake, Error> intake(const OrderDetails& details) noexcept;
+  // intake, for a caller that doesn't need to tell the two apart.
   [[nodiscard]] std::expected<OrderHandle, Error> create(const OrderDetails& details) noexcept;
 
   // Applies one event and records it. Errors leave the order unchanged:
@@ -164,6 +179,10 @@ class Oms {
 
   // Puts back an order read from Postgres, with no new event. It continues from the stored seq.
   [[nodiscard]] std::expected<OrderHandle, Error> restore(const RecoveredOrder& recovered) noexcept;
+
+  // Storage refused this order, so it never goes to a broker: if it hasn't been sent, it ends RISK_REJECTED.
+  // No event: storage wouldn't take it. An order already sent keeps its status, and the writer has alerted.
+  void refuse(const Uuid& order_id) noexcept;
 
   // Whether kSend would be allowed now. The router checks this, sends, then calls record_sent.
   [[nodiscard]] bool can_send(OrderHandle handle) const noexcept;
@@ -183,9 +202,12 @@ class Oms {
   [[nodiscard]] std::uint64_t illegal_transitions() const noexcept { return illegal_; }
   // RECON_MISMATCH events raised, including fills recorded out of turn.
   [[nodiscard]] std::uint64_t recon_mismatches() const noexcept { return recon_mismatches_; }
+  [[nodiscard]] std::uint64_t refused_by_storage() const noexcept { return refused_; }
 
  private:
   [[nodiscard]] std::expected<OrderStatus, Error> illegal(const Order& order, OrderEvent event) noexcept;
+  [[nodiscard]] std::optional<OrderHandle> find_client(std::string_view client_order_id) const noexcept;
+  void index_client(OrderHandle handle) noexcept;
   [[nodiscard]] std::expected<OrderStatus, Error> record(Order& order, OrderStatus to, std::int32_t filled,
                                                          const EventDetails& details,
                                                          std::string_view reason) noexcept;
@@ -194,9 +216,11 @@ class Oms {
   IOrderEventSink* sink_;
   const IClock* clock_;
   std::vector<Order> orders_;
+  std::vector<OrderHandle> client_index_;  // open addressing, sized up front; kNoOrder marks an empty slot
   std::size_t capacity_;
   std::uint64_t illegal_{0};
   std::uint64_t recon_mismatches_{0};
+  std::uint64_t refused_{0};
 };
 
 }  // namespace vyuha::oms

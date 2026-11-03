@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 
 #include "quill/LogMacros.h"
 #include "vyuha/util/log.h"
@@ -37,6 +38,28 @@ constexpr std::int64_t kMaxNumericUnits = 1'000'000'000'000'000'000;  // numeric
 constexpr std::int32_t kMaxMillipct = 1'000'000;                      // numeric(6,3)
 
 // Postgres CHECKs and column ranges on `order`, so an order that can't be stored is refused here.
+[[nodiscard]] bool same_request(const OrderDetails& a, const OrderDetails& b) noexcept {
+  return a.client_order_id.view() == b.client_order_id.view() && a.parent_id == b.parent_id &&
+         a.account_id == b.account_id && a.user_id == b.user_id && a.strategy_id == b.strategy_id &&
+         a.source == b.source && a.instrument_id == b.instrument_id && a.side == b.side && a.qty == b.qty &&
+         a.order_type == b.order_type && a.product == b.product && a.validity == b.validity &&
+         a.price == b.price && a.trigger_price == b.trigger_price &&
+         a.market_protection_millipct == b.market_protection_millipct && a.tag.view() == b.tag.view() &&
+         a.is_paper == b.is_paper;
+}
+
+constexpr OrderHandle kEmptySlot = 0xFFFF'FFFF;
+
+[[nodiscard]] std::size_t fnv1a(std::string_view text) noexcept {
+  constexpr std::uint64_t kBasis = 14'695'981'039'346'656'037ULL;
+  constexpr std::uint64_t kPrime = 1'099'511'628'211ULL;
+  std::uint64_t hash = kBasis;
+  for (const char c : text) {
+    hash = (hash ^ static_cast<unsigned char>(c)) * kPrime;
+  }
+  return static_cast<std::size_t>(hash);
+}
+
 [[nodiscard]] bool storable(const OrderDetails& d) noexcept {
   const bool needs_price = d.order_type == OrderType::kLimit || d.order_type == OrderType::kSl;
   const bool needs_trigger = d.order_type == OrderType::kSl || d.order_type == OrderType::kSlM;
@@ -119,12 +142,19 @@ std::string Uuid::to_string() const {
 Oms::Oms(IOrderEventSink& sink, const IClock& clock, std::size_t capacity)
     : sink_(&sink), clock_(&clock), capacity_(capacity) {
   orders_.reserve(capacity);
+  client_index_.assign(std::bit_ceil(std::max<std::size_t>(capacity, 1) * 2), kEmptySlot);
 }
 
 // NOLINTNEXTLINE(bugprone-exception-escape)
-std::expected<OrderHandle, Error> Oms::create(const OrderDetails& details) noexcept {
+std::expected<Intake, Error> Oms::intake(const OrderDetails& details) noexcept {
   if (!storable(details)) {
     return std::unexpected(Error{ErrorCode::kInvalidArgument, "oms: order can't be stored"});
+  }
+  if (const auto existing = find_client(details.client_order_id.view()); existing.has_value()) {
+    if (!same_request(orders_[*existing].details, details)) {
+      return std::unexpected(Error{ErrorCode::kOrderDup, "ORDER_DUP"});
+    }
+    return Intake{.handle = *existing, .existing = true};
   }
   if (orders_.size() >= capacity_) {
     return std::unexpected(Error{ErrorCode::kCapacityExceeded, "oms: order pool full"});
@@ -141,7 +171,51 @@ std::expected<OrderHandle, Error> Oms::create(const OrderDetails& details) noexc
   Order& order = orders_.emplace_back();  // can't allocate: within the reserved capacity
   order.details = details;
   order.seq = 1;
-  return static_cast<OrderHandle>(orders_.size() - 1);
+  const auto handle = static_cast<OrderHandle>(orders_.size() - 1);
+  index_client(handle);
+  return Intake{.handle = handle, .existing = false};
+}
+
+std::expected<OrderHandle, Error> Oms::create(const OrderDetails& details) noexcept {
+  const auto taken = intake(details);
+  if (!taken.has_value()) {
+    return std::unexpected(taken.error());
+  }
+  return taken->handle;
+}
+
+std::optional<OrderHandle> Oms::find_client(std::string_view client_order_id) const noexcept {
+  const std::size_t mask = client_index_.size() - 1;
+  for (std::size_t slot = fnv1a(client_order_id) & mask;; slot = (slot + 1) & mask) {
+    const OrderHandle handle = client_index_[slot];
+    if (handle == kEmptySlot) {
+      return std::nullopt;
+    }
+    if (orders_[handle].details.client_order_id.view() == client_order_id) {
+      return handle;
+    }
+  }
+}
+
+void Oms::index_client(OrderHandle handle) noexcept {
+  const std::size_t mask = client_index_.size() - 1;
+  std::size_t slot = fnv1a(orders_[handle].details.client_order_id.view()) & mask;
+  while (client_index_[slot] != kEmptySlot) {
+    slot = (slot + 1) & mask;
+  }
+  client_index_[slot] = handle;
+}
+
+void Oms::refuse(const Uuid& order_id) noexcept {
+  for (Order& order : orders_) {  // rare, and not per tick
+    if (order.details.id == order_id) {
+      ++refused_;
+      if (order.status == OrderStatus::kNew || order.status == OrderStatus::kApproved) {
+        order.status = OrderStatus::kRiskRejected;
+      }
+      return;
+    }
+  }
 }
 
 // NOLINTNEXTLINE(bugprone-exception-escape)
@@ -261,7 +335,8 @@ std::expected<OrderStatus, Error> Oms::apply(OrderHandle handle, OrderEvent even
   if (recorded.fill_qty == 0) {
     recorded.fill_price = Price{};
   }
-  const auto result = record(order, *next, filled, recorded, details.reason_code);
+  const bool late_ack = event == OrderEvent::kBrokerAck && *next == order.status;
+  const auto result = record(order, *next, filled, recorded, late_ack ? kLateAck : details.reason_code);
   if (result.has_value() && event >= OrderEvent::kReconcileOpen) {
     order.needs_reconcile = false;
   }
@@ -320,7 +395,9 @@ std::expected<OrderHandle, Error> Oms::restore(const RecoveredOrder& recovered) 
   order.filled_qty = recovered.filled_qty;
   order.broker_order_id = broker_id;
   order.needs_reconcile = true;
-  return static_cast<OrderHandle>(orders_.size() - 1);
+  const auto handle = static_cast<OrderHandle>(orders_.size() - 1);
+  index_client(handle);
+  return handle;
 }
 
 }  // namespace vyuha::oms

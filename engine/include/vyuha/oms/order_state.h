@@ -53,6 +53,12 @@ inline constexpr std::uint8_t kOrderEventCount = 20;
 // There is no way from UNKNOWN to APPROVED or SENT: an UNKNOWN order is never re-sent.
 [[nodiscard]] constexpr std::optional<OrderStatus> next_status(OrderStatus from, OrderEvent event) noexcept {
   using enum OrderEvent;
+  // A late ack: the fill or cancel beat it. Recorded, and the status stays.
+  if (event == kBrokerAck && (from == OrderStatus::kPartiallyFilled || from == OrderStatus::kFilled ||
+                              from == OrderStatus::kCancelled || from == OrderStatus::kCancelPending ||
+                              from == OrderStatus::kModifyPending)) {
+    return from;
+  }
   switch (from) {
     case OrderStatus::kNew:
       if (event == kRiskReject) {
@@ -65,13 +71,22 @@ inline constexpr std::uint8_t kOrderEventCount = 20;
     case OrderStatus::kApproved:
       return event == kSend ? std::optional{OrderStatus::kSent} : std::nullopt;
     case OrderStatus::kSent:
-      if (event == kBrokerAck) {
-        return OrderStatus::kOpen;
+      switch (event) {
+        case kBrokerAck:
+          return OrderStatus::kOpen;
+        case kBrokerReject:
+          return OrderStatus::kBrokerRejected;
+        case kAckTimeout:
+          return OrderStatus::kUnknown;
+        case kPartialFill:  // a fill can beat the ack
+          return OrderStatus::kPartiallyFilled;
+        case kFill:
+          return OrderStatus::kFilled;
+        case kBrokerCancel:  // an IOC cancelled before the ack
+          return OrderStatus::kCancelled;
+        default:
+          return std::nullopt;
       }
-      if (event == kBrokerReject) {
-        return OrderStatus::kBrokerRejected;
-      }
-      return event == kAckTimeout ? std::optional{OrderStatus::kUnknown} : std::nullopt;
     case OrderStatus::kOpen:
     case OrderStatus::kPartiallyFilled:
       switch (event) {

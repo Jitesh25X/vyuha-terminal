@@ -37,6 +37,15 @@ class LaggingSink final : public IOrderEventSink {
   [[nodiscard]] bool healthy() const noexcept override { return is_healthy; }
   [[nodiscard]] std::uint64_t pushed() const noexcept override { return events.size(); }
   [[nodiscard]] std::uint64_t durable() const noexcept override { return durable_count; }
+  [[nodiscard]] bool try_pop_refused(Uuid& order_id) noexcept override {
+    if (refused.empty()) {
+      return false;
+    }
+    order_id = refused.back();
+    refused.pop_back();
+    return true;
+  }
+  std::vector<Uuid> refused;
   std::vector<OrderEventRecord> events;
   std::uint64_t durable_count{0};
   bool full{false};
@@ -53,6 +62,14 @@ class FakeBroker final : public IOrderSender, public IBrokerOrderBook {
     tags.emplace_back(tag);
     return true;
   }
+  // NOLINTNEXTLINE(bugprone-exception-escape): a test's allocation failure may terminate
+  [[nodiscard]] bool cancel(const Order& order) noexcept override {
+    if (busy) {
+      return false;
+    }
+    cancels.push_back(order.details.id);
+    return true;
+  }
   [[nodiscard]] std::vector<BrokerOrderView> find_by_tag(std::string_view tag) override {
     std::vector<BrokerOrderView> out;
     for (const auto& t : tags) {
@@ -63,6 +80,7 @@ class FakeBroker final : public IOrderSender, public IBrokerOrderBook {
     return out;
   }
   std::vector<std::string> tags;
+  std::vector<Uuid> cancels;
   BrokerOrderView view;
   bool busy{false};
 };
@@ -196,6 +214,80 @@ TEST(OrderRouter, AnOrderThatMovedOnWhileWaitingIsNotSent) {
   EXPECT_EQ(r.router.poll(), 0U);
   EXPECT_TRUE(r.broker.tags.empty());
   EXPECT_EQ(r.router.pending(), 0U);
+}
+
+TEST(OrderRouter, AnOrderStorageRefusedIsNeverSentThoughItsEventsCountAsDurable) {
+  Rig r;
+  const OrderHandle h = r.approved();
+  ASSERT_TRUE(r.router.submit(h));
+  r.sink.refused.push_back(r.oms.order(h).details.id);
+  r.sink.durable_count = 2;
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_TRUE(r.broker.tags.empty());
+  EXPECT_EQ(r.oms.order(h).status, kRiskRejected);
+  EXPECT_EQ(r.oms.refused_by_storage(), 1U);
+  EXPECT_EQ(r.router.pending(), 0U);
+}
+
+// The owner's rule: one bad request never stops a kill-switch cancel.
+TEST(OrderRouter, ADuplicateThenCancelAllStillGoesThrough) {
+  Rig r;
+  const OrderHandle live = r.approved();
+  ASSERT_TRUE(r.router.submit(live));
+  r.sink.durable_count = 2;
+  ASSERT_EQ(r.router.poll(), 1U);
+  ASSERT_TRUE(r.oms.apply(live, E::kBrokerAck));
+
+  OrderDetails other = order_of(99);  // the same client_order_id, a different body
+  other.id.bytes.fill(2);
+  EXPECT_EQ(r.oms.intake(other).error().code, ErrorCode::kOrderDup);
+
+  const auto out = r.router.cancel_all();
+  EXPECT_EQ(out.asked, 1U);
+  EXPECT_EQ(out.failed, 0U);
+  ASSERT_EQ(r.broker.cancels.size(), 1U);
+  EXPECT_EQ(r.broker.cancels[0], r.oms.order(live).details.id);
+  EXPECT_EQ(r.oms.order(live).status, kCancelPending);
+}
+
+TEST(OrderRouter, CancelAllIgnoresTheStateOfTheOrderLog) {
+  Rig r;
+  const OrderHandle live = r.approved();
+  ASSERT_TRUE(r.router.submit(live));
+  r.sink.durable_count = 2;
+  ASSERT_EQ(r.router.poll(), 1U);
+  ASSERT_TRUE(r.oms.apply(live, E::kBrokerAck));
+  const OrderHandle queued = r.oms.create(order_of(5, "queued-order")).value();
+  ASSERT_TRUE(r.oms.apply(queued, E::kRiskApprove));
+  ASSERT_TRUE(r.router.submit(queued));
+  const OrderHandle restored = r.restored(kPartiallyFilled, 1);
+
+  r.sink.is_healthy = false;  // Postgres down, the ring full, and durable() far behind
+  r.sink.full = true;
+  const auto out = r.router.cancel_all();
+  EXPECT_EQ(out.asked, 2U);  // the live order and the restored one, reconciled or not
+  EXPECT_EQ(r.broker.cancels.size(), 2U);
+  EXPECT_EQ(r.oms.order(restored).status, kPartiallyFilled);  // the ring is full; the broker has been asked
+
+  r.sink.is_healthy = true;
+  r.sink.full = false;
+  r.sink.durable_count = 1'000;
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_EQ(r.broker.tags.size(), 1U);  // the queued order never goes out
+  EXPECT_EQ(r.router.pending(), 0U);
+}
+
+TEST(OrderRouter, ABusyAdapterIsReportedSoCancelAllCanBeRepeated) {
+  Rig r;
+  const OrderHandle h = r.restored(kOpen);
+  r.broker.busy = true;
+  const auto out = r.router.cancel_all();
+  EXPECT_EQ(out.asked, 1U);
+  EXPECT_EQ(out.failed, 1U);
+  EXPECT_EQ(r.oms.order(h).status, kOpen);
+  r.broker.busy = false;
+  EXPECT_EQ(r.router.cancel_all().failed, 0U);
+  EXPECT_EQ(r.oms.order(h).status, kCancelPending);
 }
 
 TEST(OrderRouterRecovery, ApprovedAndNotAtTheBrokerIsSentOnce) {
