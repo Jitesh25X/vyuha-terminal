@@ -23,6 +23,7 @@ permissions:
 
 env:
   VYUHA_TOOLS_DIR: /home/runner/.local/share/vyuha-tools
+  VYUHA_REQUIRE_DB: "1" # a service test fails rather than skips: down must never look like a pass
   VCPKG_ROOT: /home/runner/.local/share/vyuha-tools/vcpkg
   # Release-only vcpkg builds (debug engine builds link them fine on Linux): half the cold-build time.
   # Must be the same for engine-deps and the preset jobs, or the binary cache never matches.

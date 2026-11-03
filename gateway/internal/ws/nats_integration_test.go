@@ -13,13 +13,14 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	marketdatav1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/testenv"
 )
 
 // NATSSource against the dev NATS (make up): the subjects and KV layout the engine publishes.
 func TestNATSSource(t *testing.T) {
 	natsURL := os.Getenv("VYUHA_TEST_NATS_URL")
 	if natsURL == "" {
-		t.Skip("VYUHA_TEST_NATS_URL not set")
+		testenv.SkipWithoutService(t, "VYUHA_TEST_NATS_URL not set")
 	}
 	nc, err := nats.Connect(natsURL)
 	if err != nil {

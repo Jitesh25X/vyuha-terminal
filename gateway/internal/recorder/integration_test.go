@@ -14,6 +14,7 @@ import (
 
 	mdv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
 	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/chtest"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/testenv"
 )
 
 // F-MD-4 AC1 end to end on the dev stack (`make up PROFILES="core md"`): every published tick
@@ -21,7 +22,7 @@ import (
 func TestEveryPublishedTickIsRecorded(t *testing.T) {
 	natsURL, chURL := os.Getenv("VYUHA_TEST_NATS_URL"), os.Getenv("VYUHA_TEST_CLICKHOUSE_URL")
 	if natsURL == "" || chURL == "" {
-		t.Skip("VYUHA_TEST_NATS_URL / VYUHA_TEST_CLICKHOUSE_URL not set")
+		testenv.SkipWithoutService(t, "VYUHA_TEST_NATS_URL / VYUHA_TEST_CLICKHOUSE_URL not set")
 	}
 	ctx := context.Background()
 	conn, db, _ := chtest.New(t)

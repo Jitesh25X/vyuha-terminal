@@ -13,6 +13,7 @@
 #include <pqxx/pqxx>
 
 #include "pg_temp_db.h"
+#include "require_services.h"
 #include "vyuha/core/clock.h"
 #include "vyuha/oms/oms.h"
 #include "vyuha/oms/order_router.h"
@@ -95,7 +96,7 @@ void wait_written(const PgOrderEventWriter& writer, std::uint64_t n) {
 TEST(PgOrderStore, EveryTransitionIsWrittenAndOpenOrdersComeBack) {
   const std::string admin = admin_url();
   if (admin.empty()) {
-    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
   }
   const TempDb db(admin);
   const Seeded s = seed(db.url());
@@ -207,7 +208,7 @@ TEST(PgOrderStore, EveryTransitionIsWrittenAndOpenOrdersComeBack) {
 TEST(PgOrderStore, ADisagreementBetweenOrderAndItsEventsIsRefused) {
   const std::string admin = admin_url();
   if (admin.empty()) {
-    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
   }
   const TempDb db(admin);
   const Seeded s = seed(db.url());
@@ -233,7 +234,7 @@ TEST(PgOrderStore, ADisagreementBetweenOrderAndItsEventsIsRefused) {
 TEST(PgOrderStore, ARetryAfterAnUnknownCommitChangesNothing) {
   const std::string admin = admin_url();
   if (admin.empty()) {
-    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
   }
   const TempDb db(admin);
   const Seeded s = seed(db.url());
@@ -257,7 +258,7 @@ TEST(PgOrderStore, ARetryAfterAnUnknownCommitChangesNothing) {
 TEST(PgOrderStore, EventsWaitOutAnOutageAndArriveInOrder) {
   const std::string admin = admin_url();
   if (admin.empty()) {
-    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
   }
   const TempDb db(admin);
   const Seeded s = seed(db.url());
@@ -301,7 +302,7 @@ TEST(PgOrderStore, EventsWaitOutAnOutageAndArriveInOrder) {
 TEST(PgOrderStore, ALateFillIsStoredAndAlertsAdminsOnce) {
   const std::string admin = admin_url();
   if (admin.empty()) {
-    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
   }
   const TempDb db(admin);
   const Seeded s = seed(db.url());
@@ -357,7 +358,7 @@ class RecordingBroker final : public IOrderSender {
 TEST(PgOrderStore, ADuplicateAtTheWriterFailsOnlyItselfAndCancelAllStillGoesThrough) {
   const std::string admin = admin_url();
   if (admin.empty()) {
-    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
   }
   const TempDb db(admin);
   const Seeded s = seed(db.url());
@@ -427,7 +428,7 @@ TEST(PgOrderStore, ADuplicateAtTheWriterFailsOnlyItselfAndCancelAllStillGoesThro
 TEST(PgOrderStore, AnOrderWithARowThatCantGoInFailsAlone) {
   const std::string admin = admin_url();
   if (admin.empty()) {
-    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
   }
   const TempDb db(admin);
   const Seeded s = seed(db.url());
@@ -451,7 +452,7 @@ TEST(PgOrderStore, AnOrderWithARowThatCantGoInFailsAlone) {
 TEST(PgOrderStore, ALiveOrdersEventSurvivesABrokerIdClash) {
   const std::string admin = admin_url();
   if (admin.empty()) {
-    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
   }
   const TempDb db(admin);
   const Seeded s = seed(db.url());

@@ -47,11 +47,18 @@ async def _drop(admin: str, name: str) -> None:
         await conn.close()
 
 
+def skip_without_service(message: str) -> None:
+    """Skips, for quick local runs. With VYUHA_REQUIRE_DB=1 (CI and `make verify`) fails: down can't look like a pass."""
+    if os.environ.get("VYUHA_REQUIRE_DB") == "1":
+        pytest.fail(f"{message} and VYUHA_REQUIRE_DB=1: it must not skip")
+    pytest.skip(message)
+
+
 @pytest.fixture
 def dsn() -> Iterator[str]:
     admin = os.environ.get("VYUHA_TEST_POSTGRES_URL")
     if not admin:
-        pytest.skip("VYUHA_TEST_POSTGRES_URL not set")
+        skip_without_service("VYUHA_TEST_POSTGRES_URL not set")
     name = "vyuha_qtest_" + secrets.token_hex(6)
     parts = urlsplit(admin)
     url = urlunsplit(parts._replace(path="/" + name))

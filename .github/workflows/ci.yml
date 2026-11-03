@@ -23,6 +23,7 @@ concurrency:
 
 env:
   VYUHA_TOOLS_DIR: /home/runner/.local/share/vyuha-tools
+  VYUHA_REQUIRE_DB: "1" # a service test fails rather than skips: down must never look like a pass
 
 jobs:
   changes:

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/testenv"
 	"os"
 	"testing"
 	"time"
@@ -12,7 +13,7 @@ import (
 func TestStoreIntegration(t *testing.T) {
 	url := os.Getenv("VYUHA_TEST_POSTGRES_URL")
 	if url == "" {
-		t.Skip("VYUHA_TEST_POSTGRES_URL not set")
+		testenv.SkipWithoutService(t, "VYUHA_TEST_POSTGRES_URL not set")
 	}
 	const dir = "../../../db/migrations"
 
