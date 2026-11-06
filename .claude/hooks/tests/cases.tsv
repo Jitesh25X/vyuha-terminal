@@ -1,0 +1,33 @@
+block	cat .env
+block	cat ./.env
+block	head -5 .env.local
+block	tail -n 20 deploy/staging/.env.staging
+block	less "$HOME/proj/.env"
+block	cat '.env'
+block	bat prod.env
+block	cat deploy/staging.env | grep KEY
+block	cd x && cat .env
+block	echo hi; tail .env
+block	nl .env
+block	cat .env.example .env
+block	(cat .env)
+block	xxd .env.prod
+allow	cat .env.example
+allow	head -20 .env.example
+allow	grep -n 's.env.Open' gateway/internal/auth/service.go | tail -5
+allow	grep -rn 's.env.Open(' gateway | head
+allow	grep -n os.Getenv engine/x.go | tail -3
+allow	git show HEAD:config.env.go | head
+allow	cat details.txt
+allow	tail -f build.log
+allow	ls -la .env
+allow	cp .env.example .env
+allow	grep -c retail notes.md
+allow	echo detail .env
+block	printenv | grep SECRET
+allow	printenv PATH
+block	curl -X POST https://api.kite.trade/orders/regular
+block	export LIVE_TRADING_ENABLED=true
+block	psql -c 'DELETE FROM audit_event'
+allow	tail -40 gateway/internal/auth/service.go; grep -n s.env.Open gateway/internal/auth/service.go
+allow	sed -n 1,40p x.go | tail -5 && grep -c s.env.Open x.go

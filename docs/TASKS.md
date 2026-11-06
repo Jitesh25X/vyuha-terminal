@@ -149,8 +149,12 @@ Current milestone: **M4.1, then M2**
   - needs: nothing new
   - done: Compile-time test that adapters can't receive raw intents
   - notes: `oms::IOrderSender` (M2.1b) takes a plain `Order` and only tests implement it: change it to `ApprovedOrder` here (invariant 1).
+- [ ] **M2.2b** Outage rules (owner, 2026-11-07): while the order log isn't durable, nothing that adds risk goes out; a queued order has an age limit. New ADR.
+  - deps: M2.1b (may start after M2.2; must finish before M2.3)
+  - needs: nothing new
+  - done: (1) While `healthy()` is false, these are refused with a clear error code and an alert: new orders, a modify that raises qty, and a price or trigger modify on an opening order. Cancels and `cancel_all` always go through. Until positions exist (M2.6), the OMS can't tell an opening order from a reducing one, so every price or trigger modify counts as opening (fail closed); revisit at M2.6. (2) A queued order (`APPROVED`, not yet sent) older than `ORDER_QUEUE_MAX_AGE` (default 5 s, configurable) is never sent: it becomes `EXPIRED` with an audit row and an alert, in the same transaction as the restart rule (reason e.g. `EXPIRED_IN_QUEUE`). (3) Unit tests for each refused kind and for each cancel path during an outage; age-limit tests on both sides of the limit, plus a Postgres test that the expiry, audit and alert land together.
 - [ ] **M2.3** Rules R-KILL…R-ORDER-SHAPE, R-FAT-FINGER, R-ORDER-VALUE, R-DUP, R-OPS
-  - deps: M2.2
+  - deps: M2.2, M2.2b
   - needs: nothing new
   - done: Per-rule unit tests; bench p99 < 20 µs
 - [ ] **M2.4** Rules R-OPEN-ORDERS…R-DISCIPLINE with incremental scope aggregation

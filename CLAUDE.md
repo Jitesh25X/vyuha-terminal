@@ -65,6 +65,8 @@ make staging-build  # staging/production images (deploy/staging, ADR-022; runboo
 - Start every task by restating which **feature ID(s)** and **acceptance criteria** it satisfies.
 - Write the test first for any risk, OMS, pricing, cost-model or RBAC logic.
 - Keep PRs small: one task from `TASKS.md` per PR. At the end, tick it in `TASKS.md` with the date and notes.
+- **Never route around a hook.** If `.claude/hooks/guard-bash.sh` (or any hook) blocks a command, stop and tell the owner. Don't re-run it through a script, alias, other quoting or any other route. If the hook looks wrong, propose a fix with cases in `.claude/hooks/tests/cases.tsv` and wait for approval.
+- **No scripted NSE/BSE fetches**, including during reviews and in subagents: no curl, wget, web-fetch agents or downloads from NSE or BSE sites (ADR-019). When a fact needs an exchange source (circulars, sessions, holidays, ban lists), ask the owner to check it in a browser. Say so in any subagent prompt that might look it up.
 - Contracts first: change `proto/` or `gateway/api/openapi.yaml` and regenerate before you implement.
 - DB changes go only through a new numbered migration in `db/migrations/`. Never edit an applied one.
 - New dependencies must be listed in `docs/TECH_STACK.md` with a reason. Prefer what is already there.
