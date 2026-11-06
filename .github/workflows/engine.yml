@@ -113,8 +113,7 @@ jobs:
       # Ubuntu 24.04 runners use 32-bit mmap ASLR, which TSan's shadow memory layout can't handle.
       - if: matrix.preset == 'tsan'
         run: sudo sysctl vm.mmap_rnd_bits=28
-      - if: matrix.preset == 'debug'
-        run: make up # NATS publisher + Postgres instrument-directory integration tests
+      - run: make up # NATS publisher, Postgres directory and order-writer tests; they'd skip silently without it
       - run: make test-engine ENGINE_PRESETS=${{ matrix.preset }}
       - if: matrix.preset == 'debug'
         run: make lint-engine
