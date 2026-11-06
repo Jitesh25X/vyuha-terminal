@@ -146,7 +146,7 @@ Broker WS → IO decode → SPSC ring → core normalize (canonical `Tick`, int6
 Recorder subscribes `md.>` → batches of 10k rows or 1 s → ClickHouse.
 
 ### 6.2 Order path
-UI ticket → `POST /orders` (gateway: authN, RBAC, account mapping, idempotency) → gRPC `Engine.SubmitIntent` → intent queue → **RiskGate** → OMS `APPROVED` → slicer/router → OPS token bucket → adapter REST → broker. Broker ack/updates → order-update stream/postback → ring → OMS transition → NATS `oms.order.<account>` + Postgres `order_event` → gateway → WS → blotter.
+UI ticket → `POST /orders` (gateway: authN, RBAC, account mapping, idempotency) → gRPC `Engine.SubmitIntent` → intent queue → **RiskGate** → OMS `APPROVED` (durable in Postgres before anything is sent, ADR-025; the router polls the writer, so Postgres stays off the core thread) → slicer/router → OPS token bucket → adapter REST → broker, with `client_order_id` in the broker tag. Broker ack/updates → order-update stream/postback → ring → OMS transition → NATS `oms.order.<account>` + Postgres `order_event` → gateway → WS → blotter.
 Strategy path: strategy host (quant) → NATS request `engine.intent` (same gRPC message) → same gate.
 AI path: copilot `draft_order_ticket` → WS message `ui.open_ticket` → human presses Ctrl+Enter → normal UI path.
 
@@ -180,7 +180,7 @@ Feeds → intel `ingest` (poll 60 s) → dedupe/cluster → `extract` (fast LLM)
 | Broker REST timeout on place | Order → `UNKNOWN`; reconcile via order book within 2 s; **never auto-resend** |
 | Broker token expired (daily) | Session → `awaiting_login`; trading blocked for that account; UI prompts login |
 | Engine crash | systemd/compose restart → load open orders + fills from Postgres → reconcile all accounts → resume; resting broker stops protect brackets |
-| Postgres down | Engine continues in-memory with a bounded event ring; if ring > 80% → auto kill-switch "block new" (desk) until DB recovers |
+| Postgres down | Engine keeps market data, fills and cancels going in memory with a bounded event ring. No new order is sent while events aren't durable, including position-reducing and flatten orders (ADR-025, owner 2026-11-03); the broker's own terminal is the fallback for flattening. If ring > 80% → auto kill-switch "block new" (desk) until DB recovers |
 | NATS down | Engine continues trading; UI stale; gateway serves REST from Postgres; alert |
 | quant/intel down | Trading unaffected (gate is engine-local); risk analytics panels show stale marker |
 | Clock skew | chrony required; engine refuses start if skew > 250 ms vs NTP |
