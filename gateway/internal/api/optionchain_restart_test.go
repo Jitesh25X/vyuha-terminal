@@ -20,6 +20,7 @@ import (
 	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/config"
 	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/quantc"
 	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/testenv"
 	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/ws"
 )
 
@@ -30,7 +31,7 @@ import (
 func TestOptionChainLTPIVSurvivesGatewayRestart(t *testing.T) {
 	natsURL := os.Getenv("VYUHA_TEST_NATS_URL")
 	if natsURL == "" {
-		t.Skip("VYUHA_TEST_NATS_URL not set")
+		testenv.SkipWithoutService(t, "VYUHA_TEST_NATS_URL not set")
 	}
 	nc, err := nats.Connect(natsURL)
 	if err != nil {

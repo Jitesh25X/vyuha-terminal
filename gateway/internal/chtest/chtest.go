@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/testenv"
 )
 
 // New returns a connection to a fresh database, its name and a DSN pointing at it. It skips the
@@ -21,7 +22,7 @@ func New(t testing.TB) (clickhouse.Conn, string, string) {
 	t.Helper()
 	dsn := os.Getenv("VYUHA_TEST_CLICKHOUSE_URL")
 	if dsn == "" {
-		t.Skip("VYUHA_TEST_CLICKHOUSE_URL not set")
+		testenv.SkipWithoutService(t, "VYUHA_TEST_CLICKHOUSE_URL not set")
 	}
 	var b [4]byte
 	_, _ = rand.Read(b[:])

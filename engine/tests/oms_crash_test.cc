@@ -17,6 +17,7 @@
 
 #include "file_broker.h"
 #include "pg_temp_db.h"
+#include "require_services.h"
 
 // NOLINTNEXTLINE(readability-redundant-declaration,cppcoreguidelines-avoid-non-const-global-variables): POSIX
 extern char** environ;
@@ -107,7 +108,7 @@ class OmsCrash : public ::testing::Test {
  protected:
   void SetUp() override {
     if (admin_url().empty()) {
-      GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+      VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
     }
     db_ = std::make_unique<TempDb>(admin_url());
     seeded_ = seed(db_->url());

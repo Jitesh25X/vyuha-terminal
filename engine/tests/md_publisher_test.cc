@@ -12,7 +12,9 @@
 #include <thread>
 
 #include <gtest/gtest.h>
+
 #include <nats/nats.h>
+#include "require_services.h"
 
 #include "vyuha/core/clock.h"
 
@@ -35,7 +37,7 @@ vyuha::md::Tick tick(std::uint64_t id, std::int64_t paise) {
 TEST(MdPublisher, PublishesEveryTickBarAndLatestSnapshot) {
   const std::string url = nats_url();
   if (url.empty()) {
-    GTEST_SKIP() << "VYUHA_TEST_NATS_URL not set";
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_NATS_URL not set");
   }
   natsConnection* nc = nullptr;
   ASSERT_EQ(natsConnection_ConnectTo(&nc, url.c_str()), NATS_OK);

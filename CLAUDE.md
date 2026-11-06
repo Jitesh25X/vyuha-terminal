@@ -57,7 +57,7 @@ make test-engine    # ctest incl. sanitizers preset `asan`
 make bench          # Google Benchmark: risk gate, normalizer
 make e2e            # Playwright (Chromium) against a throwaway gateway + database (scripts/e2e.sh; needs `make up`)
 make lint           # buf, clang-tidy, clang-format --dry-run, gofmt, golangci-lint, ruff, mypy, tsc (web: strict tsc only)
-make verify         # lint + test + e2e + invariants check (run before declaring a task done)
+make verify         # lint + test + e2e + invariants check (run before declaring a task done); needs `make up PROFILES="core md"`, because VYUHA_REQUIRE_DB=1 makes a service test fail, not skip
 make staging-build  # staging/production images (deploy/staging, ADR-022; runbook docs/STAGING.md)
 ```
 

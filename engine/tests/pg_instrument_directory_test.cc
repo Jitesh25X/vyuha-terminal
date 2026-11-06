@@ -16,6 +16,7 @@
 #include <pqxx/pqxx>
 
 #include "pg_temp_db.h"
+#include "require_services.h"
 
 namespace {
 
@@ -25,7 +26,7 @@ using vyuha::testing::TempDb;
 TEST(PgInstrumentDirectory, LoadsActiveMappingsAndRefreshes) {
   const std::string admin = admin_url();
   if (admin.empty()) {
-    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
   }
   const TempDb db(admin);
   {

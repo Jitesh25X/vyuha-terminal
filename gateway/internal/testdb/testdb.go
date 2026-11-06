@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/store"
+	"github.com/Jitesh25X/vyuha-terminal/gateway/internal/testenv"
 )
 
 const migrateLockKey int64 = 0x7679756861_7464 // "vyuha" "td"
@@ -28,7 +29,7 @@ func New(t testing.TB) (string, *pgxpool.Pool) {
 	t.Helper()
 	admin := os.Getenv("VYUHA_TEST_POSTGRES_URL")
 	if admin == "" {
-		t.Skip("VYUHA_TEST_POSTGRES_URL not set")
+		testenv.SkipWithoutService(t, "VYUHA_TEST_POSTGRES_URL not set")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

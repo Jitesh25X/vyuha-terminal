@@ -226,5 +226,7 @@ clean-space:
 invariants:
 	@./scripts/check-invariants.sh
 
+# VYUHA_REQUIRE_DB=1: a test whose service is down fails rather than skips. Needs `make up PROFILES="core md"`.
+verify: export VYUHA_REQUIRE_DB = 1
 verify: lint test e2e invariants
 	@echo "✔ verify complete"
