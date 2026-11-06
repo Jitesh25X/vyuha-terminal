@@ -53,6 +53,7 @@ enum OrderStatus {
   ORDER_STATUS_MODIFY_PENDING = 10;
   ORDER_STATUS_BROKER_REJECTED = 11;
   ORDER_STATUS_UNKNOWN = 12;
+  ORDER_STATUS_EXPIRED = 13; // APPROVED, never reached the broker, and the engine restarted (ADR-025)
 }
 
 message Bracket {

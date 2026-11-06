@@ -20,8 +20,9 @@ enum class OrderStatus : std::uint8_t {
   kModifyPending,
   kBrokerRejected,
   kUnknown,
+  kExpired,  // APPROVED, never reached the broker, and the engine restarted: it never fires
 };
-inline constexpr std::uint8_t kOrderStatusCount = 12;
+inline constexpr std::uint8_t kOrderStatusCount = 13;
 
 enum class OrderEvent : std::uint8_t {
   kRiskReject,
@@ -35,20 +36,32 @@ enum class OrderEvent : std::uint8_t {
   kCancelConfirm,
   kModifyRequest,  // after the modify passed the risk check
   kModifyConfirm,
-  kAckTimeout,  // 5 s after Send without an ack
-  // Reconcile: what the broker's order book says about an UNKNOWN order.
+  kCancelReject,  // the broker refused the cancel
+  kModifyReject,  // the broker refused the modify
+  kBrokerCancel,  // broker- or exchange-initiated: IOC remainder, MIS auto square-off, exchange cancel
+  kAckTimeout,    // 5 s after Send without an ack
+  kExpire,        // the restart rule (ADR-025): recovery found an APPROVED order the broker doesn't have
+  // Reconcile: what the broker's order book says about an UNKNOWN order. Keep these last: Oms::apply treats
+  // anything from kReconcileOpen on as settling the order against the broker.
   kReconcileOpen,
   kReconcilePartial,
   kReconcileFilled,
   kReconcileCancelled,
   kReconcileRejected,
 };
-inline constexpr std::uint8_t kOrderEventCount = 17;
+inline constexpr std::uint8_t kOrderEventCount = 21;
 
-// The F-EX-2 table. nullopt means the transition isn't listed, so it is illegal (OMS_ILLEGAL_TRANSITION).
+// The F-EX-2 table (ADR-024). nullopt means the transition isn't listed, so it is illegal
+// (OMS_ILLEGAL_TRANSITION), except that a fill is a broker fact and Oms records it anyway (RECON_MISMATCH).
 // There is no way from UNKNOWN to APPROVED or SENT: an UNKNOWN order is never re-sent.
 [[nodiscard]] constexpr std::optional<OrderStatus> next_status(OrderStatus from, OrderEvent event) noexcept {
   using enum OrderEvent;
+  // A late ack: the fill or cancel beat it. Recorded, and the status stays.
+  if (event == kBrokerAck && (from == OrderStatus::kPartiallyFilled || from == OrderStatus::kFilled ||
+                              from == OrderStatus::kCancelled || from == OrderStatus::kCancelPending ||
+                              from == OrderStatus::kModifyPending)) {
+    return from;
+  }
   switch (from) {
     case OrderStatus::kNew:
       if (event == kRiskReject) {
@@ -59,15 +72,27 @@ inline constexpr std::uint8_t kOrderEventCount = 17;
       }
       return std::nullopt;
     case OrderStatus::kApproved:
+      if (event == kExpire) {
+        return OrderStatus::kExpired;
+      }
       return event == kSend ? std::optional{OrderStatus::kSent} : std::nullopt;
     case OrderStatus::kSent:
-      if (event == kBrokerAck) {
-        return OrderStatus::kOpen;
+      switch (event) {
+        case kBrokerAck:
+          return OrderStatus::kOpen;
+        case kBrokerReject:
+          return OrderStatus::kBrokerRejected;
+        case kAckTimeout:
+          return OrderStatus::kUnknown;
+        case kPartialFill:  // a fill can beat the ack
+          return OrderStatus::kPartiallyFilled;
+        case kFill:
+          return OrderStatus::kFilled;
+        case kBrokerCancel:  // an IOC cancelled before the ack
+          return OrderStatus::kCancelled;
+        default:
+          return std::nullopt;
       }
-      if (event == kBrokerReject) {
-        return OrderStatus::kBrokerRejected;
-      }
-      return event == kAckTimeout ? std::optional{OrderStatus::kUnknown} : std::nullopt;
     case OrderStatus::kOpen:
     case OrderStatus::kPartiallyFilled:
       switch (event) {
@@ -79,13 +104,38 @@ inline constexpr std::uint8_t kOrderEventCount = 17;
           return OrderStatus::kCancelPending;
         case kModifyRequest:
           return OrderStatus::kModifyPending;
+        case kBrokerCancel:
+          return OrderStatus::kCancelled;
+        case kBrokerReject:  // a post-ack RMS reject; only from OPEN: a partly filled order has traded
+          return from == OrderStatus::kOpen ? std::optional{OrderStatus::kBrokerRejected} : std::nullopt;
         default:
           return std::nullopt;
       }
     case OrderStatus::kCancelPending:
-      return event == kCancelConfirm ? std::optional{OrderStatus::kCancelled} : std::nullopt;
+      switch (event) {
+        case kPartialFill:  // the fill raced the cancel
+          return OrderStatus::kPartiallyFilled;
+        case kFill:
+          return OrderStatus::kFilled;
+        case kCancelConfirm:
+          return OrderStatus::kCancelled;
+        case kCancelReject:
+          return OrderStatus::kOpen;
+        default:
+          return std::nullopt;
+      }
     case OrderStatus::kModifyPending:
-      return event == kModifyConfirm ? std::optional{OrderStatus::kOpen} : std::nullopt;
+      switch (event) {
+        case kPartialFill:  // a fill during the modify
+          return OrderStatus::kPartiallyFilled;
+        case kFill:
+          return OrderStatus::kFilled;
+        case kModifyConfirm:
+        case kModifyReject:
+          return OrderStatus::kOpen;
+        default:
+          return std::nullopt;
+      }
     case OrderStatus::kUnknown:
       switch (event) {
         case kReconcileOpen:
@@ -105,6 +155,7 @@ inline constexpr std::uint8_t kOrderEventCount = 17;
     case OrderStatus::kFilled:
     case OrderStatus::kCancelled:
     case OrderStatus::kBrokerRejected:
+    case OrderStatus::kExpired:
       return std::nullopt;
   }
   return std::nullopt;
@@ -112,7 +163,7 @@ inline constexpr std::uint8_t kOrderEventCount = 17;
 
 [[nodiscard]] constexpr bool is_terminal(OrderStatus s) noexcept {
   return s == OrderStatus::kRiskRejected || s == OrderStatus::kFilled || s == OrderStatus::kCancelled ||
-         s == OrderStatus::kBrokerRejected;
+         s == OrderStatus::kBrokerRejected || s == OrderStatus::kExpired;
 }
 
 [[nodiscard]] std::string_view to_string(OrderStatus s) noexcept;

@@ -73,7 +73,7 @@ add_library(vyuha_upstox
 add_library(vyuha::upstox ALIAS vyuha_upstox)
 
 # Market-data bus: protobuf encoders + NATS publisher (md.tick.*, md.bar.*, KV md_last).
-add_library(vyuha_oms STATIC src/oms/oms.cc)
+add_library(vyuha_oms STATIC src/oms/oms.cc src/oms/order_router.cc)
 add_library(vyuha::oms ALIAS vyuha_oms)
 target_link_libraries(vyuha_oms PUBLIC vyuha::core PRIVATE vyuha_warnings)
 

@@ -15,6 +15,7 @@
 #include "pg_temp_db.h"
 #include "vyuha/core/clock.h"
 #include "vyuha/oms/oms.h"
+#include "vyuha/oms/order_router.h"
 
 namespace vyuha::oms {
 namespace {
@@ -295,6 +296,363 @@ TEST(PgOrderStore, EventsWaitOutAnOutageAndArriveInOrder) {
   EXPECT_EQ(tx.query_value<std::int64_t>(
                 "SELECT (extract(epoch FROM created_at) * 1000000)::bigint FROM \"order\""),
             1'767'000'000'123'456);
+}
+
+TEST(PgOrderStore, ALateFillIsStoredAndAlertsAdminsOnce) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  {
+    PgOrderEventWriter writer(db.url());
+    Oms oms(writer, clock, 1);
+    const OrderHandle h = oms.create(details(s, 1, 10)).value();
+    ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
+    ASSERT_TRUE(oms.apply(h, E::kSend));
+    ASSERT_TRUE(oms.apply(h, E::kBrokerAck, {.broker_order_id = "B1"}));
+    ASSERT_TRUE(oms.apply(h, E::kBrokerCancel, {.reason_code = "EXCHANGE_CANCEL"}));
+    ASSERT_TRUE(oms.apply(h, E::kPartialFill, {.fill_qty = 2, .fill_price = Price::from_units(24'500'000)}));
+    wait_written(writer, 6);
+  }
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  EXPECT_EQ(tx.query_value<std::string>("SELECT status::text FROM \"order\""), "CANCELLED");
+  EXPECT_EQ(tx.query_value<int>("SELECT filled_qty FROM \"order\""), 2);
+  const auto row = tx.exec(
+                         "SELECT from_status::text, to_status::text, reason_code, payload->>'fill_qty', "
+                         "payload->>'fill_price' FROM order_event WHERE seq = 6")
+                       .one_row();
+  EXPECT_EQ(row[0].as<std::string>(), "CANCELLED");
+  EXPECT_EQ(row[1].as<std::string>(), "CANCELLED");
+  EXPECT_EQ(row[2].as<std::string>(), "RECON_MISMATCH");
+  EXPECT_EQ(row[3].as<std::string>(), "2");
+  EXPECT_EQ(row[4].as<std::string>(), "2450.0000");
+  const auto alert = tx.exec("SELECT severity, title, body->>'fill_qty' FROM alert_event").one_row();
+  EXPECT_EQ(alert[0].as<std::string>(), "critical");
+  EXPECT_EQ(alert[1].as<std::string>(), "RECON_MISMATCH");
+  EXPECT_EQ(alert[2].as<std::string>(), "2");
+}
+
+// The restart rule: the order, its event, the audit row and the owner's alert are one transaction.
+TEST(PgOrderStore, AnExpiredOrderIsAuditedAlertedOnceAndStaysOutOfRecovery) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  {
+    PgOrderEventWriter writer(db.url());
+    Oms oms(writer, clock, 1);
+    const OrderHandle h = oms.create(details(s, 1, 10)).value();
+    ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
+    ASSERT_TRUE(oms.apply(h, E::kExpire, {.reason_code = kExpiredOnRestart}));
+    // A late fill: a RECON_MISMATCH of its own, and not a second expiry.
+    ASSERT_TRUE(oms.apply(h, E::kPartialFill, {.fill_qty = 2, .fill_price = Price::from_units(24'500'000)}));
+    wait_written(writer, 4);
+  }
+  pqxx::connection c(db.url());
+  {
+    pqxx::read_transaction tx(c);
+    const auto order = tx.exec("SELECT status::text, reject_code, filled_qty FROM \"order\"").one_row();
+    EXPECT_EQ(order[0].as<std::string>(), "EXPIRED");
+    EXPECT_EQ(order[1].as<std::string>(), "EXPIRED_ON_RESTART");  // the fill's reason doesn't replace it
+    EXPECT_EQ(order[2].as<int>(), 2);
+
+    const auto audit = tx.exec(
+                             "SELECT actor_kind, action, entity, entity_id, payload->>'client_order_id', "
+                             "payload->>'reason_code' FROM audit_event WHERE action = 'order.expire'")
+                           .one_row();
+    EXPECT_EQ(audit[0].as<std::string>(), "engine");
+    EXPECT_EQ(audit[2].as<std::string>(), "order");
+    EXPECT_EQ(audit[3].as<std::string>(), details(s, 1, 10).id.to_string());
+    EXPECT_EQ(audit[4].as<std::string>(), "client-1");
+    EXPECT_EQ(audit[5].as<std::string>(), "EXPIRED_ON_RESTART");
+
+    const auto alert = tx.exec(
+                             "SELECT severity, user_id::text, body->>'client_order_id', body->>'qty' "
+                             "FROM alert_event WHERE title = 'ORDER_EXPIRED_ON_RESTART'")
+                           .one_row();
+    EXPECT_EQ(alert[0].as<std::string>(), "critical");
+    EXPECT_EQ(alert[1].as<std::string>(), s.user);
+    EXPECT_EQ(alert[2].as<std::string>(), "client-1");
+    EXPECT_EQ(alert[3].as<std::string>(), "10");
+    EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM alert_event WHERE title = 'RECON_MISMATCH'"), 1);
+  }
+  // It's terminal, so a restart has nothing to restore, and doesn't fail on the new status.
+  const auto loaded = load_open_orders(db.url());
+  ASSERT_TRUE(loaded.has_value());
+  EXPECT_TRUE(loaded->empty());
+}
+
+TEST(PgOrderStore, TradeIdsAndModifiesSurviveARestart) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  const Price fill_price = Price::from_units(24'500'000);
+  const Price new_price = Price::from_units(25'000'000);
+  {
+    PgOrderEventWriter writer(db.url());
+    Oms oms(writer, clock, 1);
+    const OrderHandle h = oms.create(details(s, 1, 10)).value();
+    ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
+    ASSERT_TRUE(oms.apply(h, E::kSend));
+    ASSERT_TRUE(oms.apply(h, E::kBrokerAck, {.broker_order_id = "B1"}));
+    ASSERT_TRUE(oms.apply(h, E::kModifyRequest, {.modified_qty = 20, .modified_price = new_price}));
+    // Past the old qty before the confirm: the row's CHECK (filled_qty <= qty) must let this in.
+    ASSERT_TRUE(
+        oms.apply(h, E::kPartialFill, {.fill_qty = 12, .fill_price = fill_price, .broker_trade_id = "T\"1"}));
+    ASSERT_TRUE(
+        oms.apply(h, E::kPartialFill, {.fill_qty = 12, .fill_price = fill_price, .broker_trade_id = "T\"1"}));
+    ASSERT_TRUE(oms.apply(h, E::kModifyConfirm));
+    wait_written(writer, 8);
+    EXPECT_TRUE(writer.healthy());
+  }
+  {
+    pqxx::connection c(db.url());
+    pqxx::read_transaction tx(c);
+    const auto row = tx.exec("SELECT qty, price::text, filled_qty FROM \"order\"").one_row();
+    EXPECT_EQ(row[0].as<int>(), 20);
+    EXPECT_EQ(row[1].as<std::string>(), "2500.0000");
+    EXPECT_EQ(row[2].as<int>(), 12);
+    EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM order_event WHERE reason_code = 'DUPLICATE_FILL'"),
+              1);
+    EXPECT_EQ(tx.query_value<std::string>("SELECT payload->>'broker_trade_id' FROM order_event "
+                                          "WHERE (payload->>'fill_qty')::int = 12"),
+              "T\"1");
+    EXPECT_EQ(tx.query_value<std::string>("SELECT payload->>'modified_qty' FROM order_event "
+                                          "WHERE to_status = 'MODIFY_PENDING'"),
+              "20");
+  }
+  const auto loaded = load_open_orders(db.url());
+  ASSERT_TRUE(loaded.has_value());
+  ASSERT_EQ(loaded->size(), 1U);
+  const RecoveredOrder& back = loaded->front();
+  EXPECT_EQ(back.details.qty, 20);
+  EXPECT_EQ(back.details.price, new_price);
+  ASSERT_FALSE(back.trade_ids.empty());
+  EXPECT_EQ(back.trade_ids.front(), "T\"1");
+
+  PgOrderEventWriter writer(db.url());
+  Oms oms(writer, clock, 1);
+  const OrderHandle h = oms.restore(back).value();
+  ASSERT_TRUE(
+      oms.apply(h, E::kPartialFill, {.fill_qty = 12, .fill_price = fill_price, .broker_trade_id = "T\"1"}));
+  EXPECT_EQ(oms.order(h).filled_qty, 12);  // the replay after a restart still counts once
+  EXPECT_EQ(oms.duplicate_fills(), 1U);
+}
+
+// A different event with a seq that's taken must not touch the row: it would make a finished order look live.
+TEST(PgOrderStore, ADifferentEventOnATakenSeqIsRefusedAndChangesNothing) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  PgOrderEventWriter writer(db.url());
+  Oms oms(writer, clock, 1);
+  const OrderHandle h = oms.create(details(s, 1, 10)).value();
+  ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
+  ASSERT_TRUE(oms.apply(h, E::kExpire, {.reason_code = kExpiredOnRestart}));
+  wait_written(writer, 3);
+
+  OrderEventRecord replay;
+  replay.order_id = details(s, 1, 10).id;
+  replay.seq = 3;
+  replay.from = kApproved;
+  replay.to = kSent;
+  replay.ts = clock.now();
+  ASSERT_TRUE(writer.try_push(replay));
+  wait_written(writer, 4);
+  EXPECT_TRUE(writer.healthy());  // it failed alone
+
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  EXPECT_EQ(tx.query_value<std::string>("SELECT status::text FROM \"order\""), "EXPIRED");
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM order_event"), 3);
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM alert_event WHERE title = 'ORDER_EVENT_REFUSED'"), 1);
+}
+
+TEST(PgOrderStore, ARetriedExpiryChangesNothing) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  OrderEventRecord event;
+  event.order_id = details(s, 1, 10).id;
+  {
+    const TickingClock clock;
+    PgOrderEventWriter writer(db.url());
+    Oms oms(writer, clock, 1);
+    const OrderHandle h = oms.create(details(s, 1, 10)).value();
+    ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
+    ASSERT_TRUE(oms.apply(h, E::kExpire, {.reason_code = kExpiredOnRestart}));
+    wait_written(writer, 3);
+    event.seq = oms.order(h).seq;
+    event.from = kApproved;
+    event.to = kExpired;
+    event.ts = clock.now();
+    ASSERT_TRUE(event.reason_code.assign(kExpiredOnRestart));
+    ASSERT_TRUE(writer.try_push(event));  // as after a commit whose result was lost
+    wait_written(writer, 4);
+  }
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM audit_event WHERE action = 'order.expire'"), 1);
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM alert_event"), 1);
+}
+
+class RecordingBroker final : public IOrderSender {
+ public:
+  // NOLINTNEXTLINE(bugprone-exception-escape): a test's allocation failure may terminate
+  [[nodiscard]] bool send(const Order& /*order*/, std::string_view tag) noexcept override {
+    sent.emplace_back(tag);
+    return true;
+  }
+  // NOLINTNEXTLINE(bugprone-exception-escape): a test's allocation failure may terminate
+  [[nodiscard]] bool cancel(const Order& order) noexcept override {
+    cancelled.emplace_back(order.details.client_order_id.view());
+    return true;
+  }
+  std::vector<std::string> sent;
+  std::vector<std::string> cancelled;
+};
+
+// A duplicate of an order from an earlier run gets past intake, which only knows this run. The owner's rule:
+// it fails alone, nothing else stops, and the kill switch's cancels go through.
+TEST(PgOrderStore, ADuplicateAtTheWriterFailsOnlyItselfAndCancelAllStillGoesThrough) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  {
+    PgOrderEventWriter earlier_run(db.url());
+    Oms oms(earlier_run, clock, 1);
+    const OrderHandle h = oms.create(details(s, 1, 1)).value();
+    ASSERT_TRUE(oms.apply(h, E::kRiskReject, {.reason_code = "R-TEST"}));
+    wait_written(earlier_run, 2);
+  }
+  RecordingBroker broker;
+  PgOrderEventWriter writer(db.url());
+  Oms oms(writer, clock, 8);
+  OrderRouter router(oms, writer, broker, 20, 8);
+
+  OrderDetails duplicate = details(s, 2, 5);  // a new order id, client-1 again
+  ASSERT_TRUE(duplicate.client_order_id.assign("client-1"));
+  const OrderHandle dup = oms.create(duplicate).value();
+  ASSERT_TRUE(oms.apply(dup, E::kRiskApprove));
+  ASSERT_TRUE(router.submit(dup));
+
+  const OrderHandle other = oms.create(details(s, 3, 5)).value();  // in the same batch or the next
+  ASSERT_TRUE(oms.apply(other, E::kRiskApprove));
+  ASSERT_TRUE(router.submit(other));
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (router.pending() > 0 && std::chrono::steady_clock::now() < deadline) {
+    router.poll();
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_EQ(router.pending(), 0U);
+  ASSERT_EQ(broker.sent.size(), 1U);  // the good one went; the duplicate never did
+  EXPECT_EQ(broker.sent[0], "client3");
+  EXPECT_EQ(oms.order(dup).status, kRiskRejected);
+  EXPECT_EQ(oms.order(other).status, kSent);
+  EXPECT_EQ(oms.refused_by_storage(), 1U);
+  EXPECT_TRUE(writer.healthy());
+
+  ASSERT_TRUE(oms.apply(other, E::kBrokerAck, {.broker_order_id = "B3"}));
+  const auto out = router.cancel_all();
+  EXPECT_EQ(out.failed, 0U);
+  ASSERT_EQ(broker.cancelled.size(), 1U);
+  EXPECT_EQ(broker.cancelled[0], "client-3");
+  EXPECT_EQ(oms.order(other).status, kCancelPending);
+  wait_written(
+      writer, 7);  // earlier_run's aren't counted here: 2 refused, then NEW APPROVED SENT OPEN CANCEL_PENDING
+
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  EXPECT_EQ(
+      tx.query_value<std::string>("SELECT status::text FROM \"order\" WHERE client_order_id = 'client-3'"),
+      "CANCEL_PENDING");
+  EXPECT_EQ(
+      tx.query_value<std::string>("SELECT status::text FROM \"order\" WHERE client_order_id = 'client-1'"),
+      "RISK_REJECTED");  // the earlier order is untouched
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM \"order\""), 2);
+  const auto alert = tx.exec(
+                           "SELECT severity, body->>'client_order_id', body->>'sqlstate' FROM alert_event "
+                           "WHERE title = 'ORDER_EVENT_REFUSED'")
+                         .one_row();
+  EXPECT_EQ(alert[0].as<std::string>(), "critical");
+  EXPECT_EQ(alert[1].as<std::string>(), "client-1");
+  EXPECT_EQ(alert[2].as<std::string>(), "23505");
+}
+
+TEST(PgOrderStore, AnOrderWithARowThatCantGoInFailsAlone) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  PgOrderEventWriter writer(db.url());
+  Oms oms(writer, clock, 4);
+  OrderDetails no_account = details(s, 1, 1);
+  no_account.account_id = uuid_of("0190a3b4-7c2d-7e11-8f00-ffffffffffff");  // a foreign key that isn't there
+  ASSERT_TRUE(oms.create(no_account));
+  ASSERT_TRUE(oms.create(details(s, 2, 1)));
+  wait_written(writer, 2);
+  EXPECT_TRUE(writer.healthy());
+  Uuid refused;
+  ASSERT_TRUE(writer.try_pop_refused(refused));
+  EXPECT_EQ(refused, no_account.id);
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  EXPECT_EQ(tx.query_value<std::string>("SELECT client_order_id FROM \"order\""), "client-2");
+}
+
+TEST(PgOrderStore, ALiveOrdersEventSurvivesABrokerIdClash) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    GTEST_SKIP() << "VYUHA_TEST_POSTGRES_URL not set";
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  PgOrderEventWriter writer(db.url());
+  Oms oms(writer, clock, 4);
+  const auto open = [&](int n) {
+    const OrderHandle h = oms.create(details(s, n, 5)).value();
+    EXPECT_TRUE(oms.apply(h, E::kRiskApprove).has_value());
+    EXPECT_TRUE(oms.apply(h, E::kSend).has_value());
+    EXPECT_TRUE(oms.apply(h, E::kBrokerAck, {.broker_order_id = "SAME"}).has_value());
+    return h;
+  };
+  open(1);
+  const OrderHandle second = open(2);
+  ASSERT_TRUE(
+      oms.apply(second, E::kPartialFill, {.fill_qty = 2, .fill_price = Price::from_units(24'500'000)}));
+  wait_written(writer, 9);
+  EXPECT_TRUE(writer.healthy());
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  EXPECT_EQ(tx.query_value<int>("SELECT filled_qty FROM \"order\" WHERE client_order_id = 'client-2'"), 2);
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM order_event"), 9);  // nothing lost: a fill is a fact
 }
 
 TEST(PgOrderStore, ShutdownGivesUpInBoundedTimeAndErrorsDontLeakTheUrl) {
