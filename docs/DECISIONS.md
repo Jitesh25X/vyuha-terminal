@@ -133,6 +133,6 @@ Claude Code: you may add **Proposed** entries. Only the owner moves them to Acce
 | D-13 | Macro data source for SENSITIVE_TO | Manual CSV / owner downloads |
 | D-14 | Desk-agent AI budget (per agent / desk monthly) | Per-agent caps in YAML; desk cap set before M8 |
 | D-15 | Agents beyond MVP three | Research + Quant as M8 stretch |
-| D-16 | Decrypts older than the `gateway/CLAUDE.md` rule (TOTP at login; API key for the broker login URL; API key + secret for the token exchange) | **[DECISION NEEDED]** Left as they are: login depends on them. Recommended: allow them in the rule, with the same never-logged condition |
-| D-18 | Persist before send | **Resolved** (ADR-025) |
+| D-16 | Decrypt sites | **Resolved** (owner, 2026-11-03): five permitted sites, listed in `gateway/CLAUDE.md`, all audited; a test fails on a new one |
 | D-17 | Extra OMS transitions | **Resolved** (ADR-024) |
+| D-18 | Persist before send | **Resolved** (ADR-025) |

@@ -42,7 +42,7 @@ func TestAuthEventsAreAudited(t *testing.T) {
 		if err := rows.Scan(&action, &detail, &ip); err != nil {
 			t.Fatal(err)
 		}
-		if action != "user.create" && ip != "127.0.0.1" {
+		if action != "user.create" && action != "auth.totp.opened" && ip != "127.0.0.1" { // a decrypt has no request
 			t.Errorf("%s: ip = %q, want 127.0.0.1", action, ip)
 		}
 		got = append(got, action+":"+detail)
@@ -52,9 +52,12 @@ func TestAuthEventsAreAudited(t *testing.T) {
 		"auth.login.failure:unknown_user",
 		"auth.login.failure:unknown_user",
 		"auth.mfa.enroll_begin:",
+		"auth.totp.opened:",
 		"auth.mfa.enrolled:enroll_confirm",
 		"auth.login.failure:password",
+		"auth.totp.opened:",
 		"auth.login.success:totp",
+		"auth.totp.opened:",
 		"auth.reauth.success:reauth",
 		"auth.refresh.reuse:",
 		"auth.logout:",

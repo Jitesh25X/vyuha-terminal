@@ -30,7 +30,8 @@ type Config struct {
 	LockDuration time.Duration
 
 	// Bounds on concurrent credential checks: each holds an argon2 buffer (64 MiB) and, while waiting
-	// on the per-user row lock, a pooled DB connection. Set MaxConcurrentChecks well below the pool size.
+	// on the per-user row lock, a pooled DB connection, and a TOTP check briefly needs a second one to commit its
+	// audit row. Keep MaxConcurrentChecks + 1 (reauth) at no more than half the pool.
 	MaxConcurrentChecks int
 	CheckWait           time.Duration // how long to queue for a slot before ErrBusy
 	RowLockTimeout      time.Duration // SET LOCAL lock_timeout for the per-user row lock
@@ -589,6 +590,19 @@ func (s *Service) totpOK(ctx context.Context, q *store.Queries, u store.AppUser,
 	secret, err := s.envelope.Open(u.TotpSecretEnc, totpAD(u.ID))
 	if err != nil {
 		return false, fmt.Errorf("open totp secret: %w", err)
+	}
+	defer clear(secret)
+	userID := u.ID.String()
+	// On the pool, not attempt's transaction: the row must be committed before the seed is used, or a later
+	// error would roll it back and leave a decrypt with no audit row (D-16). It's a second connection while
+	// attempt holds one, so the time limit fails this closed if the pool is ever too small (see Config).
+	auditCtx, cancel := context.WithTimeout(ctx, s.cfg.RowLockTimeout)
+	defer cancel()
+	if _, err := audit.Record(auditCtx, s.q, audit.Event{
+		ActorID: userID, ActorKind: audit.ActorUser, Action: "auth.totp.opened", Entity: "app_user", EntityID: userID,
+		Payload: map[string]any{"purpose": "login_totp_verification"},
+	}); err != nil {
+		return false, fmt.Errorf("audit totp use: %w", err)
 	}
 	step, ok := matchTOTP(string(secret), code, now)
 	if !ok {

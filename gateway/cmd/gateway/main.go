@@ -71,7 +71,7 @@ func run() error {
 	}
 	authCfg := auth.DefaultConfig()
 	authCfg.AccessTTL, authCfg.RefreshTTL = cfg.AccessTokenTTL, cfg.RefreshTTL
-	// Credential checks may use at most a quarter of the pool, so auth bursts can't starve other work.
+	// A quarter of the pool: a TOTP check briefly holds two connections, so at most half goes to auth bursts.
 	authCfg.MaxConcurrentChecks = max(1, int(pool.Config().MaxConns)/4)
 	authSvc, err := auth.NewService(pool, envelope, auth.NewSigner(signingKey), authCfg, time.Now)
 	if err != nil {
