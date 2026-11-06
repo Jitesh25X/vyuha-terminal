@@ -17,10 +17,15 @@ inline bool services_required() {
 
 }  // namespace vyuha::testing
 
-// A macro because GTEST_SKIP and GTEST_FAIL return from the test.
+// A macro because GTEST_SKIP and GTEST_FAIL return from the test. Use it only in a TEST body or SetUp: from a
+// helper, the return leaves the helper and the test goes on. One statement (gtest's own switch guard), so an
+// unbraced `if (...) VYUHA_SKIP_WITHOUT_SERVICE(...);` can't leave the skip outside the if.
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define VYUHA_SKIP_WITHOUT_SERVICE(message)                                   \
-  if (vyuha::testing::services_required()) {                                  \
-    GTEST_FAIL() << (message) << " and VYUHA_REQUIRE_DB=1: it must not skip"; \
-  }                                                                           \
-  GTEST_SKIP() << (message)
+#define VYUHA_SKIP_WITHOUT_SERVICE(message)                                     \
+  switch (0)                                                                    \
+  case 0:                                                                       \
+  default:                                                                      \
+    if (vyuha::testing::services_required()) {                                  \
+      GTEST_FAIL() << (message) << " and VYUHA_REQUIRE_DB=1: it must not skip"; \
+    } else                                                                      \
+      GTEST_SKIP() << (message)

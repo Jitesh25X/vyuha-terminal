@@ -8,6 +8,7 @@ import os
 import secrets
 from collections.abc import Iterator
 from pathlib import Path
+from typing import NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
@@ -47,7 +48,7 @@ async def _drop(admin: str, name: str) -> None:
         await conn.close()
 
 
-def skip_without_service(message: str) -> None:
+def skip_without_service(message: str) -> NoReturn:
     """Skips, for quick local runs. With VYUHA_REQUIRE_DB=1 (CI and `make verify`) fails: down can't look like a pass."""
     if os.environ.get("VYUHA_REQUIRE_DB") == "1":
         pytest.fail(f"{message} and VYUHA_REQUIRE_DB=1: it must not skip")
