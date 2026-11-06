@@ -5,6 +5,7 @@
 #include <format>
 #include <optional>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 
 #include <quill/LogMacros.h>
@@ -114,6 +115,7 @@ namespace {
 
 constexpr Nanos kNanosPerMicro = 1000;
 
+constexpr const char* kUniqueViolation = "23505";
 constexpr const char* kStatementTimeout = "SET LOCAL statement_timeout = '5s'";
 
 // Classes 22 and 23: this row will never go in, however often it's retried.
@@ -171,32 +173,67 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
                      d.is_paper,
                      d.created_at / kNanosPerMicro,
                      micros});
-  } else {
-    const bool rejected = e.to == OrderStatus::kRiskRejected || e.to == OrderStatus::kBrokerRejected;
-    tx.exec(
-        R"(UPDATE "order" SET status = $2::order_status, filled_qty = $3,
-             broker_order_id = COALESCE($4, broker_order_id), reject_code = COALESCE($5, reject_code),
-             updated_at = 'epoch'::timestamptz + $6::bigint * interval '1 microsecond'
-           WHERE id = $1::uuid)",
-        pqxx::params{id, std::string(to_string(e.to)), e.filled_qty, text(e.broker_order_id.view()),
-                     rejected ? text(e.reason_code.view()) : std::nullopt, micros});
   }
   // Integers and exact decimal text, so building JSON by hand is safe. The broker order id is left out: it's
-  // on the `order` row, and it's the broker's text.
-  const std::string payload = e.fill_qty > 0
-                                  ? std::format(R"({{"filled_qty":{},"fill_qty":{},"fill_price":"{}"}})",
-                                                e.filled_qty, e.fill_qty, e.fill_price.to_string())
-                                  : std::format(R"({{"filled_qty":{}}})", e.filled_qty);
+  // on the `order` row, and it's the broker's text. So is the trade id, which Postgres encodes below.
+  std::string payload = e.fill_qty > 0 ? std::format(R"({{"filled_qty":{},"fill_qty":{},"fill_price":"{}")",
+                                                     e.filled_qty, e.fill_qty, e.fill_price.to_string())
+                                       : std::format(R"({{"filled_qty":{})", e.filled_qty);
+  if (e.modify.qty != 0) {
+    payload += std::format(R"(,"modified_qty":{})", e.modify.qty);
+  }
+  if (e.modify.price.has_value()) {
+    payload += std::format(R"(,"modified_price":"{}")", e.modify.price->to_string());
+  }
+  if (e.modify.trigger.has_value()) {
+    payload += std::format(R"(,"modified_trigger":"{}")", e.modify.trigger->to_string());
+  }
+  payload += '}';
   // A retry after an unknown commit finds the row already there, so nothing is written or alerted twice.
   const pqxx::result inserted = tx.exec(
       R"(INSERT INTO order_event (order_id, seq, from_status, to_status, reason_code, payload, ts)
-         VALUES ($1::uuid, $2, $3::order_status, $4::order_status, $5, $6::jsonb,
+         VALUES ($1::uuid, $2, $3::order_status, $4::order_status, $5,
+           CASE WHEN $8::text IS NULL THEN $6::jsonb
+                ELSE $6::jsonb || jsonb_build_object('broker_trade_id', $8::text) END,
            'epoch'::timestamptz + $7::bigint * interval '1 microsecond')
          ON CONFLICT (order_id, seq) DO NOTHING RETURNING id)",
       pqxx::params{id, e.seq,
                    e.from.has_value() ? std::optional{std::string(to_string(*e.from))} : std::nullopt,
-                   std::string(to_string(e.to)), text(e.reason_code.view()), payload, micros});
-  if (e.reason_code.view() == kReconMismatch && !inserted.empty()) {
+                   std::string(to_string(e.to)), text(e.reason_code.view()), payload, micros,
+                   text(e.broker_trade_id.view())});
+  if (inserted.empty()) {
+    // That seq is taken. The same event again is a retry after an unknown commit, and already done. Anything
+    // else must not touch the row: it would make a finished order look live, and disagree with its events.
+    const bool retry = tx.exec(R"(SELECT to_status::text = $3 AND
+                                    ts = 'epoch'::timestamptz + $4::bigint * interval '1 microsecond'
+                                  FROM order_event WHERE order_id = $1::uuid AND seq = $2)",
+                               pqxx::params{id, e.seq, std::string(to_string(e.to)), micros})
+                           .one_row()[0]
+                           .as<bool>();
+    if (!retry) {
+      throw pqxx::sql_error("order event: seq already taken", "", kUniqueViolation);  // quarantined, alone
+    }
+    return;
+  }
+  if (e.from.has_value()) {
+    // Only the event that ended the order sets its code: a late fill's RECON_MISMATCH doesn't replace it.
+    const bool rejected = (e.to == OrderStatus::kRiskRejected || e.to == OrderStatus::kBrokerRejected ||
+                           e.to == OrderStatus::kExpired) &&
+                          e.from != e.to;
+    tx.exec(
+        R"(UPDATE "order" SET status = $2::order_status, filled_qty = $3,
+             broker_order_id = COALESCE($4, broker_order_id), reject_code = COALESCE($5, reject_code),
+             updated_at = 'epoch'::timestamptz + $6::bigint * interval '1 microsecond',
+             qty = COALESCE($7::int, qty), price = COALESCE($8::numeric, price),
+             trigger_price = COALESCE($9::numeric, trigger_price)
+           WHERE id = $1::uuid)",
+        pqxx::params{id, std::string(to_string(e.to)), e.filled_qty, text(e.broker_order_id.view()),
+                     rejected ? text(e.reason_code.view()) : std::nullopt, micros,
+                     e.modify.row_qty != 0 ? std::optional{e.modify.row_qty} : std::nullopt,
+                     e.modify.applied ? text(e.modify.price) : std::nullopt,
+                     e.modify.applied ? text(e.modify.trigger) : std::nullopt});
+  }
+  if (e.reason_code.view() == kReconMismatch) {
     const std::string body =
         std::format(R"({{"order_id":"{}","seq":{},"status":"{}","filled_qty":{},"fill_qty":{}}})", id, e.seq,
                     to_string(e.to), e.filled_qty, e.fill_qty);
@@ -204,6 +241,29 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
         R"(INSERT INTO alert_event (user_id, severity, title, body)
            SELECT id, 'critical', 'RECON_MISMATCH', $1::jsonb FROM app_user WHERE role = 'admin' AND is_active)",
         pqxx::params{body});
+  }
+  // The restart rule (ADR-025): one transaction with the status, so an expiry is never unaudited or
+  // unalerted. The transition, not the status: a late fill on an expired order is also recorded with to =
+  // EXPIRED.
+  if (e.to == OrderStatus::kExpired && e.from != e.to) {
+    tx.exec(
+        R"(INSERT INTO audit_event (actor_kind, action, entity, entity_id, payload)
+           SELECT 'engine', 'order.expire', 'order', o.id::text,
+                  jsonb_build_object('reason_code', $2::text, 'seq', $3::int,
+                                     'client_order_id', o.client_order_id, 'account_id', o.account_id,
+                                     'instrument_id', o.instrument_id, 'side', o.side, 'qty', o.qty,
+                                     'is_paper', o.is_paper)
+           FROM "order" o WHERE o.id = $1::uuid)",
+        pqxx::params{id, std::string(e.reason_code.view()), e.seq});
+    tx.exec(
+        R"(INSERT INTO alert_event (user_id, severity, title, body)
+           SELECT u.id, 'critical', 'ORDER_EXPIRED_ON_RESTART',
+                  jsonb_build_object('order_id', o.id, 'client_order_id', o.client_order_id,
+                                     'account_id', o.account_id, 'instrument_id', o.instrument_id,
+                                     'side', o.side, 'qty', o.qty, 'is_paper', o.is_paper)
+           FROM "order" o CROSS JOIN app_user u
+           WHERE o.id = $1::uuid AND u.role = 'admin' AND u.is_active)",
+        pqxx::params{id});
   }
 }
 
@@ -422,7 +482,7 @@ std::expected<std::vector<RecoveredOrder>, Error> load_open_orders(const std::st
            FROM "order" o
            LEFT JOIN LATERAL (SELECT seq, to_status FROM order_event WHERE order_id = o.id
                               ORDER BY seq DESC LIMIT 1) e ON true
-           WHERE o.status NOT IN ('RISK_REJECTED', 'FILLED', 'CANCELLED', 'BROKER_REJECTED')
+           WHERE o.status NOT IN ('RISK_REJECTED', 'FILLED', 'CANCELLED', 'BROKER_REJECTED', 'EXPIRED')
            ORDER BY o.created_at, o.id)");
     out.reserve(rows.size());
     for (const pqxx::row_ref row : rows) {
@@ -467,6 +527,23 @@ std::expected<std::vector<RecoveredOrder>, Error> load_open_orders(const std::st
       r.seq = *seq;
       r.filled_qty = row[10].as<std::int32_t>();
       out.push_back(std::move(r));
+    }
+    // Trades already counted, so a replay after this restart is still a duplicate.
+    std::unordered_map<std::string, std::size_t> by_id;
+    by_id.reserve(out.size());
+    for (std::size_t i = 0; i < out.size(); ++i) {
+      by_id.emplace(out[i].details.id.to_string(), i);
+    }
+    const pqxx::result trades = tx.exec(
+        R"(SELECT e.order_id::text, e.payload->>'broker_trade_id'
+           FROM order_event e JOIN "order" o ON o.id = e.order_id
+           WHERE e.payload->>'broker_trade_id' IS NOT NULL
+             AND o.status NOT IN ('RISK_REJECTED', 'FILLED', 'CANCELLED', 'BROKER_REJECTED', 'EXPIRED')
+           ORDER BY e.id)");
+    for (const pqxx::row_ref row : trades) {
+      if (const auto it = by_id.find(row[0].as<std::string>()); it != by_id.end()) {
+        out[it->second].trade_ids.push_back(row[1].as<std::string>());
+      }
     }
   } catch (const std::exception&) {  // the message may echo connection details
     return std::unexpected(Error{ErrorCode::kOrderRecovery, "oms: cannot load open orders from Postgres"});

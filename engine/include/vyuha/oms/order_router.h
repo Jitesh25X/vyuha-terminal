@@ -26,7 +26,9 @@ class IOrderSender {
   IOrderSender& operator=(IOrderSender&&) = delete;
   virtual ~IOrderSender() = default;
   [[nodiscard]] virtual bool send(const Order& order, std::string_view broker_tag) noexcept = 0;
-  // Asks the broker to cancel. Repeating it is harmless.
+  // Asks the broker to cancel. Repeating it is harmless. The order may have no broker_order_id yet (handed
+  // over with no ack, or restored and not reconciled): find it by broker_tag, or return false, never true for
+  // nothing.
   [[nodiscard]] virtual bool cancel(const Order& order) noexcept = 0;
 };
 
@@ -36,6 +38,10 @@ struct BrokerOrderView {
   std::int32_t filled_qty{0};
   Price average_price{};          // NOLINT(readability-redundant-member-init): partly filled by designators
   std::string broker_order_id{};  // NOLINT(readability-redundant-member-init)
+  // What the broker says the order now is. 0 or empty: the adapter didn't say. A modify changes these.
+  std::int32_t qty{0};
+  std::optional<Price> price{};          // NOLINT(readability-redundant-member-init)
+  std::optional<Price> trigger_price{};  // NOLINT(readability-redundant-member-init)
 };
 
 // The broker's order book, as reconciliation reads it. Not used on the core thread's hot path.
@@ -47,8 +53,10 @@ class IBrokerOrderBook {
   IBrokerOrderBook(IBrokerOrderBook&&) = delete;
   IBrokerOrderBook& operator=(IBrokerOrderBook&&) = delete;
   virtual ~IBrokerOrderBook() = default;
-  // Every order the broker has with this tag.
-  [[nodiscard]] virtual std::vector<BrokerOrderView> find_by_tag(std::string_view broker_tag) = 0;
+  // Every order the broker has with this tag. An error means the book couldn't be read, which isn't "none":
+  // an adapter must never report a failed read as an empty list, because recovery expires on empty.
+  [[nodiscard]] virtual std::expected<std::vector<BrokerOrderView>, Error> find_by_tag(
+      std::string_view broker_tag) = 0;
 };
 
 // client_order_id in the broker's tag field (ADR-025): its letters and digits, keeping the last `limit`. The
@@ -62,8 +70,7 @@ class OrderRouter {
  public:
   enum class Recovery : std::uint8_t {
     kResolved,    // matches the broker now
-    kQueued,      // the broker never got it: submitted, and goes out on poll
-    kUnresolved,  // a mismatch is raised, and the order stays blocked until someone looks
+    kUnresolved,  // a mismatch is raised or the sink is full, and the order stays blocked until retried
   };
 
   OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, std::size_t tag_limit,
@@ -77,8 +84,8 @@ class OrderRouter {
 
   // Cancels everything the broker may hold, for the kill switch (M2.7). Nothing here waits on or is refused
   // by the order log: a cancel only reduces risk, so an outage, a full ring or a refused order can't stop
-  // one. Unsent orders leave the queue. false from the adapter is counted in `failed`: call again, repeats
-  // are harmless.
+  // one. Unsent orders leave the queue. An APPROVED order is asked too if it may be at the broker. false from
+  // the adapter is counted in `failed`: call again, repeats are harmless.
   struct CancelAll {
     std::size_t asked{0};
     std::size_t failed{0};
@@ -87,8 +94,9 @@ class OrderRouter {
   };
   CancelAll cancel_all() noexcept;
 
-  // After a restart, for each restored order: find it at the broker by tag and settle it. Never sends a
-  // second copy: an order the broker has is adopted, and only an APPROVED order the broker lacks is sent.
+  // After a restart, for each restored order: find it at the broker by tag and settle it. Never sends or
+  // queues anything (the owner's restart rule, ADR-025): an order the broker has is adopted, and an APPROVED
+  // order it lacks becomes EXPIRED, because a stale order surfacing after a crash must never fire.
   [[nodiscard]] Recovery recover(OrderHandle handle, IBrokerOrderBook& book);
 
  private:
@@ -100,6 +108,8 @@ class OrderRouter {
 
   [[nodiscard]] Recovery reconcile_unknown(OrderHandle handle, const BrokerOrderView& broker);
   [[nodiscard]] Recovery catch_up(OrderHandle handle, const BrokerOrderView& broker);
+  [[nodiscard]] Recovery settle(OrderHandle handle,
+                                const BrokerOrderView* broker);  // nullptr: not at the broker
   [[nodiscard]] Recovery unresolved(OrderHandle handle);
   void drain_refused() noexcept;
 
