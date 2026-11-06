@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -68,6 +69,28 @@ func TestLockoutHoldsUnderConcurrentPasswordGuesses(t *testing.T) {
 	}
 	if n := f.evaluatedGuesses(username); n != 5 {
 		t.Fatalf("%d guesses evaluated, want 5", n)
+	}
+}
+
+// As the gateway really runs (cmd/gateway/main.go): a quarter of a default-sized pool, not a pool sized for the
+// test. A TOTP check commits its audit row on a second connection, which must not stall under load.
+func TestLockoutHoldsAtProductionPoolSizing(t *testing.T) {
+	f := newFixtureWith(t, func(c *Config) {
+		c.MaxConcurrentChecks, c.CheckWait = max(1, max(4, runtime.NumCPU())/4), time.Minute
+	})
+	username := f.createUser()
+	f.enroll(username)
+	f.advance(30 * time.Second)
+	lr, err := f.svc.Login(f.ctx, username, testPassword, f.meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid, locked := countOutcomes(t, 20, func() error {
+		_, err := f.svc.VerifyMFA(f.ctx, lr.MFAToken, "000000", f.meta)
+		return err
+	})
+	if invalid != 4 || locked != 16 {
+		t.Fatalf("invalid=%d locked=%d, want 4/16", invalid, locked)
 	}
 }
 

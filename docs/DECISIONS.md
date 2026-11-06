@@ -109,6 +109,11 @@ Claude Code: you may add **Proposed** entries. Only the owner moves them to Acce
 **Postgres outage (owner, 2026-11-03):** persist-before-send wins over "a trader can always get flat". While events aren't durable no new order goes out, including position-reducing and kill-switch flatten orders, so a crash can't leave an unrecorded order at the broker. Cancels still go, and the broker's own terminal is the fallback for flattening.
 **Consequences:** About 1 ms per order, against the broker's 10–100 ms. The strategy tag stays in `order.tag` but no longer goes to the broker (F-EX-3 changed). The tag keeps a client id's letters and digits and its last characters up to the broker's limit, because a UUIDv7 starts with a shared timestamp. **Residual risk:** an order in flight at the moment of the crash that the broker's book doesn't show yet would look absent and be marked `EXPIRED` while live at the broker. It can't cause a second send, but it could trade unmanaged, and restart doesn't reload terminal orders. So M3's live recovery must wait for the book to settle before trusting "not there", and its periodic reconcile must look for `EXPIRED` tags at the broker, raise `RECON_MISMATCH` and cancel. Until then a fill on an expired order is still recorded and alerted (ADR-024).
 
+### ADR-026 — A day with no bars clears only by an audited known-gap record — Accepted (owner) — 2026-11-03
+**Context:** A trading day with no bars is a gap, so the job exits 3 and retries it. A day the broker will never serve for one instrument (a suspension, or a data hole at the broker) would then fail every run.
+**Decision:** That day clears only through a record for that instrument and day in `download_known_gap` (migration 000009). An active admin adds it with `vyuha-quant download known-gap --symbol --day --reason --user`. The reason is required, and each record writes a `data.known_gap.add` audit event. Records are insert-only: there is no update or delete grant for the app role. A recorded day is counted in `days_known_gap`, not as covered data.
+**Consequences:** One call per day, so a long suspension needs many calls. The CLI trusts `--user`, so anyone with the database URL can name an admin. A record has no interval, so it covers all intervals. There is no revoke. These are open P2s, listed in the TASKS M4.1 review log.
+
 ---
 
 ## Open (owner to decide) — mirrored from PRD §13
@@ -128,6 +133,6 @@ Claude Code: you may add **Proposed** entries. Only the owner moves them to Acce
 | D-13 | Macro data source for SENSITIVE_TO | Manual CSV / owner downloads |
 | D-14 | Desk-agent AI budget (per agent / desk monthly) | Per-agent caps in YAML; desk cap set before M8 |
 | D-15 | Agents beyond MVP three | Research + Quant as M8 stretch |
-| D-16 | Decrypts older than the `gateway/CLAUDE.md` rule (TOTP at login; API key for the broker login URL; API key + secret for the token exchange) | **[DECISION NEEDED]** Left as they are: login depends on them. Recommended: allow them in the rule, with the same never-logged condition |
-| D-18 | Persist before send | **Resolved** (ADR-025) |
+| D-16 | Decrypt sites | **Resolved** (owner, 2026-11-03): five permitted sites, listed in `gateway/CLAUDE.md`, all audited; a test fails on a new one |
 | D-17 | Extra OMS transitions | **Resolved** (ADR-024) |
+| D-18 | Persist before send | **Resolved** (ADR-025) |
