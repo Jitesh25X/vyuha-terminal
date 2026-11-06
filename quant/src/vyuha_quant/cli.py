@@ -67,6 +67,13 @@ def _parser() -> argparse.ArgumentParser:
     dr.add_argument("--spec", type=Path, required=True)
     dr.add_argument("--account", required=True, help="broker account id")
     dr.add_argument("--user", required=True, help="username requesting the job")
+    kg = dl.add_parser(
+        "known-gap", help="record that one instrument really has no bars on one day (admin, audited)"
+    )
+    kg.add_argument("--symbol", required=True, help="e.g. NSE:RELIANCE")
+    kg.add_argument("--day", type=date.fromisoformat, required=True)
+    kg.add_argument("--reason", required=True)
+    kg.add_argument("--user", required=True, help="the admin recording it")
 
     sub.add_parser(
         "serve", help="internal HTTP API for the gateway (QUANT_HTTP_ADDR, default 127.0.0.1:8090)"
@@ -96,6 +103,8 @@ async def _run(a: argparse.Namespace, settings: config.Settings) -> dict[str, An
         case ("download", "plan"):
             spec = download.JobSpec.model_validate_json(a.spec.read_text())
             return await download.plan_report(dsn, spec, a.spec.resolve().parent)
+        case ("download", "known-gap"):
+            return await download.add_known_gap(dsn, a.symbol, a.day, a.reason, a.user)
         case ("download", "run"):
             spec = download.JobSpec.model_validate_json(a.spec.read_text())
             token = sys.stdin.readline().strip()  # never argv or the environment
