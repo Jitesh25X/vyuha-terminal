@@ -7,9 +7,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/netip"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
@@ -40,7 +43,7 @@ func newFixture(t *testing.T) *fixture {
 func newFixtureWith(t *testing.T, tweak func(*Config)) *fixture {
 	t.Helper()
 	ctx := context.Background()
-	_, pool := testdb.New(t) // fresh migrated database, dropped after the test
+	dbURL, pool := testdb.New(t) // fresh migrated database, dropped after the test
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
 	env, err := vcrypto.NewEnvelope(base64.StdEncoding.EncodeToString(key))
@@ -50,6 +53,20 @@ func newFixtureWith(t *testing.T, tweak func(*Config)) *fixture {
 	f := &fixture{t: t, ctx: ctx, pool: pool, clock: t0, meta: ClientMeta{UserAgent: "test", IP: netip.MustParseAddr("127.0.0.1")}}
 	cfg := DefaultConfig()
 	tweak(&cfg)
+	// A check can hold two connections (Config), so a test that lifts the cap needs the pool to match.
+	if need := int32(cfg.MaxConcurrentChecks+1) * 2; need > pool.Config().MaxConns { //nolint:gosec // small test values
+		sep := "?"
+		if strings.Contains(dbURL, "?") {
+			sep = "&"
+		}
+		wide, err := store.NewPool(ctx, dbURL+sep+"pool_max_conns="+strconv.Itoa(int(need)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(wide.Close)
+		pool = wide
+		f.pool = wide
+	}
 	f.svc, err = NewService(pool, env, newSigner(t), cfg, func() time.Time { return f.clock })
 	if err != nil {
 		t.Fatal(err)
@@ -188,6 +205,83 @@ func TestEnrollmentAndLogin(t *testing.T) {
 	}
 }
 
+func (f *fixture) totpOpenedRows() int {
+	f.t.Helper()
+	var n int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM audit_event WHERE action = 'auth.totp.opened'`).Scan(&n); err != nil {
+		f.t.Fatal(err)
+	}
+	return n
+}
+
+// D-16: no audit row, no secret. The row must outlive whatever goes wrong after the seed is opened.
+func TestTOTPDecryptAuditSurvivesARollback(t *testing.T) {
+	f := newFixture(t)
+	username := f.createUser()
+	secret, _ := f.enroll(username)
+	f.advance(30 * time.Second)
+	before := f.totpOpenedRows()
+	for _, stmt := range []string{
+		`CREATE FUNCTION test_fail_claim() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'claim failed'; END $$`,
+		`CREATE TRIGGER test_fail_claim BEFORE UPDATE OF totp_last_step ON app_user FOR EACH ROW EXECUTE FUNCTION test_fail_claim()`,
+	} {
+		if _, err := f.pool.Exec(f.ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.login(username, secret); err == nil {
+		t.Fatal("the claim failed, but the login went through")
+	}
+	if got := f.totpOpenedRows(); got != before+1 {
+		t.Fatalf("auth.totp.opened rows = %d, want %d: the decrypt was rolled out of the audit log", got, before+1)
+	}
+}
+
+// failingAudit makes every audit insert fail, as a dead audit table would.
+type failingAudit struct{ store.DBTX }
+
+func (f failingAudit) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, "audit_event") {
+		return errRow{}
+	}
+	return f.DBTX.QueryRow(ctx, sql, args...)
+}
+
+type errRow struct{}
+
+func (errRow) Scan(...any) error { return errors.New("audit table unavailable") }
+
+func TestTOTPIsNotUsedWithoutItsAuditRow(t *testing.T) {
+	f := newFixture(t)
+	username := f.createUser()
+	secret, _ := f.enroll(username)
+	f.advance(30 * time.Second)
+	var stepBefore *int64
+	if err := f.pool.QueryRow(f.ctx, `SELECT totp_last_step FROM app_user WHERE username = $1`, username).Scan(&stepBefore); err != nil {
+		t.Fatal(err)
+	}
+	code, err := totp.GenerateCodeCustom(secret, f.clock, totpOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken := *f.svc
+	broken.q = store.New(failingAudit{f.pool})
+	u, err := f.svc.q.GetUserByUsername(f.ctx, username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := broken.totpOK(f.ctx, f.svc.q, u, code, f.clock); ok || err == nil {
+		t.Fatalf("audit failed but ok = %v, err = %v", ok, err)
+	}
+	var stepAfter *int64
+	if err := f.pool.QueryRow(f.ctx, `SELECT totp_last_step FROM app_user WHERE username = $1`, username).Scan(&stepAfter); err != nil {
+		t.Fatal(err)
+	}
+	if (stepBefore == nil) != (stepAfter == nil) || (stepBefore != nil && *stepBefore != *stepAfter) {
+		t.Fatal("the seed was used: the step was claimed with no audit row")
+	}
+}
+
 func TestTOTPReplayRejected(t *testing.T) {
 	f := newFixture(t)
 	username := f.createUser()
@@ -246,9 +340,13 @@ func TestWrongTOTPCountsTowardsLockout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	opened := f.totpOpenedRows()
 	for i := 1; i <= 4; i++ {
 		_, err := f.svc.VerifyMFA(f.ctx, lr.MFAToken, "000000", f.meta)
 		wantErr(t, err, ErrInvalidCredentials)
+	}
+	if got := f.totpOpenedRows(); got != opened+4 { // a wrong guess decrypts the seed too
+		t.Fatalf("auth.totp.opened rows = %d, want %d", got, opened+4)
 	}
 	// A correct password in between must not reset the counter.
 	if _, err := f.svc.Login(f.ctx, username, testPassword, f.meta); err != nil {

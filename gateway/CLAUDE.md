@@ -22,9 +22,13 @@ api/openapi.yaml  REST contract (source of truth for codegen)
 - Contract first: edit `api/openapi.yaml`, run `make gen`, then implement.
 - Every handler: authN → RBAC (`rbac.Can(user, action, resource)`) → validate → call → audit (for mutations) → problem+json errors.
 - Never log request bodies on `/auth/*`, `/admin/accounts*` or `/brokers/*`. The log middleware has a deny-list.
-- Secrets from the DB may be decrypted for the engine's `StartSession` and for `vyuhactl download run`, and nowhere else (owner, 2026-11-02). They are never returned in API responses.
-- `vyuhactl download run` must: pass the token to the Python downloader via stdin or an inherited pipe, never argv or an env var (both are visible to other processes); zero the buffer after use; audit each decrypt (`broker.token.opened`); never log it. Tests: `cmd/vyuhactl/download_test.go`, `test_token_is_not_in_argv_env_or_logs` in quant. Python can't zero a `str`, so the downloader's copy lasts until the job exits.
-- **Older than this rule and not covered by it** (`[DECISION NEEDED]`, `docs/DECISIONS.md` D-16): TOTP check at user login (`internal/auth/service.go`), API key for the broker login URL and API key + secret for the token exchange (`internal/brokers/service.go`). Don't add to this list.
+- **Permitted decrypt sites (owner, 2026-11-03). These five and nowhere else** (`internal/crypto/sites_test.go` fails on a new one):
+  1. Engine `StartSession`: API key and secret, opened in `brokers.Service.complete`.
+  2. `vyuhactl download run`: the access token, `brokers.OpenAccessToken`.
+  3. Login TOTP verification: `auth.Service.totpOK`. Reauth and enrolment confirmation use the same function.
+  4. Building the broker login URL: API key, `brokers.Service.LoginURL`.
+  5. The broker token exchange: API key and secret, `brokers.Service.complete`.
+- Conditions on all five: never logged; never in argv or env (`vyuhactl` uses stdin; the Python job can't zero its `str`, so its copy lasts until it exits); audited on each decrypt (`broker.token.opened`, `broker.secret.opened`, `auth.totp.opened`); zeroed after use where the language allows (Go `[]byte` is, a Go `string` isn't, so the copies that protobuf, form bodies and URLs need last until the garbage collector takes them). Never returned in API responses, except the API key inside the login URL, which the broker's login page requires.
 - WS: one goroutine per connection for writes, bounded buffer (4 MB). Conflation ticker per subscription group. Drop to snapshot mode on slow consumers.
 - Use `context.Context` with deadlines on every outbound call (engine gRPC 2 s, DB 1 s default).
 - Tests: table-driven; `testcontainers-go` for Postgres/NATS integration tests; no engine needed (use a fake gRPC server).
