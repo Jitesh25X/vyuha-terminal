@@ -218,6 +218,11 @@ std::expected<Intake, Error> Oms::intake(const OrderDetails& details) noexcept {
     }
     return Intake{.handle = *existing, .existing = true};
   }
+  // ADR-027: while the order log isn't durable, nothing that adds risk is taken in. Nothing is recorded.
+  if (!sink_->healthy()) {
+    return refuse_in_outage(OutageRefusal::kNewOrder,
+                            "ORDER_LOG_UNAVAILABLE: new orders wait for the order log");
+  }
   // Once per new order, not per tick, and the pool holds a day's orders: a scan is cheap enough.
   if (std::ranges::any_of(orders_, [&](const Order& o) { return o.details.id == details.id; })) {
     return std::unexpected(Error{ErrorCode::kOrderDup, "ORDER_DUP: order id already used"});
@@ -234,9 +239,8 @@ std::expected<Intake, Error> Oms::intake(const OrderDetails& details) noexcept {
   if (!sink_->try_push(event)) {
     return std::unexpected(kSinkFull);
   }
-  Order& order = orders_.emplace_back();  // can't allocate: within the reserved capacity
-  order.details = details;
-  order.seq = 1;
+  // Can't allocate: within the reserved capacity.
+  orders_.push_back(Order{.details = details, .seq = 1});
   const auto handle = static_cast<OrderHandle>(orders_.size() - 1);
   index_client(handle);
   return Intake{.handle = handle, .existing = false};
@@ -248,6 +252,16 @@ std::expected<OrderHandle, Error> Oms::create(const OrderDetails& details) noexc
     return std::unexpected(taken.error());
   }
   return taken->handle;
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape): Quill logging, as in illegal() below
+std::unexpected<Error> Oms::refuse_in_outage(OutageRefusal kind, std::string_view detail) noexcept {
+  sink_->note_outage_refusal(kind);
+  ++outage_refusals_;
+  if (quill::Logger* logger = log::engine(); logger != nullptr) {
+    LOG_ERROR(logger, "{}", detail);  // static text; the ORDER_LOG_OUTAGE alert follows when storage is back
+  }
+  return std::unexpected(Error{ErrorCode::kOrderLogUnavailable, detail});
 }
 
 std::optional<OrderHandle> Oms::find_client(std::string_view client_order_id) const noexcept {
@@ -444,6 +458,18 @@ std::expected<OrderStatus, Error> Oms::modify_request(Order& order, OrderStatus 
     return std::unexpected(kBadDetails);  // one at a time: a second would lose what to go back to
   }
   OrderDetails& live = order.details;
+  // ADR-027: during an outage a modify may only reduce. Until positions exist (M2.6) every price or trigger
+  // change counts as opening (fail closed); revisit at M2.6.
+  if (!sink_->healthy()) {
+    if (details.modified_qty > live.qty) {
+      return refuse_in_outage(OutageRefusal::kModifyQtyUp,
+                              "ORDER_LOG_UNAVAILABLE: a qty raise waits for the order log");
+    }
+    if (details.modified_price.has_value() || details.modified_trigger.has_value()) {
+      return refuse_in_outage(OutageRefusal::kModifyPrice,
+                              "ORDER_LOG_UNAVAILABLE: a price or trigger change waits for the order log");
+    }
+  }
   ModifyRecord modify{
       .qty = details.modified_qty, .price = details.modified_price, .trigger = details.modified_trigger};
   const bool asks = modify.qty != 0 || modify.price.has_value() || modify.trigger.has_value();
@@ -553,13 +579,12 @@ std::expected<OrderHandle, Error> Oms::restore(const RecoveredOrder& recovered) 
   if (is_terminal(recovered.status) || recovered.seq < 1 || !broker_id.assign(recovered.broker_order_id)) {
     return std::unexpected(Error{ErrorCode::kInvalidArgument, "oms: order can't be restored"});
   }
-  Order& order = orders_.emplace_back();
-  order.details = recovered.details;
-  order.status = recovered.status;
-  order.seq = recovered.seq;
-  order.filled_qty = recovered.filled_qty;
-  order.broker_order_id = broker_id;
-  order.needs_reconcile = true;
+  orders_.push_back(Order{.details = recovered.details,
+                          .status = recovered.status,
+                          .seq = recovered.seq,
+                          .filled_qty = recovered.filled_qty,
+                          .broker_order_id = broker_id,
+                          .needs_reconcile = true});
   const auto handle = static_cast<OrderHandle>(orders_.size() - 1);
   index_client(handle);
   for (const std::string& trade : recovered.trade_ids) {

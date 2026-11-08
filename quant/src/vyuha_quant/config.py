@@ -1,4 +1,4 @@
-"""Settings from the environment (see .env.example). Same variable names as the gateway."""
+"""Settings from the environment (see env.example). Same variable names as the gateway."""
 
 from __future__ import annotations
 

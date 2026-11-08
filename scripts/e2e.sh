@@ -45,7 +45,7 @@ go build -o "$tmp/fakefeed" ./cmd/fakefeed # perf test data source (speaks the /
 "$tmp/fakefeed" -addr "$feed_addr" -hz 4 >"$tmp/fakefeed.log" 2>&1 &
 feed_pid=$!
 "$tmp/vyuhactl" migrate up >/dev/null
-"$tmp/vyuhactl" secrets init -env-file "$tmp/env" -env-example "$root/.env.example" -jwt-key "$tmp/jwt.pem" >/dev/null
+"$tmp/vyuhactl" secrets init -env-file "$tmp/env" -env-example "$root/env.example" -jwt-key "$tmp/jwt.pem" >/dev/null
 
 user="e2e_trader"
 password="$(openssl rand -hex 16)"

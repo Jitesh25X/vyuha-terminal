@@ -18,6 +18,17 @@ namespace vyuha::oms {
 
 namespace {
 
+// A fixed title per known expiry reason, never built from data (risk review M2.2b).
+[[nodiscard]] std::string_view expiry_alert_title(std::string_view reason) noexcept {
+  if (reason == kExpiredInQueue) {
+    return "ORDER_EXPIRED_IN_QUEUE";
+  }
+  if (reason == kExpiredOnRestart) {
+    return "ORDER_EXPIRED_ON_RESTART";
+  }
+  return "ORDER_EXPIRED";
+}
+
 [[nodiscard]] std::string_view name(Side v) noexcept { return v == Side::kBuy ? "BUY" : "SELL"; }
 [[nodiscard]] std::string_view name(OrderType v) noexcept {
   switch (v) {
@@ -165,11 +176,37 @@ void record_approval_stale(pqxx::work& tx, const std::string& id, const OrderEve
       pqxx::params{id, age});
 }
 
+// Integers and exact decimal text, so building JSON by hand is safe. The broker order id is left out: it's
+// on the `order` row, and it's the broker's text. So is the trade id, which Postgres encodes in write_event.
+[[nodiscard]] std::string event_payload(const OrderEventRecord& e) {
+  std::string payload = e.fill_qty > 0 ? std::format(R"({{"filled_qty":{},"fill_qty":{},"fill_price":"{}")",
+                                                     e.filled_qty, e.fill_qty, e.fill_price.to_string())
+                                       : std::format(R"({{"filled_qty":{})", e.filled_qty);
+  if (e.modify.qty != 0) {
+    payload += std::format(R"(,"modified_qty":{})", e.modify.qty);
+  }
+  if (e.modify.price.has_value()) {
+    payload += std::format(R"(,"modified_price":"{}")", e.modify.price->to_string());
+  }
+  if (e.modify.trigger.has_value()) {
+    payload += std::format(R"(,"modified_trigger":"{}")", e.modify.trigger->to_string());
+  }
+  if (e.gate.has_value()) {
+    payload += std::format(R"(,"gate":{{"ruleset_version":{},"eval_ns":{},"ts_ns":{}}})",
+                           e.gate->ruleset_version, e.gate->eval_ns, e.gate->ts);
+  }
+  payload += '}';
+  return payload;
+}
+
 void write_event(pqxx::work& tx, const OrderEventRecord& e) {
   const std::string id = e.order_id.to_string();
   const Nanos micros = e.ts / kNanosPerMicro;
   if (!e.from.has_value()) {
-    const OrderDetails& d = e.details;
+    if (!e.details.has_value()) {  // the OMS always sets it: a data error, so this order alone is refused
+      throw pqxx::sql_error("order event: first event without its order", "", "22023");
+    }
+    const OrderDetails& d = *e.details;
     tx.exec(
         R"(INSERT INTO "order" (id, parent_id, client_order_id, account_id, user_id, strategy_id, source,
              instrument_id, side, qty, order_type, product, validity, price, trigger_price, market_protection_pct,
@@ -198,29 +235,11 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
                      millipct_text(d.market_protection_millipct),
                      std::string(to_string(e.to)),
                      std::string(d.tag.view()),
-                     d.is_paper,
+                     d.is_paper.paper(),
                      d.created_at / kNanosPerMicro,
                      micros});
   }
-  // Integers and exact decimal text, so building JSON by hand is safe. The broker order id is left out: it's
-  // on the `order` row, and it's the broker's text. So is the trade id, which Postgres encodes below.
-  std::string payload = e.fill_qty > 0 ? std::format(R"({{"filled_qty":{},"fill_qty":{},"fill_price":"{}")",
-                                                     e.filled_qty, e.fill_qty, e.fill_price.to_string())
-                                       : std::format(R"({{"filled_qty":{})", e.filled_qty);
-  if (e.modify.qty != 0) {
-    payload += std::format(R"(,"modified_qty":{})", e.modify.qty);
-  }
-  if (e.modify.price.has_value()) {
-    payload += std::format(R"(,"modified_price":"{}")", e.modify.price->to_string());
-  }
-  if (e.modify.trigger.has_value()) {
-    payload += std::format(R"(,"modified_trigger":"{}")", e.modify.trigger->to_string());
-  }
-  if (e.gate.has_value()) {
-    payload += std::format(R"(,"gate":{{"ruleset_version":{},"eval_ns":{},"ts_ns":{}}})",
-                           e.gate->ruleset_version, e.gate->eval_ns, e.gate->ts);
-  }
-  payload += '}';
+  const std::string payload = event_payload(e);
   // A retry after an unknown commit finds the row already there, so nothing is written or alerted twice.
   const pqxx::result inserted = tx.exec(
       R"(INSERT INTO order_event (order_id, seq, from_status, to_status, reason_code, payload, ts)
@@ -275,9 +294,10 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
         pqxx::params{body});
   }
   record_approval_stale(tx, id, e);
-  // The restart rule (ADR-025): one transaction with the status, so an expiry is never unaudited or
-  // unalerted. The transition, not the status: a late fill on an expired order is also recorded with to =
-  // EXPIRED.
+  // The restart rule (ADR-025) and the queue age limit (ADR-027): one transaction with the status, so an
+  // expiry is never unaudited or unalerted. The alert title is fixed per reason
+  // (expiry_alert_title): ORDER_EXPIRED_ON_RESTART, ORDER_EXPIRED_IN_QUEUE, else ORDER_EXPIRED. The
+  // transition, not the status: a late fill on an expired order is also recorded with to = EXPIRED.
   if (e.to == OrderStatus::kExpired && e.from != e.to) {
     tx.exec(
         R"(INSERT INTO audit_event (actor_kind, action, entity, entity_id, payload)
@@ -290,13 +310,13 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
         pqxx::params{id, std::string(e.reason_code.view()), e.seq});
     tx.exec(
         R"(INSERT INTO alert_event (user_id, severity, title, body)
-           SELECT u.id, 'critical', 'ORDER_EXPIRED_ON_RESTART',
+           SELECT u.id, 'critical', $2::text,
                   jsonb_build_object('order_id', o.id, 'client_order_id', o.client_order_id,
                                      'account_id', o.account_id, 'instrument_id', o.instrument_id,
                                      'side', o.side, 'qty', o.qty, 'is_paper', o.is_paper)
            FROM "order" o CROSS JOIN app_user u
            WHERE o.id = $1::uuid AND u.role = 'admin' AND u.is_active)",
-        pqxx::params{id});
+        pqxx::params{id, std::string(expiry_alert_title(e.reason_code.view()))});
   }
 }
 
@@ -444,8 +464,9 @@ void PgOrderEventWriter::quarantine(const OrderEventRecord& event, std::string_v
                   jsonb_build_object('order_id', $1::text, 'seq', $2::int, 'sqlstate', $3::text,
                                      'client_order_id', $4::text)
            FROM app_user WHERE role = 'admin' AND is_active)",
-        pqxx::params{id, event.seq, std::string(sqlstate),
-                     std::string(event.details.client_order_id.view())});
+        pqxx::params{
+            id, event.seq, std::string(sqlstate),
+            event.details.has_value() ? std::string(event.details->client_order_id.view()) : std::string()});
     tx.commit();
   } catch (const std::exception&) {  // the log line above stands; the order is refused either way
     if (quill::Logger* logger = log::engine(); logger != nullptr) {
@@ -472,8 +493,11 @@ void PgOrderEventWriter::run(const std::stop_token& stop) {
     }
     if (batch.empty()) {
       if (stop.stop_requested()) {
+        log_unreported_outage();
         return;
       }
+      report_outage_if_due();  // a report that failed after recovery is retried here, not only on the next
+                               // batch
       std::this_thread::sleep_for(kIdle);
       continue;
     }
@@ -482,9 +506,13 @@ void PgOrderEventWriter::run(const std::stop_token& stop) {
       healthy_.store(true, std::memory_order_release);
       backoff.reset();
       batch.clear();
+      report_outage_if_due();
       continue;
     }
     healthy_.store(false, std::memory_order_release);
+    if (!outage_since_.has_value()) {
+      outage_since_ = std::chrono::steady_clock::now();
+    }
     if (stop.stop_requested()) {
       const auto now = std::chrono::steady_clock::now();
       if (!give_up.has_value()) {
@@ -494,11 +522,84 @@ void PgOrderEventWriter::run(const std::stop_token& stop) {
           LOG_ERROR(logger, "order events: {} LOST at shutdown; restart reconciles with the broker",
                     batch.size() + ring_->size_approx());
         }
+        log_unreported_outage();
         return;
       }
     }
     std::this_thread::sleep_for(std::chrono::nanoseconds(backoff.next()));
   }
+}
+
+void PgOrderEventWriter::note_outage_refusal(OutageRefusal kind) noexcept {
+  const auto i = static_cast<std::size_t>(kind);
+  if (i < outage_refusals_.size()) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index): checked
+    outage_refusals_[i].fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+void PgOrderEventWriter::report_outage_if_due() noexcept {
+  if (!outage_since_.has_value() || !healthy_.load(std::memory_order_acquire)) {
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now < next_report_try_) {
+    return;
+  }
+  if (!report_outage()) {
+    next_report_try_ = now + kOutageReportRetry;
+  }
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape): Quill logging
+void PgOrderEventWriter::log_unreported_outage() noexcept {
+  if (!outage_since_.has_value()) {
+    return;
+  }
+  if (quill::Logger* logger = log::engine(); logger != nullptr) {
+    LOG_ERROR(logger,
+              "ORDER_LOG_OUTAGE not written before stop: refused_new_orders={} refused_qty_raises={} "
+              "refused_price_modifies={}",
+              outage_refusals_[0].load(std::memory_order_relaxed),
+              outage_refusals_[1].load(std::memory_order_relaxed),
+              outage_refusals_[2].load(std::memory_order_relaxed));
+  }
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape): every exception is caught
+bool PgOrderEventWriter::report_outage() noexcept {
+  std::array<std::uint64_t, kOutageRefusalKinds> counts{};
+  for (std::size_t i = 0; i < counts.size(); ++i) {
+    counts.at(i) = outage_refusals_.at(i).load(std::memory_order_relaxed);
+  }
+  const auto ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - outage_since_.value_or(std::chrono::steady_clock::now()))
+          .count();
+  try {
+    pqxx::connection conn(with_timeouts(url_));
+    pqxx::work tx(conn);
+    tx.exec(kStatementTimeout);
+    tx.exec(
+        R"(INSERT INTO alert_event (user_id, severity, title, body)
+           SELECT id, 'critical', 'ORDER_LOG_OUTAGE',
+                  jsonb_build_object('duration_ms', $1::bigint, 'refused_new_orders', $2::bigint,
+                                     'refused_qty_raises', $3::bigint, 'refused_price_modifies', $4::bigint)
+           FROM app_user WHERE role = 'admin' AND is_active)",
+        pqxx::params{static_cast<std::int64_t>(ms), static_cast<std::int64_t>(counts[0]),
+                     static_cast<std::int64_t>(counts[1]), static_cast<std::int64_t>(counts[2])});
+    tx.commit();
+  } catch (const std::exception&) {
+    if (quill::Logger* logger = log::engine(); logger != nullptr) {
+      LOG_ERROR(logger, "ORDER_LOG_OUTAGE alert not written yet; retrying");
+    }
+    return false;
+  }
+  for (std::size_t i = 0; i < counts.size(); ++i) {  // refusals since the read go in the next report
+    outage_refusals_.at(i).fetch_sub(counts.at(i), std::memory_order_relaxed);
+  }
+  outage_since_.reset();
+  return true;
 }
 
 std::expected<std::vector<RecoveredOrder>, Error> load_open_orders(const std::string& url) {
@@ -520,7 +621,8 @@ std::expected<std::vector<RecoveredOrder>, Error> load_open_orders(const std::st
     out.reserve(rows.size());
     for (const pqxx::row_ref row : rows) {
       bool ok = true;
-      RecoveredOrder r;
+      // is_paper first: an OrderDetails can't exist without it.
+      RecoveredOrder r{.details = OrderDetails{.is_paper = PaperFlag{row[20].as<bool>()}}};
       OrderDetails& d = r.details;
       const auto id = parse_uuid(row, 0, ok);
       const auto account = parse_uuid(row, 3, ok);
@@ -554,7 +656,6 @@ std::expected<std::vector<RecoveredOrder>, Error> load_open_orders(const std::st
       d.order_type = *type;
       d.product = *product;
       d.validity = *validity;
-      d.is_paper = row[20].as<bool>();
       d.created_at = row[21].as<std::int64_t>() * kNanosPerMicro;
       r.status = *status;
       r.seq = *seq;

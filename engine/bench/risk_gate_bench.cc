@@ -38,7 +38,7 @@ void BM_RiskGateFullChainPasses(benchmark::State& state) {
   const vyuha::WallClock clock;
   const auto gate = vyuha::risk::RiskGate::create(kChain, clock).value();
   const GateContext ctx{};
-  vyuha::oms::OrderDetails order;
+  vyuha::oms::OrderDetails order{.is_paper = vyuha::oms::kPaperOrder};
   order.qty = 50;
   order.price = vyuha::Price::from_units(1'000'000);
   for (auto _ : state) {
@@ -55,7 +55,7 @@ void BM_RiskGateFullChainPercentiles(benchmark::State& state) {
   const vyuha::WallClock clock;
   const auto gate = vyuha::risk::RiskGate::create(kChain, clock).value();
   const GateContext ctx{};
-  vyuha::oms::OrderDetails order;
+  vyuha::oms::OrderDetails order{.is_paper = vyuha::oms::kPaperOrder};
   order.qty = 50;
   order.price = vyuha::Price::from_units(1'000'000);
   std::vector<std::int64_t> samples;

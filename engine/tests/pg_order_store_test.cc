@@ -65,7 +65,7 @@ Uuid uuid_of(const std::string& text) {
 }
 
 OrderDetails details(const Seeded& s, int n, std::int32_t qty) {
-  OrderDetails d;
+  OrderDetails d{.is_paper = kPaperOrder};
   d.id = uuid_of("0190a3b4-7c2d-7e11-8f00-0000000000" + std::string(n < 10 ? "0" : "") + std::to_string(n));
   EXPECT_TRUE(d.client_order_id.assign("client-" + std::to_string(n)));
   d.account_id = uuid_of(s.account);
@@ -81,7 +81,7 @@ OrderDetails details(const Seeded& s, int n, std::int32_t qty) {
   d.trigger_price = Price::from_units(24'600'000);
   d.market_protection_millipct = 2'500;
   EXPECT_TRUE(d.tag.assign("manual"));
-  d.is_paper = true;
+  d.is_paper = kPaperOrder;
   d.created_at = 1'767'000'000'123'456'000;  // to the microsecond: Postgres keeps no more
   return d;
 }
@@ -239,11 +239,12 @@ TEST(PgOrderStore, ARetryAfterAnUnknownCommitChangesNothing) {
   }
   const TempDb db(admin);
   const Seeded s = seed(db.url());
+  const OrderDetails d = details(s, 1, 1);
   OrderEventRecord first;
-  first.details = details(s, 1, 1);
-  first.order_id = first.details.id;
+  first.details = d;
+  first.order_id = d.id;
   first.seq = 1;
-  first.ts = first.details.created_at;
+  first.ts = d.created_at;
   {
     PgOrderEventWriter writer(db.url());
     ASSERT_TRUE(writer.try_push(first));
@@ -282,6 +283,8 @@ TEST(PgOrderStore, EventsWaitOutAnOutageAndArriveInOrder) {
     ASSERT_FALSE(writer.healthy());
     EXPECT_EQ(writer.written(), 0U);
     EXPECT_EQ(oms.apply(h, E::kSend).error().code, ErrorCode::kOrderLogUnavailable);  // down: nothing is sent
+    // ADR-027: nothing that adds risk is taken in either; it's counted for the alert written on recovery.
+    EXPECT_EQ(oms.create(details(s, 2, 2)).error().code, ErrorCode::kOrderLogUnavailable);
     allow(true);
     wait_written(writer, 2);
     while (!writer.healthy() && std::chrono::steady_clock::now() < deadline) {
@@ -294,7 +297,16 @@ TEST(PgOrderStore, EventsWaitOutAnOutageAndArriveInOrder) {
   pqxx::connection c(db.url());
   pqxx::read_transaction tx(c);
   EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM order_event"), 3);
-  EXPECT_EQ(tx.query_value<std::string>("SELECT status::text FROM \"order\""), "SENT");
+  EXPECT_EQ(tx.query_value<std::string>("SELECT status::text FROM \"order\""),
+            "SENT");  // the refused one isn't there
+  const auto outage =
+      tx.exec(
+            "SELECT severity, (body->>'refused_new_orders')::int, (body->>'duration_ms')::bigint "
+            "FROM alert_event WHERE title = 'ORDER_LOG_OUTAGE'")
+          .one_row();  // exactly one alert for the outage
+  EXPECT_EQ(outage[0].as<std::string>(), "critical");
+  EXPECT_EQ(outage[1].as<int>(), 1);
+  EXPECT_GT(outage[2].as<std::int64_t>(), 0);
   EXPECT_EQ(tx.query_value<std::int64_t>(
                 "SELECT (extract(epoch FROM created_at) * 1000000)::bigint FROM \"order\""),
             1'767'000'000'123'456);
@@ -569,6 +581,42 @@ TEST(PgOrderStore, AStaleApprovalIsRejectedAuditedAndAlertedTogether) {
   EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM alert_event WHERE title = 'APPROVAL_STALE'"), 1);
   EXPECT_EQ(tx.query_value<std::string>("SELECT payload->'gate'->>'ts_ns' FROM order_event WHERE seq = 2"),
             std::to_string(gate_clock.now()));
+}
+
+// ADR-027: a queued order past the age limit is expired, never sent, and the expiry, its audit row and the
+// admins' alert land in one transaction, as the restart rule's do.
+TEST(PgOrderStore, AnOrderExpiredInTheQueueIsAuditedAndAlertedTogether) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  SimClock clock(1'767'000'000'000'000'000);
+  RecordingBroker broker;
+  {
+    PgOrderEventWriter writer(db.url());
+    Oms oms(writer, clock, 2);
+    OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8});
+    const OrderHandle h = oms.create(details(s, 1, 10)).value();
+    ASSERT_TRUE(router.submit(h, testing::approve(oms.order(h).details, clock)));
+    clock.advance(kDefaultQueueMaxAge + 1);
+    wait_written(writer, 2);
+    EXPECT_EQ(router.poll(), 0U);
+    EXPECT_EQ(oms.order(h).status, kExpired);
+    wait_written(writer, 3);
+  }
+  EXPECT_TRUE(broker.sent.empty());
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  const auto order = tx.exec("SELECT status::text, reject_code FROM \"order\"").one_row();
+  EXPECT_EQ(order[0].as<std::string>(), "EXPIRED");
+  EXPECT_EQ(order[1].as<std::string>(), "EXPIRED_IN_QUEUE");
+  EXPECT_EQ(tx.query_value<std::string>(
+                "SELECT payload->>'reason_code' FROM audit_event WHERE action = 'order.expire'"),
+            "EXPIRED_IN_QUEUE");
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM alert_event WHERE title = 'ORDER_EXPIRED_IN_QUEUE'"),
+            1);
 }
 
 // A duplicate of an order from an earlier run gets past intake, which only knows this run. The owner's rule:

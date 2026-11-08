@@ -66,7 +66,7 @@ Desk defaults are **seed values for a staging desk**. The owner sets real values
 | 21 | `R-MARGIN` | Margin cache: required × (1+buffer) ≤ available; for orders > ₹10 lakh notional, preview calls the broker margin API (async, before submit) | opening |
 | 22 | `R-DISCIPLINE` | Loss-streak lockout active; bracket reward:risk below `min_reward_risk` | opening |
 
-"Opening" = increases absolute position. Position-reducing orders skip rules 14–22, so limits never stop a trader getting flat. They still pass 1–13, except rule 1 when the action is a kill-generated cancel or flatten. The exception is a Postgres outage: no new order goes out while events aren't durable, including reducing and flatten orders, while cancels still go (ADR-025).
+"Opening" = increases absolute position. Position-reducing orders skip rules 14–22, so limits never stop a trader getting flat. They still pass 1–13, except rule 1 when the action is a kill-generated cancel or flatten. The exception is a Postgres outage: no new order goes out while events aren't durable, including reducing and flatten orders, while cancels still go (ADR-025). Nothing that adds risk is taken in then either: new orders, qty-raising modifies and price or trigger modifies are refused with `ORDER_LOG_UNAVAILABLE`. A queued order whose turn comes more than `ORDER_QUEUE_MAX_AGE_MS` (5 s) after its gate stamp is `EXPIRED_IN_QUEUE`, never sent (ADR-027).
 
 **Projected state** uses current net position + open orders on the same side (worst case) + this intent.
 

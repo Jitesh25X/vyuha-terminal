@@ -28,7 +28,7 @@ ifeq ($(shell uname -s),Linux)
   endif
 endif
 # .env is optional in dev: fall back to the committed example (no secrets) until the owner creates one.
-ENV_FILE := $(if $(wildcard .env),.env,.env.example)
+ENV_FILE := $(if $(wildcard .env),.env,env.example)
 COMPOSE := docker compose -f deploy/docker-compose.dev.yml --env-file $(ENV_FILE) $(foreach p,$(PROFILES),--profile $(p))
 
 # $(1) = marker file that exists once the service is scaffolded, $(2) = command
@@ -73,7 +73,7 @@ proto-lint:
 	@command -v buf >/dev/null || { echo "✖ buf not found: make bootstrap C=proto"; exit 1; }
 	cd proto && buf lint && buf format -d --exit-code
 
-# Dev secrets: JWT signing key + VYUHA_MASTER_KEY in .env (created from .env.example). Never printed or overwritten.
+# Dev secrets: JWT signing key + VYUHA_MASTER_KEY in .env (created from env.example). Never printed or overwritten.
 dev-secrets:
 	cd gateway && go run ./cmd/vyuhactl secrets init
 

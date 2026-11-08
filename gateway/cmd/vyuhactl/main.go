@@ -31,7 +31,7 @@ const usage = `usage:
   vyuhactl migrate up|version [-dir ../db/migrations]
   vyuhactl user create -username NAME -display-name "Full Name" -role admin|risk_manager|trader|analyst
       (password is read from the terminal with echo off, or from stdin when piped; never from a flag)
-  vyuhactl secrets init [-env-file ../.env] [-env-example ../.env.example] [-jwt-key ../deploy/secrets/jwt_ed25519.pem]
+  vyuhactl secrets init [-env-file ../.env] [-env-example ../env.example] [-jwt-key ../deploy/secrets/jwt_ed25519.pem]
       (creates missing dev secrets; never prints them; never overwrites an existing key)
   vyuhactl audit verify [-anchor ID:HEXHASH ...]
       (recomputes the audit hash chain; exit 1 on tampering. Anchors from 'audit head' catch deleted newest rows)
@@ -202,7 +202,7 @@ func stty(echo bool) error {
 func runSecretsInit(args []string) error {
 	fs := flag.NewFlagSet("secrets init", flag.ContinueOnError)
 	envFile := fs.String("env-file", "../.env", "dotenv file to create or complete")
-	envExample := fs.String("env-example", "../.env.example", "template used when -env-file does not exist")
+	envExample := fs.String("env-example", "../env.example", "template used when -env-file does not exist")
 	jwtKey := fs.String("jwt-key", "../deploy/secrets/jwt_ed25519.pem", "Ed25519 PKCS#8 PEM to create if missing")
 	if err := fs.Parse(args); err != nil {
 		return err

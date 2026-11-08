@@ -52,7 +52,7 @@ GateDecision RiskGate::evaluate(const GateContext& ctx, const oms::OrderDetails&
   out.stamp.ts = start;
   const GateFacts facts{.now = start, .opening = is_opening(ctx, order)};
 
-  if (!order.is_paper && !complete()) {
+  if (order.is_paper.live() && !complete()) {
     out.rejection = RuleResult{.code = RuleCode::kLiveDisabled, .verdict = Verdict::kReject};
   }
   for (const Rule& rule : std::span(rules_).first(count_)) {

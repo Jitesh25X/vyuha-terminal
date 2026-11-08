@@ -84,7 +84,7 @@ RuleResult rejection_of(const GateDecision& d) {
 }
 
 oms::OrderDetails paper_order() {
-  oms::OrderDetails d;
+  oms::OrderDetails d{.is_paper = oms::kPaperOrder};
   d.id.bytes.fill(1);
   EXPECT_TRUE(d.client_order_id.assign("client-1"));
   d.qty = 50;
@@ -190,7 +190,7 @@ TEST(RiskGate, ALiveOrderNeedsTheWholeChain) {
   reset();
   const SimClock clock;
   oms::OrderDetails live = paper_order();
-  live.is_paper = false;
+  live.is_paper = oms::kLiveOrder;
 
   const RiskGate empty = RiskGate::create({}, clock).value();
   const GateDecision refused = empty.evaluate({}, live);

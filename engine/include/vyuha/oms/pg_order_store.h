@@ -1,11 +1,13 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -42,6 +44,9 @@ class PgOrderEventWriter final : public IOrderEventSink {
   [[nodiscard]] bool try_pop_refused(Uuid& order_id) noexcept override { return refused_->try_pop(order_id); }
   // False from a failed batch until the next one commits.
   [[nodiscard]] bool healthy() const noexcept override { return healthy_.load(std::memory_order_acquire); }
+  // Counted; the first batch that commits after an outage is followed by one ORDER_LOG_OUTAGE alert with
+  // the outage's length and these counts (ADR-027).
+  void note_outage_refusal(OutageRefusal kind) noexcept override;
 
  private:
   static constexpr std::size_t kRingSize = 16'384;
@@ -55,6 +60,13 @@ class PgOrderEventWriter final : public IOrderEventSink {
   // error.
   [[nodiscard]] bool flush_each(const std::vector<OrderEventRecord>& batch, const std::stop_token& stop);
   void quarantine(const OrderEventRecord& event, std::string_view sqlstate, const std::stop_token& stop);
+  static constexpr std::chrono::seconds kOutageReportRetry{1};
+  // Writer thread. After the first commit following an outage, and again while idle until it lands (one try
+  // per kOutageReportRetry): one ORDER_LOG_OUTAGE alert with the outage's length and the refusal counts.
+  void report_outage_if_due() noexcept;
+  [[nodiscard]] bool report_outage() noexcept;
+  // At stop: an outage report that never landed is at least in the log.
+  void log_unreported_outage() noexcept;
 
   std::string url_;
   std::unique_ptr<SpscRing<OrderEventRecord, kRingSize>> ring_;
@@ -63,6 +75,9 @@ class PgOrderEventWriter final : public IOrderEventSink {
   std::uint64_t pushed_{0};
   std::atomic<std::uint64_t> written_{0};
   std::atomic<bool> healthy_{true};
+  std::array<std::atomic<std::uint64_t>, kOutageRefusalKinds> outage_refusals_{};
+  std::optional<std::chrono::steady_clock::time_point> outage_since_;  // writer thread only
+  std::chrono::steady_clock::time_point next_report_try_;              // writer thread only
   std::jthread thread_;
 };
 

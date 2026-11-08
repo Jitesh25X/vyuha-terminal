@@ -111,7 +111,7 @@ class RecordingSink final : public IOrderEventSink {
 };
 
 OrderDetails order_of(std::int32_t qty) {
-  OrderDetails d;
+  OrderDetails d{.is_paper = kPaperOrder};
   d.id.bytes.fill(1);
   EXPECT_TRUE(d.client_order_id.assign("client-1"));
   EXPECT_TRUE(d.tag.assign("manual"));
@@ -246,8 +246,7 @@ TEST(OmsTradeIds, TradesSeenBeforeARestartStayDuplicates) {
   const FixedClock clock;
   RecordingSink sink;
   Oms oms{sink, clock, 4};
-  RecoveredOrder r;
-  r.details = order_of(10);
+  RecoveredOrder r{.details = order_of(10)};
   r.status = kPartiallyFilled;
   r.seq = 5;
   r.filled_qty = 3;
@@ -379,8 +378,7 @@ TEST(OmsRestart, ConfirmReconciledIsRefusedForAnOrderThatWasNeverSent) {
     const FixedClock clock;
     RecordingSink sink;
     Oms oms{sink, clock, 4};
-    RecoveredOrder r;
-    r.details = order_of(10);
+    RecoveredOrder r{.details = order_of(10)};
     r.status = status;
     r.seq = 2;
     const OrderHandle h = oms.restore(r).value();
@@ -585,7 +583,8 @@ TEST(Oms, FirstEventInsertsTheOrder) {
   EXPECT_FALSE(w.sink.events[0].from.has_value());
   EXPECT_EQ(w.sink.events[0].to, kNew);
   EXPECT_EQ(w.sink.events[0].seq, 1);
-  EXPECT_EQ(w.sink.events[0].details.qty, 10);
+  ASSERT_TRUE(w.sink.events[0].details.has_value());
+  EXPECT_EQ(w.sink.events[0].details.value_or(order_of(0)).qty, 10);
 }
 
 TEST(Oms, RefusesOrdersPostgresWouldRefuse) {
@@ -783,7 +782,7 @@ TEST(OmsIntake, ADifferentBodyIsOrderDup) {
        {changed([](OrderDetails& o) { o.qty = 11; }), changed([](OrderDetails& o) { o.side = Side::kSell; }),
         changed([](OrderDetails& o) { o.price = Price::from_units(1); }),
         changed([](OrderDetails& o) { o.instrument_id = 7; }),
-        changed([](OrderDetails& o) { o.is_paper = false; })}) {
+        changed([](OrderDetails& o) { o.is_paper = kLiveOrder; })}) {
     const auto dup = w.oms.intake(d);
     ASSERT_FALSE(dup.has_value());
     EXPECT_EQ(dup.error().code, ErrorCode::kOrderDup);
@@ -794,8 +793,7 @@ TEST(OmsIntake, ADifferentBodyIsOrderDup) {
 
 TEST(OmsIntake, ARestoredOrderIsADuplicateToo) {
   Walked w;
-  RecoveredOrder r;
-  r.details = order_of(10);
+  RecoveredOrder r{.details = order_of(10)};
   r.status = kOpen;
   r.seq = 3;
   const auto h = w.oms.restore(r);
@@ -871,8 +869,7 @@ TEST(Oms, UnknownIsNeverSentAgain) {
 
 TEST(Oms, ARestoredOrderContinuesItsSeqAndIsNeverSent) {
   Walked w;
-  RecoveredOrder r;
-  r.details = order_of(5);
+  RecoveredOrder r{.details = order_of(5)};
   r.status = kApproved;
   r.seq = 2;
   const auto handle = w.oms.restore(r);

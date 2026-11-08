@@ -1,7 +1,6 @@
 # Build context for deploy/staging/*.Dockerfile (repo root). Secrets never enter an image.
 **/.env
 **/.env.*
-!**/.env.example
 deploy/secrets/
 deploy/staging/secrets/
 **/*.pem

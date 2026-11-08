@@ -31,17 +31,31 @@ std::string broker_tag(std::string_view client_order_id, std::size_t limit) {
   return out.size() > limit ? out.substr(out.size() - limit) : out;
 }
 
-std::expected<Nanos, Error> parse_approval_max_age_ms(std::string_view text) noexcept {
+namespace {
+
+std::expected<Nanos, Error> parse_ms(std::string_view text, Nanos fallback, std::int64_t max_ms,
+                                     std::string_view what) noexcept {
   if (text.empty()) {
-    return kDefaultApprovalMaxAge;
+    return fallback;
   }
   std::int64_t ms = 0;
   const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), ms);
-  if (ec != std::errc{} || end != text.data() + text.size() || ms < 1 || ms > kMaxApprovalMaxAgeMs) {
-    return std::unexpected(
-        Error{ErrorCode::kInvalidArgument, "RISK_APPROVAL_MAX_AGE_MS: whole milliseconds, 1 to 10000"});
+  if (ec != std::errc{} || end != text.data() + text.size() || ms < 1 || ms > max_ms) {
+    return std::unexpected(Error{ErrorCode::kInvalidArgument, what});
   }
   return ms * 1'000'000;
+}
+
+}  // namespace
+
+std::expected<Nanos, Error> parse_approval_max_age_ms(std::string_view text) noexcept {
+  return parse_ms(text, kDefaultApprovalMaxAge, kMaxApprovalMaxAgeMs,
+                  "RISK_APPROVAL_MAX_AGE_MS: whole milliseconds, 1 to 10000");
+}
+
+std::expected<Nanos, Error> parse_queue_max_age_ms(std::string_view text) noexcept {
+  return parse_ms(text, kDefaultQueueMaxAge, kMaxQueueMaxAgeMs,
+                  "ORDER_QUEUE_MAX_AGE_MS: whole milliseconds, 1 to 60000");
 }
 
 OrderRouter::OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, Venue venue,
@@ -52,7 +66,8 @@ OrderRouter::OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, 
       venue_(venue),
       tag_limit_(config.tag_limit),
       capacity_(config.capacity),
-      approval_max_age_(config.approval_max_age) {
+      approval_max_age_(config.approval_max_age),
+      queue_max_age_(config.queue_max_age) {
   pending_.reserve(config.capacity);
 }
 
@@ -71,7 +86,7 @@ std::expected<void, Error> OrderRouter::submit(OrderHandle handle, risk::Approve
   if (!(approved.order() == oms_->order(handle).details)) {
     return std::unexpected(Error{ErrorCode::kInvalidArgument, "router: the approval is for another order"});
   }
-  if (approved.order().is_paper != (venue_ == Venue::kPaper)) {
+  if (approved.order().is_paper.paper() != (venue_ == Venue::kPaper)) {
     return std::unexpected(Error{ErrorCode::kInvalidArgument, "router: paper and live don't mix"});
   }
   if (const Nanos age = oms_->clock().now() - approved.stamp().ts; age < 0 || age > approval_max_age_) {
@@ -104,6 +119,16 @@ std::size_t OrderRouter::poll() noexcept {
       }
       drain_refused();  // after durable(): a refused order's events count as durable, and it must not go out
       if (!oms_->can_send(next.handle)) {  // cancelled or otherwise moved on while it waited
+        ++head_;
+        continue;
+      }
+      // ADR-027. A negative age (the clock stepped back) expires too, as submit() treats it: fail closed.
+      const Nanos queued_for = oms_->clock().now() - next.approved.stamp().ts;
+      if (queued_for > queue_max_age_ || queued_for < 0) {
+        if (!oms_->apply(next.handle, OrderEvent::kExpire, {.reason_code = kExpiredInQueue}).has_value()) {
+          break;  // the sink is full: the next poll tries again, and it is never sent
+        }
+        ++expired_in_queue_;
         ++head_;
         continue;
       }

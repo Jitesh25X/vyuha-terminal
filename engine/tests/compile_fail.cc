@@ -63,6 +63,12 @@ void probe(IOrderSender& sender, OrderRouter& router, const Order& order, const 
   const Bytes raw{details, stamp, false};
   const auto forged = std::bit_cast<ApprovedOrder>(raw);  // invariant-allow: compile-fail fixture
   static_cast<void>(forged);
+#elif defined(VYUHA_CASE_PAPER_MISSING)
+  const OrderDetails forgot{.qty = 1};  // no is_paper: it has no default (M2.2b)
+  static_cast<void>(forgot);
+#elif defined(VYUHA_CASE_PAPER_FROM_BOOL)
+  const OrderDetails implicit{.is_paper = true};  // a bare bool isn't a PaperFlag
+  static_cast<void>(implicit);
 #elif defined(VYUHA_CASE_TEMP_CLOCK)
   static_cast<void>(RiskGate::create(std::span<const Rule>{}, vyuha::SimClock{}));
 #endif

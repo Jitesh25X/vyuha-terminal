@@ -38,7 +38,7 @@ int fail(std::string_view why) {
 bool place(std::span<char*> args, std::size_t orders, const vyuha::WallClock& clock, vyuha::oms::Oms& oms,
            vyuha::oms::OrderRouter& router) {
   for (std::size_t i = 0; i < orders; ++i) {
-    OrderDetails d;
+    OrderDetails d{.is_paper = vyuha::oms::kPaperOrder};
     d.id = Uuid::parse(kOrderIds.at(i)).value_or(Uuid{});
     if (!d.client_order_id.assign(kClientOrderIds.at(i)) || !d.tag.assign("manual")) {
       return false;

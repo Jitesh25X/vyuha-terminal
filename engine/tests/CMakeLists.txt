@@ -75,7 +75,8 @@ set(VYUHA_COMPILE_FAIL_CASES
     "CONSTRUCT=private" "BRACE=private" "DEFAULT=deleted" "COPY=deleted" "DERIVE=final"
     "SEND_ORDER=conver" "SEND_DETAILS=conver" "SUBMIT_DETAILS=conver"
     "SUBMIT_WITHOUT_APPROVAL=too few arguments|no matching" "BITCAST=bit_cast|trivially"
-    "TEMP_CLOCK=deleted")
+    "TEMP_CLOCK=deleted" "PAPER_MISSING=deleted|default constructor|no matching constructor"
+    "PAPER_FROM_BOOL=explicit|conver|no matching")
 foreach(entry IN LISTS VYUHA_COMPILE_FAIL_CASES)
   string(REPLACE "=" ";" parts "${entry}")
   list(GET parts 0 case)

@@ -510,7 +510,7 @@ Errors: RFC 9457 problem+json `{type, title, status, detail, code}`; risk reject
 | CI | GitHub Actions; Buf for proto lint/breaking; sanitizers (ASan/UBSan/TSan) |
 | Desktop (post-MVP) | Electron (Chromium-based, same approach as Bloomberg's Chromium/Node runtime) |
 
-**Environment variables required:** see `.env.example` (authoritative). Key: `VYUHA_MASTER_KEY`, `POSTGRES_URL`, `CLICKHOUSE_URL`, `NATS_URL`, `NEO4J_URI/USER/PASSWORD`, `ANTHROPIC_API_KEY`, `LLM_MODEL_FAST`, `LLM_MODEL_SMART`, `JWT_SIGNING_KEY_PATH`, `PUBLIC_BASE_URL`, `DATA_LAKE_DIR`, `ENGINE_GRPC_ADDR`, `VYUHA_ENV` (`dev|staging|prod`), `LIVE_TRADING_ENABLED` (default `false`).
+**Environment variables required:** see `env.example` (authoritative). Key: `VYUHA_MASTER_KEY`, `POSTGRES_URL`, `CLICKHOUSE_URL`, `NATS_URL`, `NEO4J_URI/USER/PASSWORD`, `ANTHROPIC_API_KEY`, `LLM_MODEL_FAST`, `LLM_MODEL_SMART`, `JWT_SIGNING_KEY_PATH`, `PUBLIC_BASE_URL`, `DATA_LAKE_DIR`, `ENGINE_GRPC_ADDR`, `VYUHA_ENV` (`dev|staging|prod`), `LIVE_TRADING_ENABLED` (default `false`).
 
 ---
 
@@ -520,7 +520,7 @@ Errors: RFC 9457 problem+json `{type, title, status, detail, code}`; risk reject
 vyuha/
 ├── CLAUDE.md                     # agent rules (read first)
 ├── README.md
-├── .env.example
+├── env.example
 ├── Makefile                      # make bootstrap C=… | up PROFILES=… | test | lint | verify | clean-space
 ├── .claude/                      # agents, commands, settings, hooks
 ├── docs/                         # this PRD + specs + ADRs
@@ -654,7 +654,7 @@ The build must install and download **only what the current task needs**, when i
 - [x] Data models are defined (full DDL in `DATA_MODEL.md`)
 - [x] API contracts are specified (`API.md`, `proto/`)
 - [x] Tech stack is fully prescribed (`TECH_STACK.md`)
-- [x] Environment variables are listed (`.env.example`)
+- [x] Environment variables are listed (`env.example`)
 - [x] Project structure is defined
 - [x] Out-of-scope items are clearly separated
 - [ ] All `[DECISION NEEDED]` items are resolved or assigned. #5 resolved (Claude writes all); #2 deferred (personal use only); #3 deferred (private until licensed); #7 resolved (ADR-019: manual import of the NSE ban file); others have defaults
