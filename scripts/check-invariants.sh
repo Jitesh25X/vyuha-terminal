@@ -12,7 +12,7 @@ check "no live broker order endpoints in tests/fixtures" \
   "grep -RInE '(api\.kite\.trade|api(-hft)?\.upstox\.com).*/(orders|gtt)' --include='*' engine/tests quant/tests intel/tests gateway web/e2e 2>/dev/null | grep -v '/fixtures/vcr/'"
 
 check "LIVE_TRADING_ENABLED never true in committed configs" \
-  "grep -RInE 'LIVE_TRADING_ENABLED=(1|true|TRUE|yes)' --exclude-dir=.git --exclude-dir=node_modules --exclude=check-invariants.sh --exclude=guard-bash.sh --exclude='*.md' ."
+  "grep -RInE 'LIVE_TRADING_ENABLED=(1|true|TRUE|yes)' --exclude-dir=.git --exclude-dir=node_modules --exclude=check-invariants.sh --exclude=guard-bash.sh --exclude=cases.tsv --exclude='*.md' ."
 
 check "engine: no system_clock::now outside WallClock" \
   "grep -RIn 'system_clock::now' engine/src engine/include 2>/dev/null | grep -v 'wall_clock'"
@@ -31,5 +31,9 @@ check "desk agents: no mutating tools in agent definitions" \
 
 check "lean: no GPU/CUDA wheels or full Boost requested" \
   "grep -RInE 'nvidia-|cuda|\"boost\"[[:space:]]*[,\]]' --include=pyproject.toml --include=vcpkg.json --include=uv.lock . 2>/dev/null"
+
+# The Bash guard hook must still block (and allow) every case on record, so a hook edit can't silently drop one.
+check "guard hook: every case in .claude/hooks/tests/cases.tsv" \
+  "out=\$(.claude/hooks/tests/run_cases.sh 2>&1) || echo \"\$out\""
 
 exit $fail
