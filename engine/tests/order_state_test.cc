@@ -611,6 +611,7 @@ TEST(Oms, PoolFullIsAnErrorAndSinkFullLeavesNoOrder) {
   ASSERT_TRUE(oms.create(order_of(1)));
   OrderDetails second = order_of(1);
   ASSERT_TRUE(second.client_order_id.assign("client-2"));
+  second.id.bytes.fill(2);  // one id is one order
   EXPECT_EQ(oms.create(second).error().code, ErrorCode::kCapacityExceeded);
 }
 
@@ -812,6 +813,7 @@ TEST(OmsIntake, ManyClientIdsDontCollideInTheIndex) {
   for (int i = 0; i < 64; ++i) {
     OrderDetails d = order_of(1);
     ASSERT_TRUE(d.client_order_id.assign("client-" + std::to_string(i)));
+    d.id.bytes[1] = static_cast<std::uint8_t>(i + 2);  // one id is one order
     const auto taken = oms.intake(d);
     ASSERT_TRUE(taken.has_value());
     EXPECT_FALSE(taken->existing);

@@ -71,7 +71,17 @@ Desk defaults are **seed values for a staging desk**. The owner sets real values
 **Projected state** uses current net position + open orders on the same side (worst case) + this intent.
 
 **Implementation notes**
-- Rules are small classes implementing `IRule { RuleResult eval(const GateContext&) noexcept; }` and are registered in a fixed array. No virtual dispatch in the inner loop: use `std::variant` + `std::visit`, or a function-pointer table.
+- Rules are plain functions, `Outcome (*)(const GateContext&, const OrderDetails&, const GateFacts&) noexcept`, registered in a fixed table of `{RuleCode, fn}` in the order above (`engine/include/vyuha/risk/risk_gate.h`, M2.2). There is no virtual dispatch in the inner loop. `RiskGate::create` refuses a table that's out of order, repeats a code or has an empty slot. The gate attaches the code to each outcome, so a rule can't misreport. A verdict that is neither pass nor warn counts as a reject (fail closed).
+- **Incomplete chain:** a gate whose table lacks any of the 22 rules refuses every live order (`is_paper` false) with `R-LIVE-DISABLED`, before any rule runs. Paper orders still go through the rules it has. So until M2.4 finishes the chain, nothing the gate approves can be live.
+- **Opening vs reducing:** the gate works this out itself (`GateFacts::opening`); callers don't supply it. Until positions exist (M2.6), every order counts as opening, so every rule runs (fail closed). Property (a) below can only be tested from M2.6.
+- **Stateful rules** (`R-DUP`, `R-OPS`): `evaluate` takes the context as `const`, so a rule can't consume a token or record a fingerprint for an order that a later rule rejects. M2.3 decides how they commit after a full pass.
+- `ApprovedOrder` (`risk/approved_order.h`) holds exactly the `OrderDetails` the gate evaluated and its `GateStamp`. It is `final` and move-only, with a private constructor whose only friend is `RiskGate`. Its move is user-provided and empties the source (`spent()`), which also makes it not trivially copyable, so `std::bit_cast` can't forge one. `IOrderSender::send` takes nothing else. `OrderRouter::submit(handle, ApprovedOrder)` refuses an approval that:
+  - is spent;
+  - doesn't match the NEW order field for field;
+  - is for the other venue (a router is built `Venue::kPaper` or `Venue::kLive`, so a paper flag left at its default can't reach a live sender);
+  - is older than `kMaxApprovalAge` (100 ms), or dated in the future, by the OMS clock: evaluating and submitting happen in one pass of the core thread.
+
+  It then records `APPROVED` with the stamp in `order_event.payload.gate` (`ruleset_version`, `eval_ns`, `ts_ns`) and queues exactly the approved details. The gate copies its rule table and refuses a temporary clock. `tests/compile_fail.cc` (ctest `compile_fail.*`) checks that every route around this fails to compile; `scripts/check-invariants.sh` checks for extra friends and casts.
 - `GateContext` holds pre-aggregated per-scope state, updated incrementally on fills and marks. It never iterates all positions per check.
 - Each result records `{code, limit, current, hard}`. Messages are rendered outside the hot path.
 - Property tests (RapidCheck): (a) a position-reducing order is never rejected by rules 14–22; (b) if every limit is at max value, every well-formed order passes; (c) the gate is pure given the context (same input → same output).

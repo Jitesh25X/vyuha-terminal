@@ -218,6 +218,10 @@ std::expected<Intake, Error> Oms::intake(const OrderDetails& details) noexcept {
     }
     return Intake{.handle = *existing, .existing = true};
   }
+  // Once per new order, not per tick, and the pool holds a day's orders: a scan is cheap enough.
+  if (std::ranges::any_of(orders_, [&](const Order& o) { return o.details.id == details.id; })) {
+    return std::unexpected(Error{ErrorCode::kOrderDup, "ORDER_DUP: order id already used"});
+  }
   if (orders_.size() >= capacity_) {
     return std::unexpected(Error{ErrorCode::kCapacityExceeded, "oms: order pool full"});
   }
@@ -310,6 +314,7 @@ std::expected<OrderStatus, Error> Oms::record(Order& order, OrderStatus to, std:
   event.fill_price = details.fill_price;
   event.broker_order_id = broker_id;
   event.modify = modify;
+  event.gate = details.gate;
   // Too long to store is the caller's mismatch to raise; the fill itself must still go in.
   if (!event.broker_trade_id.assign(details.broker_trade_id)) {
     event.broker_trade_id = {};

@@ -122,12 +122,12 @@ class IMarketDataSource {
 }  // namespace vyuha::broker
 
 namespace vyuha::risk {
-class ApprovedOrder {            // only RiskGate can construct
+class ApprovedOrder final {      // only RiskGate can construct; move-only (M2.2: risk/approved_order.h)
   friend class RiskGate;
-  explicit ApprovedOrder(const OrderIntent&, GateStamp) noexcept;
+  ApprovedOrder(const oms::OrderDetails&, const GateStamp&) noexcept;
  public:
-  const OrderIntent& intent() const noexcept;
-  const GateStamp& stamp() const noexcept;   // rule-set version, eval ns, gate id
+  const oms::OrderDetails& order() const noexcept;  // exactly what the gate evaluated
+  const GateStamp& stamp() const noexcept;           // limit-set version, eval ns, ts
 };
 }
 ```

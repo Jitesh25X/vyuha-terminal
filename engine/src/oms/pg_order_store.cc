@@ -188,6 +188,10 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
   if (e.modify.trigger.has_value()) {
     payload += std::format(R"(,"modified_trigger":"{}")", e.modify.trigger->to_string());
   }
+  if (e.gate.has_value()) {
+    payload += std::format(R"(,"gate":{{"ruleset_version":{},"eval_ns":{},"ts_ns":{}}})",
+                           e.gate->ruleset_version, e.gate->eval_ns, e.gate->ts);
+  }
   payload += '}';
   // A retry after an unknown commit finds the row already there, so nothing is written or alerted twice.
   const pqxx::result inserted = tx.exec(

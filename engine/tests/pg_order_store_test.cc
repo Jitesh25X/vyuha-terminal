@@ -14,6 +14,7 @@
 
 #include "pg_temp_db.h"
 #include "require_services.h"
+#include "test_gate.h"
 #include "vyuha/core/clock.h"
 #include "vyuha/oms/oms.h"
 #include "vyuha/oms/order_router.h"
@@ -518,7 +519,7 @@ TEST(PgOrderStore, ARetriedExpiryChangesNothing) {
 class RecordingBroker final : public IOrderSender {
  public:
   // NOLINTNEXTLINE(bugprone-exception-escape): a test's allocation failure may terminate
-  [[nodiscard]] bool send(const Order& /*order*/, std::string_view tag) noexcept override {
+  [[nodiscard]] bool send(const risk::ApprovedOrder& /*order*/, std::string_view tag) noexcept override {
     sent.emplace_back(tag);
     return true;
   }
@@ -551,17 +552,15 @@ TEST(PgOrderStore, ADuplicateAtTheWriterFailsOnlyItselfAndCancelAllStillGoesThro
   RecordingBroker broker;
   PgOrderEventWriter writer(db.url());
   Oms oms(writer, clock, 8);
-  OrderRouter router(oms, writer, broker, 20, 8);
+  OrderRouter router(oms, writer, broker, Venue::kPaper, 20, 8);
 
   OrderDetails duplicate = details(s, 2, 5);  // a new order id, client-1 again
   ASSERT_TRUE(duplicate.client_order_id.assign("client-1"));
   const OrderHandle dup = oms.create(duplicate).value();
-  ASSERT_TRUE(oms.apply(dup, E::kRiskApprove));
-  ASSERT_TRUE(router.submit(dup));
+  ASSERT_TRUE(router.submit(dup, testing::approve(oms.order(dup).details, clock)));
 
   const OrderHandle other = oms.create(details(s, 3, 5)).value();  // in the same batch or the next
-  ASSERT_TRUE(oms.apply(other, E::kRiskApprove));
-  ASSERT_TRUE(router.submit(other));
+  ASSERT_TRUE(router.submit(other, testing::approve(oms.order(other).details, clock)));
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
   while (router.pending() > 0 && std::chrono::steady_clock::now() < deadline) {
@@ -594,6 +593,10 @@ TEST(PgOrderStore, ADuplicateAtTheWriterFailsOnlyItselfAndCancelAllStillGoesThro
       tx.query_value<std::string>("SELECT status::text FROM \"order\" WHERE client_order_id = 'client-1'"),
       "RISK_REJECTED");  // the earlier order is untouched
   EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM \"order\""), 2);
+  EXPECT_EQ(tx.query_value<std::string>(
+                "SELECT e.payload->'gate'->>'ruleset_version' FROM order_event e JOIN \"order\" o ON o.id = "
+                "e.order_id WHERE o.client_order_id = 'client-3' AND e.to_status = 'APPROVED'"),
+            "0");  // the gate's stamp, on the APPROVED event
   const auto alert = tx.exec(
                            "SELECT severity, body->>'client_order_id', body->>'sqlstate' FROM alert_event "
                            "WHERE title = 'ORDER_EVENT_REFUSED'")

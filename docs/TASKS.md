@@ -144,7 +144,17 @@ Current milestone: **M4.1, then M2**
   - deps: M2.1
   - needs: nothing new
   - done: crash test above; property tests over the new table
-- [ ] **M2.2** RiskGate framework (`ApprovedOrder` construct-only-by-gate, rule table, GateContext)
+- [x] **M2.2** RiskGate framework (`ApprovedOrder` construct-only-by-gate, rule table, GateContext) — 2026-11-08: done.
+  - **What was built:** `risk::ApprovedOrder` (final, move-only, private constructor, friend `RiskGate` only, not trivially copyable) and `RiskGate` with a rule table of plain functions in §3 order. The table is validated at `create`, and the first hard reject stops the chain. Warnings are kept; an unknown verdict counts as a reject. A table missing any of the 22 rules refuses every live order with `R-LIVE-DISABLED`. Every order counts as opening until M2.6.
+  - **Order path:** `IOrderSender::send` takes `ApprovedOrder`. `OrderRouter::submit(handle, ApprovedOrder)` records APPROVED with the gate stamp in `order_event.payload.gate`. It refuses an approval that is spent, for another order, for the other `Venue` (a required router argument), or older than 100 ms. Intake refuses a reused order id (carried over from the M2.1b review).
+  - **Done criterion:** ctest `compile_fail.*` compiles a control and 11 forbidden cases (raw `Order` or details to `send`/`submit`, construct, brace, default, copy, derive, `bit_cast`, temporary clock). Each must fail with its own error text. `check-invariants.sh` checks for extra friends and casts. RapidCheck checks the chain against §3; the bench is `BM_RiskGateFullChainPasses`. RISK_ENGINE §3 notes updated.
+  - **risk-reviewer:** APPROVE with P1s, all fixed before commit: `bit_cast` forgery, the paper default reaching a live sender, stale or moved-from approvals. P2s fixed: the borrowed rule table and temporary clock, `ts` in the payload, the duplicate order id, case-specific compile-fail errors.
+  - **Open for the owner:**
+    - (1) `kMaxApprovalAge` = 100 ms is an engineering default (fail closed).
+    - (2) Recording a gate rejection (RISK_REJECTED with stamp and R-code) comes with the intent path; nothing produces intents yet.
+    - (3) M2.3 decides how `R-DUP`/`R-OPS` commit state after a full pass: the context is `const` in `evaluate`.
+    - (4) `is_paper` still defaults to true; the router's venue check covers it, but M2.8's intent path should set it explicitly.
+    - (5) `ApprovedModify` arrives with the modify send path.
   - deps: M2.1
   - needs: nothing new
   - done: Compile-time test that adapters can't receive raw intents
@@ -152,7 +162,7 @@ Current milestone: **M4.1, then M2**
 - [ ] **M2.2b** Outage rules (owner, 2026-11-07): while the order log isn't durable, nothing that adds risk goes out; a queued order has an age limit. New ADR.
   - deps: M2.1b (may start after M2.2; must finish before M2.3)
   - needs: nothing new
-  - done: (1) While `healthy()` is false, these are refused with a clear error code and an alert: new orders, a modify that raises qty, and a price or trigger modify on an opening order. Cancels and `cancel_all` always go through. Until positions exist (M2.6), the OMS can't tell an opening order from a reducing one, so every price or trigger modify counts as opening (fail closed); revisit at M2.6. (2) A queued order (`APPROVED`, not yet sent) older than `ORDER_QUEUE_MAX_AGE` (default 5 s, configurable) is never sent: it becomes `EXPIRED` with an audit row and an alert, in the same transaction as the restart rule (reason e.g. `EXPIRED_IN_QUEUE`). (3) Unit tests for each refused kind and for each cancel path during an outage; age-limit tests on both sides of the limit, plus a Postgres test that the expiry, audit and alert land together.
+  - done: (1) While `healthy()` is false, these are refused with a clear error code and an alert: new orders, a modify that raises qty, and a price or trigger modify on an opening order. Cancels and `cancel_all` always go through. Until positions exist (M2.6), the OMS can't tell an opening order from a reducing one, so every price or trigger modify counts as opening (fail closed); revisit at M2.6. (2) A queued order (`APPROVED`, not yet sent) older than `ORDER_QUEUE_MAX_AGE` (measured from its gate stamp `ts`, M2.2 review) (default 5 s, configurable) is never sent: it becomes `EXPIRED` with an audit row and an alert, in the same transaction as the restart rule (reason e.g. `EXPIRED_IN_QUEUE`). (3) Unit tests for each refused kind and for each cancel path during an outage; age-limit tests on both sides of the limit, plus a Postgres test that the expiry, audit and alert land together.
 - [ ] **M2.3** Rules R-KILL…R-ORDER-SHAPE, R-FAT-FINGER, R-ORDER-VALUE, R-DUP, R-OPS
   - deps: M2.2, M2.2b
   - needs: nothing new

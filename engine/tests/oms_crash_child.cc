@@ -13,13 +13,13 @@
 #include <thread>
 
 #include "file_broker.h"
+#include "test_gate.h"
 #include "vyuha/core/clock.h"
 #include "vyuha/oms/pg_order_store.h"
 
 namespace {
 
 using vyuha::oms::OrderDetails;
-using vyuha::oms::OrderEvent;
 using vyuha::oms::Uuid;
 
 constexpr std::array<std::string_view, 3> kClientOrderIds{"0190a3b4-7c2d-7e11-8f00-aabbccddeeff",
@@ -50,8 +50,8 @@ bool place(std::span<char*> args, std::size_t orders, const vyuha::WallClock& cl
     d.price = vyuha::Price::from_units(10'000);
     d.created_at = clock.now();
     const auto handle = oms.create(d);
-    if (!handle.has_value() || !oms.apply(*handle, OrderEvent::kRiskApprove).has_value() ||
-        !router.submit(*handle).has_value()) {
+    if (!handle.has_value() ||
+        !router.submit(*handle, vyuha::testing::approve(oms.order(*handle).details, clock)).has_value()) {
       return false;
     }
   }
@@ -88,7 +88,7 @@ int run(std::span<char*> args) {
   const vyuha::WallClock clock;
   vyuha::oms::PgOrderEventWriter writer(url);
   vyuha::oms::Oms oms(writer, clock, 8);
-  vyuha::oms::OrderRouter router(oms, writer, broker, kTagLimit, 8);
+  vyuha::oms::OrderRouter router(oms, writer, broker, vyuha::oms::Venue::kPaper, kTagLimit, 8);
 
   if (recover) {
     if (!recover_all(url, oms, router, broker)) {

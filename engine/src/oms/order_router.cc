@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <utility>
 
 #include "quill/LogMacros.h"
 #include "vyuha/util/log.h"
@@ -27,21 +28,39 @@ std::string broker_tag(std::string_view client_order_id, std::size_t limit) {
   return out.size() > limit ? out.substr(out.size() - limit) : out;
 }
 
-OrderRouter::OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, std::size_t tag_limit,
-                         std::size_t capacity)
-    : oms_(&oms), sink_(&sink), sender_(&sender), tag_limit_(tag_limit), capacity_(capacity) {
+OrderRouter::OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, Venue venue,
+                         std::size_t tag_limit, std::size_t capacity)
+    : oms_(&oms), sink_(&sink), sender_(&sender), venue_(venue), tag_limit_(tag_limit), capacity_(capacity) {
   pending_.reserve(capacity);
 }
 
 // NOLINTNEXTLINE(bugprone-exception-escape): within the reserved capacity, so push_back can't allocate
-std::expected<void, Error> OrderRouter::submit(OrderHandle handle) noexcept {
+std::expected<void, Error> OrderRouter::submit(OrderHandle handle, risk::ApprovedOrder approved) noexcept {
   if (pending() >= capacity_ || pending_.size() >= capacity_) {
     return std::unexpected(Error{ErrorCode::kCapacityExceeded, "router: queue full"});
   }
-  if (!oms_->can_send(handle)) {
-    return std::unexpected(Error{ErrorCode::kInvalidArgument, "router: order can't be sent"});
+  if (handle >= oms_->size() || oms_->order(handle).status != OrderStatus::kNew ||
+      oms_->order(handle).needs_reconcile) {
+    return std::unexpected(Error{ErrorCode::kInvalidArgument, "router: order isn't NEW"});
   }
-  pending_.push_back(Pending{.handle = handle, .ticket = sink_->pushed(), .sent = false});
+  if (approved.spent()) {
+    return std::unexpected(Error{ErrorCode::kInvalidArgument, "router: the approval was moved from"});
+  }
+  if (!(approved.order() == oms_->order(handle).details)) {
+    return std::unexpected(Error{ErrorCode::kInvalidArgument, "router: the approval is for another order"});
+  }
+  if (approved.order().is_paper != (venue_ == Venue::kPaper)) {
+    return std::unexpected(Error{ErrorCode::kInvalidArgument, "router: paper and live don't mix"});
+  }
+  if (const Nanos age = oms_->clock().now() - approved.stamp().ts; age < 0 || age > kMaxApprovalAge) {
+    return std::unexpected(Error{ErrorCode::kInvalidArgument, "router: the approval is stale"});
+  }
+  const auto recorded = oms_->apply(handle, OrderEvent::kRiskApprove, {.gate = approved.stamp()});
+  if (!recorded.has_value()) {
+    return std::unexpected(recorded.error());
+  }
+  pending_.push_back(
+      Pending{.handle = handle, .ticket = sink_->pushed(), .sent = false, .approved = std::move(approved)});
   return {};
 }
 
@@ -56,14 +75,13 @@ std::size_t OrderRouter::poll() noexcept {
         break;
       }
       drain_refused();  // after durable(): a refused order's events count as durable, and it must not go out
-      const Order& order = oms_->order(next.handle);
       if (!oms_->can_send(next.handle)) {  // cancelled or otherwise moved on while it waited
         ++head_;
         continue;
       }
       // The tag is rebuilt here, not stored per order; a client id is short and this is once per order.
-      const std::string tag = broker_tag(order.details.client_order_id.view(), tag_limit_);
-      if (!sender_->send(order, tag)) {
+      const std::string tag = broker_tag(next.approved.order().client_order_id.view(), tag_limit_);
+      if (!sender_->send(next.approved, tag)) {
         break;
       }
       next.sent = true;

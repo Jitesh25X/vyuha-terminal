@@ -14,6 +14,7 @@
 #include "vyuha/core/error.h"
 #include "vyuha/core/price.h"
 #include "vyuha/oms/order_state.h"
+#include "vyuha/risk/gate_stamp.h"
 
 namespace vyuha::oms {
 
@@ -32,6 +33,8 @@ class FixedString {
   [[nodiscard]] std::string_view view() const noexcept { return {data_.data(), size_}; }
   [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
   [[nodiscard]] static constexpr std::size_t capacity() noexcept { return N; }
+  // By text: bytes past size() are left over from an earlier assign.
+  friend bool operator==(const FixedString& a, const FixedString& b) noexcept { return a.view() == b.view(); }
 
  private:
   std::array<char, N> data_{};
@@ -75,6 +78,7 @@ struct OrderDetails {
   FixedString<32> tag;
   bool is_paper{true};
   Nanos created_at{0};
+  bool operator==(const OrderDetails&) const = default;
 };
 
 struct Order {
@@ -118,7 +122,8 @@ struct OrderEventRecord {
   FixedString<40> broker_trade_id;
   ModifyRecord modify;
   Nanos ts{0};
-  OrderDetails details;  // set when `from` is nullopt
+  std::optional<risk::GateStamp> gate;  // on APPROVED from the router
+  OrderDetails details;                 // set when `from` is nullopt
 };
 
 // Where events go (Postgres via a ring in production). try_push is called on the core thread and must not
@@ -170,6 +175,9 @@ struct EventDetails {
   std::int32_t modified_qty{0};
   std::optional<Price> modified_price{};    // NOLINT(readability-redundant-member-init)
   std::optional<Price> modified_trigger{};  // NOLINT(readability-redundant-member-init)
+  // kRiskApprove: the gate's stamp, stored in the event's payload. OrderRouter::submit sets it. Recording a
+  // gate rejection with its stamp and R-code comes with the intent path.
+  std::optional<risk::GateStamp> gate{};  // NOLINT(readability-redundant-member-init)
 };
 
 // What recovery reads back from Postgres.
@@ -189,7 +197,8 @@ class Oms {
   Oms(IOrderEventSink& sink, const IClock& clock, std::size_t capacity);
 
   // Idempotent on client_order_id: the same request returns the existing order and records nothing; a
-  // different one is kOrderDup (ORDER_DUP). Otherwise records NEW. kInvalidArgument if the order couldn't be
+  // different one is kOrderDup (ORDER_DUP). An order id already held by another client_order_id is kOrderDup
+  // too: one id is one order. Otherwise records NEW. kInvalidArgument if the order couldn't be
   // stored; kCapacityExceeded if the pool or sink is full. It knows the orders of this run and open ones
   // restored into it; a terminal order of an earlier run is the gateway's check against Postgres (M2.8), and
   // failing that the writer refuses only the duplicate.
@@ -234,6 +243,7 @@ class Oms {
 
   [[nodiscard]] const Order& order(OrderHandle handle) const noexcept { return orders_[handle]; }
   [[nodiscard]] std::size_t size() const noexcept { return orders_.size(); }
+  [[nodiscard]] const IClock& clock() const noexcept { return *clock_; }
   // The M2 exit criterion: zero of these over a paper day.
   [[nodiscard]] std::uint64_t illegal_transitions() const noexcept { return illegal_; }
   // RECON_MISMATCH events raised, including fills recorded out of turn.
