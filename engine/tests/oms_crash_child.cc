@@ -86,7 +86,7 @@ int run(std::span<char*> args) {
   }
   vyuha::testing::FileBroker broker(args[2], point);
   const vyuha::WallClock clock;
-  vyuha::oms::PgOrderEventWriter writer(url);
+  vyuha::oms::PgOrderEventWriter writer(url, nullptr);
   vyuha::oms::Oms oms(writer, clock, 8);
   vyuha::oms::OrderRouter router(oms, writer, broker, vyuha::oms::Venue::kPaper,
                                  {.tag_limit = kTagLimit, .capacity = 8});

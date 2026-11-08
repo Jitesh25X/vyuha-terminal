@@ -84,7 +84,7 @@ add_library(vyuha::risk ALIAS vyuha_risk)
 target_link_libraries(vyuha_risk PUBLIC vyuha::oms PRIVATE vyuha_warnings)
 
 # Market-data bus: protobuf encoders + NATS publisher (md.tick.*, md.bar.*, KV md_last).
-add_library(vyuha_bus src/bus/md_encode.cc src/bus/md_publisher.cc)
+add_library(vyuha_bus src/bus/md_encode.cc src/bus/md_publisher.cc src/bus/system_alert_publisher.cc)
 add_library(vyuha::bus ALIAS vyuha_bus)
 target_link_libraries(vyuha_bus PUBLIC vyuha::core PRIVATE vyuha_warnings cnats::nats_static)
 

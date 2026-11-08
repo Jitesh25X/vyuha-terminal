@@ -29,6 +29,10 @@
       "Read(./secrets/**)",
       "Read(./deploy/secrets/**)",
       "Edit(./db/migrations/000001_init.up.sql)",
+      "Edit(./.claude/hooks/**)",
+      "Write(./.claude/hooks/**)",
+      "Edit(./.claude/settings.json)",
+      "Write(./.claude/settings.json)",
       "Bash(git push --force:*)",
       "Bash(rm -rf /:*)"
     ]

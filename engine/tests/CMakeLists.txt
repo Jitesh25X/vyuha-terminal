@@ -31,8 +31,8 @@ target_compile_definitions(vyuha_tests PRIVATE VYUHA_FIXTURES_DIR="${PROJECT_SOU
 # Order event writer and recovery on a real Postgres, in every preset (needs VYUHA_TEST_POSTGRES_URL).
 add_executable(vyuha_oms_crash_child oms_crash_child.cc)
 target_link_libraries(vyuha_oms_crash_child PRIVATE vyuha_oms_pg vyuha::risk vyuha_warnings Threads::Threads)
-add_executable(vyuha_pg_tests pg_order_store_test.cc oms_crash_test.cc)
-target_link_libraries(vyuha_pg_tests PRIVATE vyuha_oms_pg vyuha::risk libpqxx::pqxx vyuha_warnings Threads::Threads GTest::gtest_main)
+add_executable(vyuha_pg_tests pg_order_store_test.cc oms_crash_test.cc outage_signal_test.cc)
+target_link_libraries(vyuha_pg_tests PRIVATE vyuha_oms_pg vyuha::risk vyuha::bus cnats::nats_static libpqxx::pqxx vyuha_warnings Threads::Threads GTest::gtest_main)
 target_compile_definitions(vyuha_pg_tests PRIVATE VYUHA_MIGRATIONS_DIR="${PROJECT_SOURCE_DIR}/../db/migrations"
                                                   VYUHA_OMS_CRASH_CHILD="$<TARGET_FILE:vyuha_oms_crash_child>")
 add_dependencies(vyuha_pg_tests vyuha_oms_crash_child)

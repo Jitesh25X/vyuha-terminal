@@ -191,4 +191,14 @@ std::size_t encode_snapshot(const md::Tick& t, bool stale, std::span<std::uint8_
   return w.size();
 }
 
+std::size_t encode_system_alert(const SystemAlertFields& a, std::span<std::uint8_t> out) noexcept {
+  Writer w(out);
+  w.text(1, a.code.data(), a.code.size());
+  w.text(2, a.severity.data(), a.severity.size());
+  w.boolean(3, a.active);
+  w.text(4, a.banner.data(), a.banner.size());
+  w.i64(5, a.since_ms);
+  return w.size();
+}
+
 }  // namespace vyuha::bus

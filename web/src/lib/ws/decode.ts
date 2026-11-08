@@ -2,7 +2,7 @@ import { fromBinary } from "@bufbuild/protobuf";
 import { Broker } from "../../gen/vyuha/common/v1/common_pb";
 import { type Bar, FeedStatus_State, type Snapshot, type Tick } from "../../gen/vyuha/marketdata/v1/marketdata_pb";
 import { Channel as PbChannel, type Item, ServerMsgSchema } from "../../gen/vyuha/ws/v1/ws_pb";
-import type { BarLite, Channel, Diff, DepthLite, FeedLite, PrintLite, QuoteLite, SystemLite, WsError } from "./protocol";
+import type { AlertLite, BarLite, Channel, Diff, DepthLite, FeedLite, PrintLite, QuoteLite, SystemLite, WsError } from "./protocol";
 
 // Pure decode + merge for the worker: kept free of WebSocket/DOM so vitest can cover it.
 
@@ -85,6 +85,7 @@ export class Merger {
   private bars: BarLite[] = [];
   private prints: PrintLite[] = [];
   private errors: WsError[] = [];
+  private alerts: AlertLite[] = [];
   private system: SystemLite | undefined;
   /** Ping/Pong round trips since the last takePongs() (clock offset estimation). */
   private pongs: { clientMs: number; serverMs: number; recvMs: number }[] = [];
@@ -92,7 +93,7 @@ export class Merger {
   private lastTrade = new Map<number, { ts: number; price: number }>();
 
   get empty(): boolean {
-    return this.quotes.size === 0 && this.depth.size === 0 && this.bars.length === 0 && this.errors.length === 0 && !this.system;
+    return this.quotes.size === 0 && this.depth.size === 0 && this.bars.length === 0 && this.errors.length === 0 && this.alerts.length === 0 && !this.system;
   }
 
   /** Decodes one binary frame. Returns false for frames that aren't a ServerMsg. */
@@ -113,6 +114,9 @@ export class Merger {
         break;
       case "error":
         this.errors.push({ code: b.value.code, message: b.value.message, ids: idsIn(b.value.message) });
+        break;
+      case "alert":
+        this.alerts.push({ id: b.value.id, severity: b.value.severity, message: alertMessage(b.value.title, b.value.bodyJson) });
         break;
       case "pong":
         this.pongs.push({ clientMs: n(b.value.clientTsMs), serverMs: n(b.value.serverTsMs), recvMs: Date.now() });
@@ -141,6 +145,7 @@ export class Merger {
             marketState: v.value.marketState,
             engineOk: v.value.engineOk,
             dataLatencyMs: n(v.value.dataLatencyMs),
+            banners: v.value.banners,
             feeds: v.value.feeds.map((f) => ({
               accountId: f.accountId,
               broker: BROKERS[f.broker] ?? "unknown",
@@ -178,6 +183,7 @@ export class Merger {
       bars: this.bars,
       prints: this.prints,
       errors: this.errors,
+      alerts: this.alerts,
     };
     if (this.system) d.system = this.system;
     this.quotes = new Map();
@@ -185,6 +191,7 @@ export class Merger {
     this.bars = [];
     this.prints = [];
     this.errors = [];
+    this.alerts = [];
     this.system = undefined;
     return d;
   }
@@ -198,6 +205,17 @@ export class Merger {
   forget(ids: number[]): void {
     for (const id of ids) this.lastTrade.delete(id);
   }
+}
+
+/** The alert's `message` when its body has one, else its title. */
+export function alertMessage(title: string, bodyJson: string): string {
+  try {
+    const body: unknown = JSON.parse(bodyJson);
+    if (typeof body === "object" && body !== null && "message" in body && typeof body.message === "string") return body.message;
+  } catch {
+    // not JSON: fall through to the title
+  }
+  return title;
 }
 
 /** Parses the "[1,2,3]" suffix the gateway appends to MD_NOT_ENTITLED messages. */

@@ -172,6 +172,7 @@ Feeds → intel `ingest` (poll 60 s) → dedupe/cluster → `extract` (fast LLM)
 | `ctx.alert.<user>` | JSON `ContextAlert` | `CTX`, file, 30 days |
 | `jobs.data`, `jobs.backtest` | JSON job | work-queue streams |
 | `sys.health.<service>` | `common.v1.Health` | memory |
+| `sys.alert` | `common.v1.SystemAlert` | core NATS, not stored; repeated while the condition holds (ADR-027) |
 
 ## 8. Failure handling
 | Failure | Behaviour |

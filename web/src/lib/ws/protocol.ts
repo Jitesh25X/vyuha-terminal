@@ -72,6 +72,14 @@ export interface SystemLite {
   engineOk: boolean;
   dataLatencyMs: number;
   feeds: FeedLite[];
+  /** Sticky status bar text for conditions holding now, e.g. the order log being down. */
+  banners: string[];
+}
+
+export interface AlertLite {
+  id: string;
+  severity: string; // info | warn | critical
+  message: string;
 }
 
 export type ConnState = "connecting" | "open" | "closed";
@@ -91,6 +99,7 @@ export interface Diff {
   prints: PrintLite[];
   system?: SystemLite;
   errors: WsError[];
+  alerts: AlertLite[];
   conn?: ConnState;
   /** The server closed with 4401: the main thread refreshes the access token and restarts. */
   authExpired?: boolean;

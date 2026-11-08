@@ -90,13 +90,17 @@ func (h *Hub) hello(ctx context.Context, conn *websocket.Conn) (*client, bool) {
 	accounts, err := h.dir.UserAccounts(actx, claims.Subject)
 	cancel()
 	if err != nil {
+		// Connect anyway, entitled to nothing (fail closed): during a Postgres outage the browser still needs
+		// the status bar and its banner (ADR-027). Market data answers UNAVAILABLE, and housekeeping reconnects
+		// this client once the accounts load, so its subscriptions are replayed against them.
 		h.logger.Error("ws: load user accounts", "user", claims.Subject, "error", err)
-		_ = conn.Close(websocket.StatusInternalError, "try again")
-		return nil, false
+		accounts = nil
 	}
+	accountsLoaded := err == nil
 	c := &client{
 		hub: h, conn: conn, ctx: ctx, userID: claims.Subject, role: claims.Role, expires: claims.ExpiresAt.Time,
-		wake: make(chan struct{}, 1), done: make(chan struct{}),
+		accountsLoaded: accountsLoaded,
+		wake:           make(chan struct{}, 1), done: make(chan struct{}),
 		groups: map[groupKey]*group{}, member: map[wsv1.Channel]map[uint64]*group{}, via: map[subKey]string{},
 	}
 	c.setAccounts(accounts)
@@ -156,20 +160,22 @@ type client struct {
 	done chan struct{}
 	once sync.Once
 
-	mu         sync.Mutex
-	role       string
-	expires    time.Time
-	data       map[string]bool   // data-entitled accounts (ADR-009)
-	visible    map[string]string // accounts whose status the user may see → label
-	candidates map[string][]string
-	groups     map[groupKey]*group
-	member     map[wsv1.Channel]map[uint64]*group
-	via        map[subKey]string // the account each subscription was registered through
-	system     bool
-	queue      [][]byte
-	queued     int
-	slow       bool
-	slowSince  time.Time
+	mu             sync.Mutex
+	role           string
+	expires        time.Time
+	data           map[string]bool   // data-entitled accounts (ADR-009)
+	visible        map[string]string // accounts whose status the user may see → label
+	candidates     map[string][]string
+	groups         map[groupKey]*group
+	member         map[wsv1.Channel]map[uint64]*group
+	via            map[subKey]string // the account each subscription was registered through
+	system         bool
+	alerts         bool // subscribed to CHANNEL_ALERTS
+	accountsLoaded bool // false: connected while Postgres couldn't answer; no market data yet
+	queue          [][]byte
+	queued         int
+	slow           bool
+	slowSince      time.Time
 }
 
 func itemID(it *wsv1.Item) uint64 {
@@ -272,12 +278,24 @@ func (c *client) subscribe(reqID uint32, s *wsv1.Subscribe) {
 			Channel: wsv1.Channel_CHANNEL_SYSTEM,
 			Items:   []*wsv1.Item{{Value: &wsv1.Item_System{System: c.hub.systemStatus(seeAll, visible)}}},
 		}}})
+	case wsv1.Channel_CHANNEL_ALERTS:
+		c.mu.Lock()
+		c.alerts = true
+		c.mu.Unlock()
+		c.send(&wsv1.ServerMsg{ReqId: reqID, Body: &wsv1.ServerMsg_Snapshot{Snapshot: &wsv1.Snapshot{Channel: wsv1.Channel_CHANNEL_ALERTS}}})
 	default:
 		c.sendError(reqID, codeBadRequest, "channel not available yet")
 	}
 }
 
 func (c *client) subscribeMD(reqID uint32, s *wsv1.Subscribe) {
+	c.mu.Lock()
+	loaded := c.accountsLoaded
+	c.mu.Unlock()
+	if !loaded { // not a denial: the answer isn't known yet, and the reconnect replays this subscription
+		c.sendError(reqID, codeUnavailable, "accounts not loaded yet")
+		return
+	}
 	ch := s.GetChannel()
 	interval := defaultConflate
 	if ms := s.GetConflateMs(); ms != 0 {
@@ -414,6 +432,12 @@ func (c *client) snapshotItems(ch wsv1.Channel, ids, denied []uint64) snapshot {
 
 func (c *client) unsubscribe(u *wsv1.Unsubscribe) {
 	ch := u.GetChannel()
+	if ch == wsv1.Channel_CHANNEL_ALERTS {
+		c.mu.Lock()
+		c.alerts = false
+		c.mu.Unlock()
+		return
+	}
 	if ch == wsv1.Channel_CHANNEL_SYSTEM {
 		c.mu.Lock()
 		c.system = false
@@ -623,6 +647,16 @@ func (c *client) flush(g *group) {
 	}}})
 }
 
+// pushAlert delivers a system alert to a subscribed admin: the same people alert_event addresses.
+func (c *client) pushAlert(a *wsv1.Alert) {
+	c.mu.Lock()
+	on := c.alerts && c.role == rbac.RoleAdmin
+	c.mu.Unlock()
+	if on {
+		c.send(&wsv1.ServerMsg{Body: &wsv1.ServerMsg_Alert{Alert: a}})
+	}
+}
+
 func (c *client) pushSystem() {
 	c.mu.Lock()
 	on, seeAll, visible := c.system, rbac.SeesAllAccounts(c.role), c.visible
@@ -732,6 +766,7 @@ func (c *client) housekeeping() {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	refresh := c.hub.now().Add(c.hub.cfg.EntitlementRefresh)
+	retryAccounts := c.hub.now().Add(c.hub.cfg.AccountsRetry)
 	for {
 		select {
 		case <-c.done:
@@ -753,11 +788,33 @@ func (c *client) housekeeping() {
 			c.shutdown()
 			return
 		}
+		c.mu.Lock()
+		waiting := !c.accountsLoaded
+		c.mu.Unlock()
+		if waiting {
+			if !now.Before(retryAccounts) {
+				retryAccounts = now.Add(c.hub.cfg.AccountsRetry)
+				if c.accountsNowLoadable() {
+					_ = c.conn.Close(websocket.StatusTryAgainLater, "accounts available; reconnect")
+					c.shutdown()
+					return
+				}
+			}
+			continue
+		}
 		if !now.Before(refresh) {
 			refresh = now.Add(c.hub.cfg.EntitlementRefresh)
 			c.refreshEntitlements()
 		}
 	}
+}
+
+// accountsNowLoadable says whether the directory can answer for this user again.
+func (c *client) accountsNowLoadable() bool {
+	ctx, cancel := context.WithTimeout(c.ctx, time.Second)
+	defer cancel()
+	_, err := c.hub.dir.UserAccounts(ctx, c.userID)
+	return err == nil
 }
 
 func (c *client) shutdown() {

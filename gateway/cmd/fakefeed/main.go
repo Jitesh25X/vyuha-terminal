@@ -28,6 +28,21 @@ type feed struct {
 	hz         float64
 	batches    atomic.Int64
 	subscribed atomic.Int64
+	outage     atomic.Bool // POST /outage?on=1: the sys.alert relay's frames, for e2e/outage.spec.ts
+}
+
+const outageBanner = "ORDER LOG DOWN: new orders blocked"
+
+func (f *feed) status(subscribed uint32) *wsv1.SystemStatus {
+	st := &wsv1.SystemStatus{
+		MarketState: "open", EngineOk: true, DataLatencyMs: 3,
+		Feeds: []*mdv1.FeedStatus{{AccountId: "perf-acct", Broker: commonv1.Broker_BROKER_UPSTOX,
+			State: mdv1.FeedStatus_STATE_CONNECTED, Label: "PERF01", Subscribed: subscribed}},
+	}
+	if f.outage.Load() {
+		st.Banners = []string{outageBanner}
+	}
+	return st
 }
 
 func main() {
@@ -40,6 +55,10 @@ func main() {
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]int64{"batches": f.batches.Load(), "subscribed": f.subscribed.Load()})
+	})
+	mux.HandleFunc("POST /outage", func(w http.ResponseWriter, r *http.Request) {
+		f.outage.Store(r.URL.Query().Get("on") == "1")
+		w.WriteHeader(http.StatusNoContent)
 	})
 	srv := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	slog.Info("fakefeed listening", "addr", *addr, "hz", *hz)
@@ -70,11 +89,25 @@ func (f *feed) serve(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		t := time.NewTicker(time.Duration(float64(time.Second) / f.hz))
 		defer t.Stop()
+		outage := false
 		for seq := int64(1); ; seq++ {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+			}
+			if on := f.outage.Load(); on != outage {
+				outage = on
+				if on {
+					_ = send(&wsv1.ServerMsg{Body: &wsv1.ServerMsg_Alert{Alert: &wsv1.Alert{
+						Id: "ORDER_LOG_OUTAGE:1", Severity: "critical", Title: "ORDER_LOG_OUTAGE",
+						BodyJson: `{"message":"` + outageBanner + `"}`, TsMs: time.Now().UnixMilli(),
+					}}})
+				}
+				_ = send(&wsv1.ServerMsg{Body: &wsv1.ServerMsg_Updates{Updates: &wsv1.UpdateBatch{
+					Channel: wsv1.Channel_CHANNEL_SYSTEM, Items: []*wsv1.Item{{Value: &wsv1.Item_System{System: f.status(0)}}},
+					ServerTsMs: time.Now().UnixMilli(),
+				}}})
 			}
 			mu.Lock()
 			now := time.Now()
@@ -125,11 +158,7 @@ func (f *feed) serve(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				n := uint32(len(ids)) //nolint:gosec // G115: bounded by the 2,000-key limit
 				mu.Unlock()
-				items = []*wsv1.Item{{Value: &wsv1.Item_System{System: &wsv1.SystemStatus{
-					MarketState: "open", EngineOk: true, DataLatencyMs: 3,
-					Feeds: []*mdv1.FeedStatus{{AccountId: "perf-acct", Broker: commonv1.Broker_BROKER_UPSTOX,
-						State: mdv1.FeedStatus_STATE_CONNECTED, Label: "PERF01", Subscribed: n}},
-				}}}}
+				items = []*wsv1.Item{{Value: &wsv1.Item_System{System: f.status(n)}}}
 			} else if b.Subscribe.GetChannel() == wsv1.Channel_CHANNEL_QUOTE {
 				mu.Lock()
 				for _, k := range b.Subscribe.GetKeys() {

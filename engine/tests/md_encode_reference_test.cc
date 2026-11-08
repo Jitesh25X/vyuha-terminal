@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "vyuha/bus/md_encode.h"
+#include "vyuha/common/v1/common.pb.h"
 #include "vyuha/marketdata/v1/marketdata.pb.h"
 
 namespace {
@@ -122,6 +123,23 @@ TEST(MdEncodeReference, WorstCaseTickFitsTheBuffer) {
   EXPECT_EQ(p.last_trade_ts_ns(), kMin);
   std::array<std::uint8_t, vyuha::bus::kMaxSnapshotBytes> sbuf{};
   EXPECT_GT(vyuha::bus::encode_snapshot(t, true, sbuf), 0U);
+}
+
+TEST(MdEncodeReference, SystemAlert) {
+  std::array<std::uint8_t, vyuha::bus::kMaxSystemAlertBytes> buf{};
+  const std::size_t n = vyuha::bus::encode_system_alert({.code = "ORDER_LOG_OUTAGE",
+                                                         .severity = "critical",
+                                                         .banner = "ORDER LOG DOWN: new orders blocked",
+                                                         .active = true,
+                                                         .since_ms = 1'793'190'900'000},
+                                                        buf);
+  vyuha::common::v1::SystemAlert a;
+  ASSERT_TRUE(a.ParseFromArray(buf.data(), static_cast<int>(n)));
+  EXPECT_EQ(a.code(), "ORDER_LOG_OUTAGE");
+  EXPECT_EQ(a.severity(), "critical");
+  EXPECT_TRUE(a.active());
+  EXPECT_EQ(a.banner(), "ORDER LOG DOWN: new orders blocked");
+  EXPECT_EQ(a.since_ms(), 1'793'190'900'000);
 }
 
 TEST(MdEncodeReference, BarAndSnapshot) {

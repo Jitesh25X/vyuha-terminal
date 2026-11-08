@@ -1,8 +1,9 @@
-import { create, toBinary } from "@bufbuild/protobuf";
+import { create, type MessageInitShape, toBinary } from "@bufbuild/protobuf";
 import { describe, expect, it } from "vitest";
 import { TickSchema } from "../../gen/vyuha/marketdata/v1/marketdata_pb";
 import { Channel, ServerMsgSchema } from "../../gen/vyuha/ws/v1/ws_pb";
-import { idsIn, Merger } from "./decode";
+import { toastLevel } from "../../stores/toasts";
+import { alertMessage, idsIn, Merger } from "./decode";
 
 const tick = (id: number, ltp: number, tsMs: number, ltq = 1) =>
   create(TickSchema, {
@@ -24,6 +25,38 @@ const updates = (...ticks: ReturnType<typeof tick>[]) =>
       },
     }),
   );
+
+describe("Merger: outage signal", () => {
+  const frame = (body: NonNullable<MessageInitShape<typeof ServerMsgSchema>["body"]>) => toBinary(ServerMsgSchema, create(ServerMsgSchema, { body }));
+
+  it("turns an alert frame into one toast's worth of text", () => {
+    const m = new Merger();
+    m.push(frame({ case: "alert", value: { id: "ORDER_LOG_OUTAGE:1", severity: "critical", title: "ORDER_LOG_OUTAGE", bodyJson: '{"message":"ORDER LOG DOWN: new orders blocked"}' } }));
+    expect(m.empty).toBe(false);
+    expect(m.take().alerts).toEqual([{ id: "ORDER_LOG_OUTAGE:1", severity: "critical", message: "ORDER LOG DOWN: new orders blocked" }]);
+    expect(m.take().alerts).toEqual([]);
+  });
+
+  it("carries the status bar banners and shows none once they clear", () => {
+    const m = new Merger();
+    const status = (banners: string[]) => frame({ case: "updates", value: { channel: Channel.SYSTEM, items: [{ value: { case: "system", value: { marketState: "open", engineOk: true, banners } } }] } });
+    m.push(status(["ORDER LOG DOWN: new orders blocked"]));
+    expect(m.take().system?.banners).toEqual(["ORDER LOG DOWN: new orders blocked"]);
+    m.push(status([]));
+    expect(m.take().system?.banners).toEqual([]);
+  });
+
+  it("falls back to the title when the body has no message", () => {
+    expect(alertMessage("X", "{}")).toBe("X");
+    expect(alertMessage("X", "not json")).toBe("X");
+  });
+
+  it("never plays down an unknown severity", () => {
+    expect(toastLevel("critical")).toBe("error");
+    expect(toastLevel("???")).toBe("error");
+    expect(toastLevel("warn")).toBe("warn");
+  });
+});
 
 describe("Merger", () => {
   it("keeps the latest quote per instrument and turns new trades into prints", () => {

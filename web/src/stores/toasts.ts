@@ -18,6 +18,13 @@ export function pushToast(level: Toast["level"], text: string): void {
   setTimeout(() => dismissToast(id), TTL_MS);
 }
 
+/** An alert's severity as a toast level; anything unknown shows as an error rather than being played down. */
+export function toastLevel(severity: string): Toast["level"] {
+  if (severity === "info") return "info";
+  if (severity === "warn") return "warn";
+  return "error";
+}
+
 export function dismissToast(id: number): void {
   useToasts.setState((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
 }

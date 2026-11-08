@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { resetMd, useMd } from "../../stores/md";
+import { pushToast, toastLevel } from "../../stores/toasts";
 import { accessToken, useSession } from "../../stores/session";
 import { refreshSession } from "../api/client";
 import { histogram, percentile, Ring } from "./latency";
@@ -214,6 +215,7 @@ function apply(d: Diff): void {
     patch.denied = map;
   }
   for (const e of d.errors) if (e.code !== "MD_NOT_ENTITLED") console.warn(`market data: ${e.code}: ${e.message}`);
+  for (const a of d.alerts) pushToast(toastLevel(a.severity), a.message);
   if (d.system) patch.system = d.system;
   if (d.conn) patch.conn = d.conn;
   if (Object.keys(patch).length > 0) useMd.setState(patch);

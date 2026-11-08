@@ -40,3 +40,12 @@ message Health {
   Timestamp ts = 4;
   map<string, string> checks = 5;
 }
+
+// NATS `sys.alert` (core NATS, not persisted): a condition that must reach the desk even with Postgres down.
+message SystemAlert {
+  string code = 1; // e.g. ORDER_LOG_OUTAGE
+  string severity = 2; // info | warn | critical
+  bool active = 3; // true: holding, re-published until it ends; false: it ended
+  string banner = 4; // sticky status bar text while active
+  int64 since_ms = 5; // UTC ms this occurrence began; identifies it, so it raises one toast
+}

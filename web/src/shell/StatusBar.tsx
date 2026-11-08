@@ -76,6 +76,11 @@ export function StatusBar() {
   return (
     <footer className="h-[22px] flex items-center gap-4 px-2 bg-panel-header border-t border-line whitespace-nowrap overflow-hidden" aria-label="Status">
       <span className="text-paper border border-paper px-1 font-semibold">PAPER</span>
+      {system?.banners.map((b) => (
+        <span key={b} role="alert" className="bg-down text-black px-1 font-semibold">
+          {conn === "open" ? b : `${b} (last known)`}
+        </span>
+      ))}
       {market && <span className={market === "OPEN" ? "text-up" : "text-muted"}>{market}</span>}
       <span className="flex items-center gap-3" aria-label="Broker feeds">
         {system && system.feeds.length === 0 && <span className="text-muted">no data feeds</span>}
