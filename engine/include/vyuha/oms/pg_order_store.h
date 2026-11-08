@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "vyuha/core/error.h"
+#include "vyuha/core/outage_signal.h"
 #include "vyuha/core/spsc_ring.h"
 #include "vyuha/oms/oms.h"
 
@@ -28,7 +29,9 @@ namespace vyuha::oms {
 // logs what was lost; recovery reconciles it with the broker.
 class PgOrderEventWriter final : public IOrderEventSink {
  public:
-  explicit PgOrderEventWriter(std::string url);
+  // `outage_signal` carries the outage to the desk without Postgres, and must outlive the writer. Required,
+  // so the wiring can't be forgotten; only a test passes nullptr.
+  PgOrderEventWriter(std::string url, IOutageSignal* outage_signal);
   PgOrderEventWriter(const PgOrderEventWriter&) = delete;
   PgOrderEventWriter& operator=(const PgOrderEventWriter&) = delete;
   PgOrderEventWriter(PgOrderEventWriter&&) = delete;
@@ -64,11 +67,15 @@ class PgOrderEventWriter final : public IOrderEventSink {
   // Writer thread. After the first commit following an outage, and again while idle until it lands (one try
   // per kOutageReportRetry): one ORDER_LOG_OUTAGE alert with the outage's length and the refusal counts.
   void report_outage_if_due() noexcept;
+  void signal_outage_started() noexcept;
+  void signal_outage_ended() noexcept;
   [[nodiscard]] bool report_outage() noexcept;
   // At stop: an outage report that never landed is at least in the log.
   void log_unreported_outage() noexcept;
 
   std::string url_;
+  IOutageSignal* outage_signal_{nullptr};
+  bool outage_signalled_{false};  // writer thread only
   std::unique_ptr<SpscRing<OrderEventRecord, kRingSize>> ring_;
   std::unique_ptr<SpscRing<Uuid, kRefusedRingSize>> refused_;
   std::unordered_set<std::string> quarantined_;  // writer thread only: their later events are skipped

@@ -110,6 +110,7 @@ message SystemStatus {
   repeated vyuha.marketdata.v1.FeedStatus feeds = 2;
   bool engine_ok = 3;
   int64 data_latency_ms = 4;
+  repeated string banners = 5; // sticky status bar text for conditions holding now (sys.alert)
 }
 
 message Alert {

@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 import { create, type MessageInitShape, toBinary } from "@bufbuild/protobuf";
-import { ClientMsgSchema } from "../../gen/vyuha/ws/v1/ws_pb";
+import { ClientMsgSchema, Channel as PbChannel } from "../../gen/vyuha/ws/v1/ws_pb";
 import { channelEnum, Merger } from "./decode";
 import { bestSample, type ClockSample, clockSample } from "./latency";
 import type { Channel, ConnState, Diff, FromWorker, ToWorker } from "./protocol";
@@ -44,8 +44,14 @@ function sendSubscribe(channel: Channel, ids: number[], conflateMs: number): voi
   send({ body: { case: "subscribe", value: { channel: channelEnum(channel), keys: ids.map(String), conflateMs } } });
 }
 
+/** The status bar's two feeds: `system`, and `alerts` for the toasts that go with its banners. */
+function subscribeStatus(): void {
+  sendSubscribe("system", [], 0);
+  send({ body: { case: "subscribe", value: { channel: PbChannel.ALERTS, keys: [], conflateMs: 0 } } });
+}
+
 function resubscribeAll(): void {
-  if (wantSystem) sendSubscribe("system", [], 0);
+  if (wantSystem) subscribeStatus();
   for (const [channel, ids] of desired) {
     const byConflate = new Map<number, number[]>();
     for (const [id, c] of ids) byConflate.set(c, [...(byConflate.get(c) ?? []), id]);
@@ -140,7 +146,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
     case "sub": {
       if (m.channel === "system") {
         wantSystem = true;
-        sendSubscribe("system", [], 0);
+        subscribeStatus();
         break;
       }
       let ids = desired.get(m.channel);
@@ -153,6 +159,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
       if (m.channel === "system") {
         wantSystem = false;
         send({ body: { case: "unsubscribe", value: { channel: channelEnum("system"), keys: [] } } });
+        send({ body: { case: "unsubscribe", value: { channel: PbChannel.ALERTS, keys: [] } } });
         break;
       }
       const ids = desired.get(m.channel);

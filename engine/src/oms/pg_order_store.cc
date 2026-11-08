@@ -362,8 +362,9 @@ constexpr Error kUnreadable{ErrorCode::kOrderRecovery, "oms: an open order in Po
 
 }  // namespace
 
-PgOrderEventWriter::PgOrderEventWriter(std::string url)
+PgOrderEventWriter::PgOrderEventWriter(std::string url, IOutageSignal* outage_signal)
     : url_(std::move(url)),
+      outage_signal_(outage_signal),
       ring_(std::make_unique<SpscRing<OrderEventRecord, kRingSize>>()),
       refused_(std::make_unique<SpscRing<Uuid, kRefusedRingSize>>()),
       thread_([this](const std::stop_token& stop) { run(stop); }) {}
@@ -506,13 +507,12 @@ void PgOrderEventWriter::run(const std::stop_token& stop) {
       healthy_.store(true, std::memory_order_release);
       backoff.reset();
       batch.clear();
+      signal_outage_ended();
       report_outage_if_due();
       continue;
     }
     healthy_.store(false, std::memory_order_release);
-    if (!outage_since_.has_value()) {
-      outage_since_ = std::chrono::steady_clock::now();
-    }
+    signal_outage_started();
     if (stop.stop_requested()) {
       const auto now = std::chrono::steady_clock::now();
       if (!give_up.has_value()) {
@@ -535,6 +535,37 @@ void PgOrderEventWriter::note_outage_refusal(OutageRefusal kind) noexcept {
   if (i < outage_refusals_.size()) {
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index): checked
     outage_refusals_[i].fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape): Quill logging
+void PgOrderEventWriter::signal_outage_started() noexcept {
+  if (!outage_since_.has_value()) {
+    outage_since_ = std::chrono::steady_clock::now();
+  }
+  if (outage_signalled_) {
+    return;
+  }
+  outage_signalled_ = true;
+  if (quill::Logger* logger = log::engine(); logger != nullptr) {
+    LOG_ERROR(logger, "ORDER_LOG_OUTAGE: the order log is unavailable; new orders are blocked");
+  }
+  if (outage_signal_ != nullptr) {
+    outage_signal_->outage_started();
+  }
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape): Quill logging
+void PgOrderEventWriter::signal_outage_ended() noexcept {
+  if (!outage_signalled_) {
+    return;
+  }
+  outage_signalled_ = false;
+  if (quill::Logger* logger = log::engine(); logger != nullptr) {
+    LOG_ERROR(logger, "ORDER_LOG_OUTAGE: the order log is back; new orders are accepted again");
+  }
+  if (outage_signal_ != nullptr) {
+    outage_signal_->outage_ended();
   }
 }
 

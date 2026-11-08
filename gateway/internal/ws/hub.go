@@ -33,6 +33,8 @@ type Config struct {
 	WriteTimeout       time.Duration // a frame that can't be written in this time closes the connection
 	SessionPoll        time.Duration // engine GetSessions (feed ids, status bar)
 	EntitlementRefresh time.Duration // re-read a connected user's account mappings
+	AccountsRetry      time.Duration // how often to retry a connection whose accounts couldn't be loaded
+	SystemAlertTTL     time.Duration // a sys.alert banner not re-published for this long lapses
 	InstrumentTTL      time.Duration
 	MaxQuoteKeys       int
 	MaxDepthKeys       int
@@ -50,6 +52,8 @@ func DefaultConfig() Config {
 		WriteTimeout:       15 * time.Second,
 		SessionPoll:        time.Second,
 		EntitlementRefresh: 30 * time.Second,
+		AccountsRetry:      3 * time.Second,
+		SystemAlertTTL:     15 * time.Second,
 		InstrumentTTL:      time.Hour,
 		MaxQuoteKeys:       2000,
 		MaxDepthKeys:       50,
@@ -159,6 +163,8 @@ type Hub struct {
 	applied      map[string]*applied
 	latencyMS    float64 // EWMA of engine receive → gateway receive
 	marketState  string
+	banners      map[string]*banner // sys.alert conditions holding now, by code
+	toasted      map[string]int64   // code → since_ms of the occurrence last alerted, surviving a lapsed banner
 
 	instMu sync.Mutex
 	inst   map[uint64]cachedInstrument
@@ -185,6 +191,8 @@ func New(cfg Config, verify Verifier, dir Directory, engine Engine, src Source, 
 		applied:      map[string]*applied{},
 		inst:         map[uint64]cachedInstrument{},
 		marketState:  "closed",
+		banners:      map[string]*banner{},
+		toasted:      map[string]int64{},
 		kick:         make(chan struct{}, 1),
 	}
 }
@@ -216,6 +224,13 @@ func (h *Hub) Run(ctx context.Context) {
 			}
 		}
 	}()
+	if alerts, ok := h.src.(SystemAlertSource); ok {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.runSystemAlerts(ctx, alerts)
+		}()
+	}
 	poll := time.NewTicker(h.cfg.SessionPoll)
 	defer poll.Stop()
 	h.poll(ctx)
@@ -228,6 +243,7 @@ func (h *Hub) Run(ctx context.Context) {
 		case <-poll.C:
 			h.poll(ctx)
 			h.reconcile(ctx)
+			h.expireBanners()
 			h.pushSystem()
 		case <-h.kick:
 			h.reconcile(ctx)
@@ -616,10 +632,7 @@ func (h *Hub) instruments(ctx context.Context, ids []uint64) (map[uint64]Instrum
 
 func (h *Hub) pushSystem() {
 	h.mu.Lock()
-	clients := make([]*client, 0, len(h.clients))
-	for c := range h.clients {
-		clients = append(clients, c)
-	}
+	clients := h.clientList()
 	h.mu.Unlock()
 	for _, c := range clients {
 		c.pushSystem()
@@ -630,7 +643,7 @@ func (h *Hub) pushSystem() {
 func (h *Hub) systemStatus(seeAll bool, visible map[string]string) *wsv1.SystemStatus {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	st := &wsv1.SystemStatus{MarketState: h.marketState, EngineOk: h.engineOK, DataLatencyMs: int64(h.latencyMS + 0.5)}
+	st := &wsv1.SystemStatus{MarketState: h.marketState, EngineOk: h.engineOK, DataLatencyMs: int64(h.latencyMS + 0.5), Banners: h.bannerTexts()}
 	for id, s := range h.sessions {
 		label, mapped := visible[id]
 		if !seeAll && !mapped {

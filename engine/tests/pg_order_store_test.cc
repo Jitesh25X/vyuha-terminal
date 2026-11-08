@@ -3,6 +3,7 @@
 
 #include "vyuha/oms/pg_order_store.h"
 
+#include <atomic>
 #include <chrono>
 #include <optional>
 #include <string>
@@ -105,7 +106,7 @@ TEST(PgOrderStore, EveryTransitionIsWrittenAndOpenOrdersComeBack) {
   OrderHandle open_handle = 0;
   OrderHandle unknown_handle = 0;
   {
-    PgOrderEventWriter writer(db.url());
+    PgOrderEventWriter writer(db.url(), nullptr);
     Oms oms(writer, clock, 8);
     open_handle = *oms.create(details(s, 1, 10));
     ASSERT_TRUE(oms.apply(open_handle, E::kRiskApprove));
@@ -185,7 +186,7 @@ TEST(PgOrderStore, EveryTransitionIsWrittenAndOpenOrdersComeBack) {
 
   // A restarted engine carries on from the stored seq.
   {
-    PgOrderEventWriter writer(db.url());
+    PgOrderEventWriter writer(db.url(), nullptr);
     Oms oms(writer, clock, 8);
     const auto h = oms.restore(open);
     ASSERT_TRUE(h.has_value());
@@ -215,7 +216,7 @@ TEST(PgOrderStore, ADisagreementBetweenOrderAndItsEventsIsRefused) {
   const Seeded s = seed(db.url());
   const TickingClock clock;
   {
-    PgOrderEventWriter writer(db.url());
+    PgOrderEventWriter writer(db.url(), nullptr);
     Oms oms(writer, clock, 1);
     const OrderHandle h = *oms.create(details(s, 1, 1));
     ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
@@ -246,7 +247,7 @@ TEST(PgOrderStore, ARetryAfterAnUnknownCommitChangesNothing) {
   first.seq = 1;
   first.ts = d.created_at;
   {
-    PgOrderEventWriter writer(db.url());
+    PgOrderEventWriter writer(db.url(), nullptr);
     ASSERT_TRUE(writer.try_push(first));
     ASSERT_TRUE(writer.try_push(first));  // as a retried batch would
     wait_written(writer, 2);
@@ -271,7 +272,7 @@ TEST(PgOrderStore, EventsWaitOutAnOutageAndArriveInOrder) {
                                        (on ? "true" : "false"));
   };
   {
-    PgOrderEventWriter writer(db.url());
+    PgOrderEventWriter writer(db.url(), nullptr);
     Oms oms(writer, clock, 1);
     allow(false);
     const OrderHandle h = *oms.create(details(s, 1, 2));
@@ -312,6 +313,135 @@ TEST(PgOrderStore, EventsWaitOutAnOutageAndArriveInOrder) {
             1'767'000'000'123'456);
 }
 
+// M2.2c: every kind of refusal reaches the recovery alert, and the desk signal fires once each way.
+struct RecordingSignal final : IOutageSignal {
+  void outage_started() noexcept override { started.fetch_add(1); }
+  void outage_ended() noexcept override { ended.fetch_add(1); }
+  std::atomic<int> started{0};
+  std::atomic<int> ended{0};
+};
+
+TEST(PgOrderStore, TheOutageAlertCountsEveryKindOfRefusal) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  pqxx::connection control(admin);
+  const auto allow = [&](bool on) {
+    pqxx::nontransaction(control).exec("ALTER DATABASE " + db.name() + " ALLOW_CONNECTIONS " +
+                                       (on ? "true" : "false"));
+  };
+  RecordingSignal signal;
+  {
+    PgOrderEventWriter writer(db.url(), &signal);
+    Oms oms(writer, clock, 2);
+    const OrderHandle open = oms.create(details(s, 1, 10)).value();
+    ASSERT_TRUE(oms.apply(open, E::kRiskApprove));
+    ASSERT_TRUE(oms.apply(open, E::kSend));
+    ASSERT_TRUE(oms.apply(open, E::kBrokerAck, {.broker_order_id = "B1"}));
+    const OrderHandle other = oms.create(details(s, 2, 10)).value();
+    wait_written(writer, 5);
+    EXPECT_EQ(signal.started.load(), 0);
+
+    allow(false);
+    ASSERT_TRUE(oms.apply(other, E::kRiskApprove));  // the write the writer finds it can't make
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (writer.healthy() && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_FALSE(writer.healthy());
+
+    const Price moved = Price::from_units(25'000'000);
+    const auto refused = [&](const EventDetails& e) {
+      EXPECT_EQ(oms.apply(open, E::kModifyRequest, e).error().code, ErrorCode::kOrderLogUnavailable);
+    };
+    refused({.modified_qty = 11});
+    refused({.modified_qty = 12});
+    refused({.modified_price = moved});
+    refused({.modified_trigger = moved});
+    refused({.modified_qty = 5, .modified_price = moved});
+    EXPECT_EQ(oms.create(details(s, 3, 2)).error().code, ErrorCode::kOrderLogUnavailable);
+
+    allow(true);
+    wait_written(writer, 6);
+    while (!writer.healthy() && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_TRUE(writer.healthy());
+  }
+  EXPECT_EQ(signal.started.load(), 1);
+  EXPECT_EQ(signal.ended.load(), 1);
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  const auto alert =
+      tx.exec(
+            "SELECT (body->>'refused_new_orders')::int, (body->>'refused_qty_raises')::int, "
+            "(body->>'refused_price_modifies')::int FROM alert_event WHERE title = 'ORDER_LOG_OUTAGE'")
+          .one_row();
+  EXPECT_EQ(alert[0].as<int>(), 1);
+  EXPECT_EQ(alert[1].as<int>(), 2);
+  EXPECT_EQ(alert[2].as<int>(), 3);
+}
+
+// M2.2c: Postgres takes the events again but refuses the alert. With no further events, the idle writer
+// retries it until it lands, and writes it exactly once.
+TEST(PgOrderStore, AnOutageAlertThatFailsIsRetriedWhileIdleAndLandsOnce) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  pqxx::connection control(admin);
+  const auto allow = [&](bool on) {
+    pqxx::nontransaction(control).exec("ALTER DATABASE " + db.name() + " ALLOW_CONNECTIONS " +
+                                       (on ? "true" : "false"));
+  };
+  const auto sql = [&](const std::string& statement) {
+    pqxx::connection c(db.url());
+    pqxx::nontransaction(c).exec(statement);
+  };
+  const auto alerts = [&] {
+    pqxx::connection c(db.url());
+    return pqxx::read_transaction(c).query_value<int>(
+        "SELECT count(*) FROM alert_event WHERE title = 'ORDER_LOG_OUTAGE'");
+  };
+  sql(R"(CREATE FUNCTION refuse_outage_alert() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.title = 'ORDER_LOG_OUTAGE' THEN RAISE EXCEPTION 'refused by the test'; END IF;
+           RETURN NEW;
+         END $$)");
+  sql("CREATE TRIGGER refuse BEFORE INSERT ON alert_event FOR EACH ROW EXECUTE FUNCTION "
+      "refuse_outage_alert()");
+
+  PgOrderEventWriter writer(db.url(), nullptr);
+  Oms oms(writer, clock, 1);
+  allow(false);
+  ASSERT_TRUE(oms.create(details(s, 1, 2)));
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (writer.healthy() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_FALSE(writer.healthy());
+  allow(true);
+  wait_written(writer, 1);
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  EXPECT_EQ(alerts(), 0);  // it was tried and refused
+
+  sql("DROP TRIGGER refuse ON alert_event");
+  while (alerts() == 0 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  EXPECT_EQ(alerts(), 1);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1'300));  // past another retry interval
+  EXPECT_EQ(alerts(), 1);
+  EXPECT_EQ(writer.written(), 1U);  // the retry owed nothing to a new event
+}
+
 TEST(PgOrderStore, ALateFillIsStoredAndAlertsAdminsOnce) {
   const std::string admin = admin_url();
   if (admin.empty()) {
@@ -321,7 +451,7 @@ TEST(PgOrderStore, ALateFillIsStoredAndAlertsAdminsOnce) {
   const Seeded s = seed(db.url());
   const TickingClock clock;
   {
-    PgOrderEventWriter writer(db.url());
+    PgOrderEventWriter writer(db.url(), nullptr);
     Oms oms(writer, clock, 1);
     const OrderHandle h = oms.create(details(s, 1, 10)).value();
     ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
@@ -360,7 +490,7 @@ TEST(PgOrderStore, AnExpiredOrderIsAuditedAlertedOnceAndStaysOutOfRecovery) {
   const Seeded s = seed(db.url());
   const TickingClock clock;
   {
-    PgOrderEventWriter writer(db.url());
+    PgOrderEventWriter writer(db.url(), nullptr);
     Oms oms(writer, clock, 1);
     const OrderHandle h = oms.create(details(s, 1, 10)).value();
     ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
@@ -414,7 +544,7 @@ TEST(PgOrderStore, TradeIdsAndModifiesSurviveARestart) {
   const Price fill_price = Price::from_units(24'500'000);
   const Price new_price = Price::from_units(25'000'000);
   {
-    PgOrderEventWriter writer(db.url());
+    PgOrderEventWriter writer(db.url(), nullptr);
     Oms oms(writer, clock, 1);
     const OrderHandle h = oms.create(details(s, 1, 10)).value();
     ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
@@ -455,7 +585,7 @@ TEST(PgOrderStore, TradeIdsAndModifiesSurviveARestart) {
   ASSERT_FALSE(back.trade_ids.empty());
   EXPECT_EQ(back.trade_ids.front(), "T\"1");
 
-  PgOrderEventWriter writer(db.url());
+  PgOrderEventWriter writer(db.url(), nullptr);
   Oms oms(writer, clock, 1);
   const OrderHandle h = oms.restore(back).value();
   ASSERT_TRUE(
@@ -473,7 +603,7 @@ TEST(PgOrderStore, ADifferentEventOnATakenSeqIsRefusedAndChangesNothing) {
   const TempDb db(admin);
   const Seeded s = seed(db.url());
   const TickingClock clock;
-  PgOrderEventWriter writer(db.url());
+  PgOrderEventWriter writer(db.url(), nullptr);
   Oms oms(writer, clock, 1);
   const OrderHandle h = oms.create(details(s, 1, 10)).value();
   ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
@@ -508,7 +638,7 @@ TEST(PgOrderStore, ARetriedExpiryChangesNothing) {
   event.order_id = details(s, 1, 10).id;
   {
     const TickingClock clock;
-    PgOrderEventWriter writer(db.url());
+    PgOrderEventWriter writer(db.url(), nullptr);
     Oms oms(writer, clock, 1);
     const OrderHandle h = oms.create(details(s, 1, 10)).value();
     ASSERT_TRUE(oms.apply(h, E::kRiskApprove));
@@ -557,7 +687,7 @@ TEST(PgOrderStore, AStaleApprovalIsRejectedAuditedAndAlertedTogether) {
   const SimClock gate_clock(clock.now() - kDefaultApprovalMaxAge - 1'000);
   RecordingBroker broker;
   {
-    PgOrderEventWriter writer(db.url());
+    PgOrderEventWriter writer(db.url(), nullptr);
     Oms oms(writer, clock, 2);
     OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8});
     const OrderHandle h = oms.create(details(s, 1, 10)).value();
@@ -595,7 +725,7 @@ TEST(PgOrderStore, AnOrderExpiredInTheQueueIsAuditedAndAlertedTogether) {
   SimClock clock(1'767'000'000'000'000'000);
   RecordingBroker broker;
   {
-    PgOrderEventWriter writer(db.url());
+    PgOrderEventWriter writer(db.url(), nullptr);
     Oms oms(writer, clock, 2);
     OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8});
     const OrderHandle h = oms.create(details(s, 1, 10)).value();
@@ -630,14 +760,14 @@ TEST(PgOrderStore, ADuplicateAtTheWriterFailsOnlyItselfAndCancelAllStillGoesThro
   const Seeded s = seed(db.url());
   const TickingClock clock;
   {
-    PgOrderEventWriter earlier_run(db.url());
+    PgOrderEventWriter earlier_run(db.url(), nullptr);
     Oms oms(earlier_run, clock, 1);
     const OrderHandle h = oms.create(details(s, 1, 1)).value();
     ASSERT_TRUE(oms.apply(h, E::kRiskReject, {.reason_code = "R-TEST"}));
     wait_written(earlier_run, 2);
   }
   RecordingBroker broker;
-  PgOrderEventWriter writer(db.url());
+  PgOrderEventWriter writer(db.url(), nullptr);
   Oms oms(writer, clock, 8);
   OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8});
 
@@ -701,7 +831,7 @@ TEST(PgOrderStore, AnOrderWithARowThatCantGoInFailsAlone) {
   const TempDb db(admin);
   const Seeded s = seed(db.url());
   const TickingClock clock;
-  PgOrderEventWriter writer(db.url());
+  PgOrderEventWriter writer(db.url(), nullptr);
   Oms oms(writer, clock, 4);
   OrderDetails no_account = details(s, 1, 1);
   no_account.account_id = uuid_of("0190a3b4-7c2d-7e11-8f00-ffffffffffff");  // a foreign key that isn't there
@@ -725,7 +855,7 @@ TEST(PgOrderStore, ALiveOrdersEventSurvivesABrokerIdClash) {
   const TempDb db(admin);
   const Seeded s = seed(db.url());
   const TickingClock clock;
-  PgOrderEventWriter writer(db.url());
+  PgOrderEventWriter writer(db.url(), nullptr);
   Oms oms(writer, clock, 4);
   const auto open = [&](int n) {
     const OrderHandle h = oms.create(details(s, n, 5)).value();
@@ -754,7 +884,7 @@ TEST(PgOrderStore, ShutdownGivesUpInBoundedTimeAndErrorsDontLeakTheUrl) {
 
   const auto start = std::chrono::steady_clock::now();
   {
-    PgOrderEventWriter writer(dead);
+    PgOrderEventWriter writer(dead, nullptr);
     const OrderEventRecord event;
     ASSERT_TRUE(writer.try_push(event));
   }

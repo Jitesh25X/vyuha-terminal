@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"google.golang.org/protobuf/proto"
 
+	commonv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/common/v1"
 	enginev1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/engine/v1"
 	marketdatav1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/marketdata/v1"
 	wsv1 "github.com/Jitesh25X/vyuha-terminal/gateway/gen/vyuha/ws/v1"
@@ -31,9 +33,13 @@ type fakeDir struct {
 	accounts map[string][]Account // user → accounts
 	kiteAll  bool                 // every id is Kite-streamable (load tests)
 	inst     map[uint64]InstrumentMap
+	failing  atomic.Bool // account lookups fail: a Postgres outage
 }
 
 func (d *fakeDir) UserAccounts(_ context.Context, user string) ([]Account, error) {
+	if d.failing.Load() {
+		return nil, errors.New("postgres is down")
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return slices.Clone(d.accounts[user]), nil
@@ -853,4 +859,132 @@ func TestLatestTradedAtFromEngine(t *testing.T) {
 	if !got[7].TradedAt.Equal(traded) || !got[8].TradedAt.Equal(traded) || !got[9].TradedAt.IsZero() {
 		t.Fatalf("cache %v, md_last %v, unknown %v", got[7].TradedAt, got[8].TradedAt, got[9].TradedAt)
 	}
+}
+
+func outageAlert(active bool, since int64) *commonv1.SystemAlert {
+	return &commonv1.SystemAlert{Code: "ORDER_LOG_OUTAGE", Severity: "critical", Active: active, Banner: "DOWN", SinceMs: since}
+}
+
+// One toast per occurrence: the engine repeats an alert while the outage holds.
+func TestSystemAlertRaisesOneToastPerOccurrenceAndOnlyForAdmins(t *testing.T) {
+	h := newHarness(t, fastConfig(), &fakeDir{accounts: map[string][]Account{}}, &fakeEngine{})
+	admin, trader := h.dial("root:admin"), h.dial("alice:trader")
+	for _, c := range []*wsClient{admin, trader} {
+		c.subscribe(wsv1.Channel_CHANNEL_ALERTS, 0)
+		c.next(func(m *wsv1.ServerMsg) bool { return m.GetSnapshot() != nil })
+	}
+	h.hub.onSystemAlert(outageAlert(true, 1))
+	h.hub.onSystemAlert(outageAlert(true, 1)) // repeat
+	if a := admin.next(func(m *wsv1.ServerMsg) bool { return m.GetAlert() != nil }).GetAlert(); a.GetId() != "ORDER_LOG_OUTAGE:1" {
+		t.Fatalf("alert = %v", a)
+	}
+	h.hub.onSystemAlert(outageAlert(false, 1))
+	h.hub.onSystemAlert(outageAlert(true, 2)) // a new outage
+	if a := admin.next(func(m *wsv1.ServerMsg) bool { return m.GetAlert() != nil }).GetAlert(); a.GetId() != "ORDER_LOG_OUTAGE:2" {
+		t.Fatalf("second alert = %v, want the new occurrence (no repeat of :1)", a)
+	}
+	if m := trader.read(100 * time.Millisecond); m.GetAlert() != nil {
+		t.Fatalf("a trader got an admin alert: %v", m)
+	}
+}
+
+// A banner nobody repeats lapses: an engine that died mid-outage must not leave it up for ever.
+func TestSystemAlertBannerLapsesWithoutRepeats(t *testing.T) {
+	cfg := fastConfig()
+	cfg.SystemAlertTTL = 50 * time.Millisecond
+	h := newHarness(t, cfg, &fakeDir{accounts: map[string][]Account{}}, &fakeEngine{})
+	h.hub.onSystemAlert(outageAlert(true, 1))
+	waitFor(t, "banner lapses", func() bool { return len(h.hub.systemStatus(true, nil).GetBanners()) == 0 })
+}
+
+func TestSystemAlertMalformedIsDropped(t *testing.T) {
+	h := newHarness(t, fastConfig(), &fakeDir{accounts: map[string][]Account{}}, &fakeEngine{})
+	h.hub.onSystemAlert(&commonv1.SystemAlert{Active: true, Banner: "no code"})
+	h.hub.onSystemAlert(&commonv1.SystemAlert{Code: "X", Active: true, Banner: strings.Repeat("b", maxAlertBanner+1)})
+	if b := h.hub.systemStatus(true, nil).GetBanners(); len(b) != 0 {
+		t.Fatalf("banners = %v", b)
+	}
+}
+
+func TestSystemAlertLapsedBannerDoesNotToastTheSameOutageAgain(t *testing.T) {
+	cfg := fastConfig()
+	cfg.SystemAlertTTL = 30 * time.Millisecond
+	h := newHarness(t, cfg, &fakeDir{accounts: map[string][]Account{}}, &fakeEngine{})
+	admin := h.dial("root:admin")
+	admin.subscribe(wsv1.Channel_CHANNEL_ALERTS, 0)
+	admin.next(func(m *wsv1.ServerMsg) bool { return m.GetSnapshot() != nil })
+	h.hub.onSystemAlert(outageAlert(true, 1))
+	admin.next(func(m *wsv1.ServerMsg) bool { return m.GetAlert() != nil })
+	waitFor(t, "banner lapses", func() bool { return len(h.hub.systemStatus(true, nil).GetBanners()) == 0 })
+	h.hub.onSystemAlert(outageAlert(true, 1)) // the outage is still on: NATS had a gap
+	if b := h.hub.systemStatus(true, nil).GetBanners(); len(b) != 1 {
+		t.Fatalf("banner is not back: %v", b)
+	}
+	if m := admin.read(100 * time.Millisecond); m.GetAlert() != nil {
+		t.Fatalf("second toast for one outage: %v", m)
+	}
+}
+
+func TestSystemAlertAnOlderOccurrencesEndDoesNotClearANewerOne(t *testing.T) {
+	h := newHarness(t, fastConfig(), &fakeDir{accounts: map[string][]Account{}}, &fakeEngine{})
+	h.hub.onSystemAlert(outageAlert(true, 2))
+	h.hub.onSystemAlert(outageAlert(false, 1))
+	if b := h.hub.systemStatus(true, nil).GetBanners(); len(b) != 1 {
+		t.Fatalf("banners = %v, want the newer one still up", b)
+	}
+	h.hub.onSystemAlert(outageAlert(false, 2))
+	if b := h.hub.systemStatus(true, nil).GetBanners(); len(b) != 0 {
+		t.Fatalf("banners = %v, want cleared", b)
+	}
+}
+
+// ADR-009 on the path ADR-027 opened: a browser connected while accounts can't load gets no market data and
+// no lasting denial, and works once they can. A bad token still gets nothing at all.
+func TestConnectingWithoutAccountsGivesNoDataAndRecovers(t *testing.T) {
+	const id = uint64(500)
+	dir := &fakeDir{
+		accounts: map[string][]Account{"alice": {{ID: "acct-z", Broker: "zerodha", DataEntitled: true}}},
+		kiteAll:  true,
+	}
+	dir.failing.Store(true)
+	engine := &fakeEngine{sessions: []*enginev1.SessionInfo{session("acct-z", "zerodha", 11, true)}}
+	cfg := fastConfig()
+	cfg.AccountsRetry = 10 * time.Millisecond
+	h := newHarness(t, cfg, dir, engine)
+	waitFor(t, "first poll", func() bool { h.hub.mu.Lock(); defer h.hub.mu.Unlock(); return len(h.hub.sessions) == 1 })
+
+	bad := h.dial("")
+	bad.write(&wsv1.ClientMsg{Body: &wsv1.ClientMsg_Hello{Hello: &wsv1.ClientHello{AccessToken: "garbage"}}})
+	if st := bad.closeStatus(); st != closeUnauthenticated {
+		t.Fatalf("bad token: close = %v", st)
+	}
+
+	c := h.dial("alice:trader")
+	for _, ch := range []wsv1.Channel{wsv1.Channel_CHANNEL_QUOTE, wsv1.Channel_CHANNEL_DEPTH, wsv1.Channel_CHANNEL_BAR_1M} {
+		c.subscribe(ch, 50, id)
+		e := c.next(func(m *wsv1.ServerMsg) bool { return m.GetError() != nil }).GetError()
+		if e.GetCode() != codeUnavailable { // not MD_NOT_ENTITLED: that would stick in the panel
+			t.Fatalf("channel %v: error = %v, want %s", ch, e, codeUnavailable)
+		}
+	}
+	h.src.onTick(tick(id, 11, 1_000_000))
+	for deadline := time.Now().Add(100 * time.Millisecond); time.Now().Before(deadline); {
+		if m := c.read(10 * time.Millisecond); m.GetSnapshot() != nil || m.GetUpdates() != nil {
+			t.Fatalf("market data without accounts: %v", m)
+		}
+	}
+	if len(engine.callsFor("acct-z")) != 0 {
+		t.Fatalf("engine interest registered without accounts: %v", engine.callsFor("acct-z"))
+	}
+
+	dir.failing.Store(false)
+	if st := c.closeStatus(); st != websocket.StatusTryAgainLater {
+		t.Fatalf("close = %v, want the client told to reconnect", st)
+	}
+	again := h.dial("alice:trader")
+	again.subscribe(wsv1.Channel_CHANNEL_QUOTE, 50, id)
+	if s := again.next(func(m *wsv1.ServerMsg) bool { return m.GetSnapshot() != nil || m.GetError() != nil }); s.GetError() != nil {
+		t.Fatalf("after recovery: %v", s)
+	}
+	waitFor(t, "engine interest", func() bool { return len(engine.callsFor("acct-z")) > 0 })
 }
