@@ -44,8 +44,10 @@ class ApprovedOrder final {
   friend class RiskGate;
   ApprovedOrder(const oms::OrderDetails& order, const GateStamp& stamp) noexcept
       : order_(order), stamp_(stamp) {}
+  // Blanked except the paper flag (which has no default), so a spent approval carries no sendable order even
+  // to a sender that forgets to check spent() (risk review M2.2b).
   void spend() noexcept {
-    order_ = {};
+    order_ = oms::OrderDetails{.is_paper = order_.is_paper};
     stamp_ = {};
     spent_ = true;
   }

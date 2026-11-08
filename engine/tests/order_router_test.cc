@@ -51,7 +51,10 @@ class LaggingSink final : public IOrderEventSink {
     refused.pop_back();
     return true;
   }
+  // NOLINTNEXTLINE(bugprone-exception-escape): a test sink; reserve would only move the throw
+  void note_outage_refusal(OutageRefusal kind) noexcept override { outage_refusals.push_back(kind); }
   std::vector<Uuid> refused;
+  std::vector<OutageRefusal> outage_refusals;
   std::vector<OrderEventRecord> events;
   std::uint64_t durable_count{0};
   bool full{false};
@@ -103,7 +106,7 @@ constexpr std::string_view kClient = "0190a3b4-7c2d-7e11-8f00-aabbccddeeff";
 std::string tag_of_client() { return broker_tag(kClient, kTagLimit); }
 
 OrderDetails order_of(std::int32_t qty, std::string_view client = kClient) {
-  OrderDetails d;
+  OrderDetails d{.is_paper = kPaperOrder};
   d.id.bytes.fill(1);
   for (std::size_t i = 0; i < client.size(); ++i) {  // one id per client id: intake refuses a reused id
     d.id.bytes.at(i % d.id.bytes.size()) ^= static_cast<std::uint8_t>(client[i]);
@@ -115,7 +118,7 @@ OrderDetails order_of(std::int32_t qty, std::string_view client = kClient) {
 }
 
 struct Rig {
-  FixedClock clock;
+  SimClock clock{1'000};
   LaggingSink sink;
   FakeBroker broker;
   Oms oms{sink, clock, 8};
@@ -127,8 +130,7 @@ struct Rig {
     return router.submit(h, testing::approve(oms.order(h).details, clock));
   }
   OrderHandle restored(OrderStatus status, std::int32_t filled = 0, std::int32_t qty = 10) {
-    RecoveredOrder r;
-    r.details = order_of(qty);
+    RecoveredOrder r{.details = order_of(qty)};
     r.status = status;
     r.seq = 3;
     r.filled_qty = filled;
@@ -499,8 +501,7 @@ TEST(OrderRouterRecovery, ABrokerQtyWeDontKnowAboutStaysBlocked) {
 TEST(OrderRouterRecovery, ANeverSentOrderAmongOthersExpiresAlone) {
   Rig r;
   const OrderHandle had = r.restored(kApproved);
-  RecoveredOrder other;
-  other.details = order_of(10, "0190a3b4-7c2d-7e11-8f00-000000000099");
+  RecoveredOrder other{.details = order_of(10, "0190a3b4-7c2d-7e11-8f00-000000000099")};
   other.details.id.bytes.fill(2);
   other.status = kApproved;
   other.seq = 2;
@@ -697,7 +698,7 @@ TEST(OrderRouter, PaperAndLiveDontMix) {
 
   OrderDetails real = order_of(10, "live-client");
   real.id.bytes.fill(4);
-  real.is_paper = false;
+  real.is_paper = kLiveOrder;
   const OrderHandle h = r.oms.create(real).value();
   const auto gate = risk::RiskGate::create(kAllPass, r.clock).value();
   auto decision = gate.evaluate({}, real);
@@ -809,6 +810,10 @@ TEST(OrderRouter, AMovedFromApprovalApprovesNothing) {
   EXPECT_TRUE(first.spent());
   EXPECT_FALSE(taken.spent());
   // NOLINTNEXTLINE(bugprone-use-after-move,hicpp-invalid-access-moved): that's the test
+  EXPECT_EQ(first.order().qty, 0);  // blanked: nothing sendable left even for a sender that skips spent()
+  // NOLINTNEXTLINE(bugprone-use-after-move,hicpp-invalid-access-moved): that's the test
+  EXPECT_TRUE(first.order().client_order_id.view().empty());
+  // NOLINTNEXTLINE(bugprone-use-after-move,hicpp-invalid-access-moved): that's the test
   EXPECT_EQ(r.router.submit(h, std::move(first)).error().code, ErrorCode::kInvalidArgument);
   EXPECT_TRUE(r.router.submit(h, std::move(taken)).has_value());
 }
@@ -821,6 +826,206 @@ TEST(OrderRouter, IntakeRefusesAnOrderIdAlreadyUsed) {
   reused.id = r.oms.order(h).details.id;
   EXPECT_EQ(r.oms.create(reused).error().code, ErrorCode::kOrderDup);
   EXPECT_EQ(r.oms.size(), 1U);
+}
+
+// ---- ADR-027: while the order log isn't durable, nothing that adds risk goes out ----
+
+// An OPEN order: sent and acknowledged.
+OrderHandle open_order(Rig& r, std::int32_t qty = 10) {
+  const OrderHandle h = r.fresh(qty);
+  EXPECT_TRUE(r.submit(h));
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 1U);
+  EXPECT_TRUE(r.oms.apply(h, E::kBrokerAck, {.broker_order_id = "B1"}));
+  return h;
+}
+
+TEST(OutageRules, ANewOrderIsRefusedAndNothingIsRecorded) {
+  Rig r;
+  r.sink.is_healthy = false;
+  EXPECT_EQ(r.oms.create(order_of(10)).error().code, ErrorCode::kOrderLogUnavailable);
+  EXPECT_EQ(r.oms.size(), 0U);
+  EXPECT_TRUE(r.sink.events.empty());
+  EXPECT_EQ(r.sink.outage_refusals, std::vector{OutageRefusal::kNewOrder});
+  EXPECT_EQ(r.oms.outage_refusals(), 1U);
+  r.sink.is_healthy = true;
+  EXPECT_TRUE(r.oms.create(order_of(10)).has_value());  // back: taken in again
+}
+
+TEST(OutageRules, TheSameRequestAgainStillReturnsTheExistingOrder) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  r.sink.is_healthy = false;
+  const auto again = r.oms.intake(order_of(10));  // a retry: nothing new is created
+  ASSERT_TRUE(again.has_value());
+  EXPECT_TRUE(again.value_or(Intake{}).existing);
+  EXPECT_EQ(again.value_or(Intake{}).handle, h);
+  EXPECT_TRUE(r.sink.outage_refusals.empty());
+}
+
+TEST(OutageRules, AModifyThatRaisesQtyIsRefused) {
+  Rig r;
+  const OrderHandle h = open_order(r, 10);
+  r.sink.is_healthy = false;
+  const auto before = r.sink.events.size();
+  EXPECT_EQ(r.oms.apply(h, E::kModifyRequest, {.modified_qty = 11}).error().code,
+            ErrorCode::kOrderLogUnavailable);
+  EXPECT_EQ(r.oms.order(h).status, kOpen);
+  EXPECT_EQ(r.oms.order(h).details.qty, 10);
+  EXPECT_EQ(r.sink.events.size(), before);
+  EXPECT_EQ(r.sink.outage_refusals, std::vector{OutageRefusal::kModifyQtyUp});
+}
+
+// Until positions exist (M2.6) every price or trigger change counts as opening: fail closed.
+TEST(OutageRules, APriceOrTriggerModifyIsRefused) {
+  Rig r;
+  const OrderHandle h = open_order(r, 10);
+  r.sink.is_healthy = false;
+  EXPECT_EQ(r.oms.apply(h, E::kModifyRequest, {.modified_price = Price::from_units(990'000)}).error().code,
+            ErrorCode::kOrderLogUnavailable);
+  EXPECT_EQ(r.oms.apply(h, E::kModifyRequest, {.modified_trigger = Price::from_units(990'000)}).error().code,
+            ErrorCode::kOrderLogUnavailable);
+  // A lower qty with a new price still changes the price: refused.
+  EXPECT_EQ(
+      r.oms.apply(h, E::kModifyRequest, {.modified_qty = 5, .modified_price = Price::from_units(990'000)})
+          .error()
+          .code,
+      ErrorCode::kOrderLogUnavailable);
+  EXPECT_EQ(r.oms.order(h).status, kOpen);
+  EXPECT_EQ(r.sink.outage_refusals.size(), 3U);
+}
+
+TEST(OutageRules, AModifyThatOnlyLowersQtyGoes) {
+  Rig r;
+  const OrderHandle h = open_order(r, 10);
+  r.sink.is_healthy = false;
+  EXPECT_EQ(r.oms.apply(h, E::kModifyRequest, {.modified_qty = 4}), kModifyPending);
+  EXPECT_TRUE(r.sink.outage_refusals.empty());
+}
+
+TEST(OutageRules, ACancelRequestGoes) {
+  Rig r;
+  const OrderHandle h = open_order(r);
+  r.sink.is_healthy = false;
+  EXPECT_EQ(r.oms.apply(h, E::kCancelRequest), kCancelPending);
+}
+
+TEST(OutageRules, CancelAllGoesAndAsksTheBroker) {
+  Rig r;
+  const OrderHandle h = open_order(r);
+  r.sink.is_healthy = false;
+  const auto out = r.router.cancel_all();
+  EXPECT_EQ(out.asked, 1U);
+  EXPECT_EQ(out.failed, 0U);
+  EXPECT_EQ(r.broker.cancels.size(), 1U);
+  EXPECT_EQ(r.oms.order(h).status, kCancelPending);
+}
+
+TEST(OutageRules, TheBrokersCancelAndItsConfirmAreRecorded) {
+  Rig r;
+  const OrderHandle a = open_order(r);
+  r.sink.is_healthy = false;
+  ASSERT_EQ(r.oms.apply(a, E::kCancelRequest), kCancelPending);
+  EXPECT_EQ(r.oms.apply(a, E::kCancelConfirm), kCancelled);  // a broker fact, outage or not
+}
+
+// ---- ADR-027: a queued order has an age limit, from its gate stamp ----
+
+TEST(QueueAge, AnOrderPastTheLimitIsExpiredNotSent) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));  // stamped at 1'000
+  r.clock.advance(kDefaultQueueMaxAge + 1);
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_TRUE(r.broker.tags.empty());
+  EXPECT_EQ(r.oms.order(h).status, kExpired);
+  EXPECT_EQ(r.sink.events.back().reason_code.view(), kExpiredInQueue);
+  EXPECT_EQ(r.router.expired_in_queue(), 1U);
+  EXPECT_EQ(r.router.pending(), 0U);
+}
+
+TEST(QueueAge, AnOrderExactlyAtTheLimitIsSent) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
+  r.clock.advance(kDefaultQueueMaxAge);
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 1U);
+  EXPECT_EQ(r.oms.order(h).status, kSent);
+  EXPECT_EQ(r.router.expired_in_queue(), 0U);
+}
+
+// A clock stepped back gives a negative age: expired, never sent (fail closed, as submit() does).
+TEST(QueueAge, AClockSteppedBackExpiresTheOrder) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));  // stamped at 1'000
+  r.clock.set(500);
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_TRUE(r.broker.tags.empty());
+  EXPECT_EQ(r.oms.order(h).status, kExpired);
+  EXPECT_EQ(r.router.expired_in_queue(), 1U);
+}
+
+// The point of the limit: orders queued before an outage don't fire when it ends.
+TEST(QueueAge, OrdersQueuedThroughAnOutageExpireWhenItEnds) {
+  Rig r;
+  const OrderHandle a = r.fresh();
+  const OrderDetails second = order_of(5, "second-order");
+  const OrderHandle b = r.oms.create(second).value();
+  ASSERT_TRUE(r.submit(a));
+  ASSERT_TRUE(r.submit(b));
+  r.sink.is_healthy = false;
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 0U);  // down: nothing goes
+  r.clock.advance(6 * kNanosPerSecond);
+  r.sink.is_healthy = true;
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_TRUE(r.broker.tags.empty());
+  EXPECT_EQ(r.oms.order(a).status, kExpired);
+  EXPECT_EQ(r.oms.order(b).status, kExpired);
+}
+
+TEST(QueueAge, AnExpiryThatCantBeRecordedHoldsTheQueueAndNeverSends) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
+  r.clock.advance(kDefaultQueueMaxAge + 1);
+  r.sink.durable_count = r.sink.events.size();
+  r.sink.full = true;
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_EQ(r.oms.order(h).status, kApproved);
+  EXPECT_EQ(r.router.pending(), 1U);
+  r.sink.full = false;
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_EQ(r.oms.order(h).status, kExpired);
+  EXPECT_TRUE(r.broker.tags.empty());
+}
+
+TEST(QueueAge, TheLimitIsConfigurable) {
+  Rig r;
+  OrderRouter tight{r.oms,
+                    r.sink,
+                    r.broker,
+                    Venue::kPaper,
+                    {.tag_limit = kTagLimit, .capacity = 8, .queue_max_age = kNanosPerSecond}};
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(tight.submit(h, testing::approve(r.oms.order(h).details, r.clock)));
+  r.clock.advance(kNanosPerSecond + 1);
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(tight.poll(), 0U);
+  EXPECT_EQ(r.oms.order(h).status, kExpired);
+}
+
+TEST(QueueMaxAge, ParsesWholeMillisecondsInRange) {
+  EXPECT_EQ(parse_queue_max_age_ms("").value_or(0), kDefaultQueueMaxAge);
+  EXPECT_EQ(parse_queue_max_age_ms("5000").value_or(0), 5 * kNanosPerSecond);
+  EXPECT_EQ(parse_queue_max_age_ms("60000").value_or(0), 60 * kNanosPerSecond);
+  for (const std::string_view bad : {"0", "60001", "-1", "5s", "1e3"}) {
+    EXPECT_FALSE(parse_queue_max_age_ms(bad).has_value()) << bad;
+  }
 }
 
 }  // namespace

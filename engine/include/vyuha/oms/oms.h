@@ -56,6 +56,22 @@ enum class Product : std::uint8_t { kCnc, kMis, kNrml };
 enum class Validity : std::uint8_t { kDay, kIoc };
 enum class Source : std::uint8_t { kManual, kStrategy, kAiDraft, kSystem };
 
+// Paper or live, stated by whoever makes the order. It has no default, so an OrderDetails can't be made
+// without saying which (owner, 2026-11-08): forgetting it is a compile error, not a quiet paper order.
+class PaperFlag {
+ public:
+  PaperFlag() = delete;
+  constexpr explicit PaperFlag(bool paper) noexcept : paper_(paper) {}
+  [[nodiscard]] constexpr bool paper() const noexcept { return paper_; }
+  [[nodiscard]] constexpr bool live() const noexcept { return !paper_; }
+  bool operator==(const PaperFlag&) const = default;
+
+ private:
+  bool paper_;
+};
+inline constexpr PaperFlag kPaperOrder{true};
+inline constexpr PaperFlag kLiveOrder{false};
+
 // What an order is: the Postgres `order` row. Only a modify changes it: qty, price and trigger_price, once
 // the broker confirms; order_event keeps what they were. (Brackets arrive with M2.5.)
 struct OrderDetails {
@@ -76,13 +92,13 @@ struct OrderDetails {
   std::optional<Price> trigger_price;
   std::optional<std::int32_t> market_protection_millipct;  // numeric(6,3), so 2.000 % is 2000
   FixedString<32> tag;
-  bool is_paper{true};
+  PaperFlag is_paper;  // required: no default (see PaperFlag)
   Nanos created_at{0};
   bool operator==(const OrderDetails&) const = default;
 };
 
 struct Order {
-  OrderDetails details;
+  OrderDetails details;  // no default: is_paper must be given
   OrderStatus status{OrderStatus::kNew};
   std::int32_t seq{0};  // of the last event
   std::int32_t filled_qty{0};
@@ -123,8 +139,12 @@ struct OrderEventRecord {
   ModifyRecord modify;
   Nanos ts{0};
   std::optional<risk::GateStamp> gate;  // on APPROVED, and on RISK_REJECTED for R-APPROVAL-STALE
-  OrderDetails details;                 // set when `from` is nullopt
+  std::optional<OrderDetails> details;  // set on the first event (`from` is nullopt), which inserts the order
 };
+
+// What the OMS refuses while the order log isn't durable (ADR-027): anything that adds risk.
+enum class OutageRefusal : std::uint8_t { kNewOrder, kModifyQtyUp, kModifyPrice };
+inline constexpr std::size_t kOutageRefusalKinds = 3;
 
 // Where events go (Postgres via a ring in production). try_push is called on the core thread and must not
 // block. A false return leaves the OMS unchanged, so no transition exists without its event.
@@ -146,6 +166,9 @@ class IOrderEventSink {
   // An order storage has refused for good (a duplicate client_order_id that got past intake). Reported before
   // durable() passes its events, so whoever saw them durable can also see this.
   [[nodiscard]] virtual bool try_pop_refused(Uuid& /*order_id*/) noexcept { return false; }
+  // The OMS refused this while healthy() was false. Counted for the outage alert, which can only be written
+  // once storage is back. Core thread; must not block.
+  virtual void note_outage_refusal(OutageRefusal /*kind*/) noexcept {}
 };
 
 using OrderHandle = std::uint32_t;
@@ -156,6 +179,8 @@ inline constexpr std::string_view kExpiredOnRestart = "EXPIRED_ON_RESTART";
 inline constexpr std::string_view kDuplicateFill = "DUPLICATE_FILL";
 // The router's rejection of an approval older than its limit (owner, 2026-11-08): audited and alerted.
 inline constexpr std::string_view kApprovalStale = "R-APPROVAL-STALE";
+// A queued order (APPROVED, not sent) older than the queue limit (ADR-027): never sent, EXPIRED instead.
+inline constexpr std::string_view kExpiredInQueue = "EXPIRED_IN_QUEUE";
 
 struct Intake {
   OrderHandle handle{0};
@@ -184,7 +209,7 @@ struct EventDetails {
 
 // What recovery reads back from Postgres.
 struct RecoveredOrder {
-  OrderDetails details;
+  OrderDetails details;  // no default: is_paper must be given
   OrderStatus status{OrderStatus::kNew};
   std::int32_t seq{0};
   std::int32_t filled_qty{0};
@@ -252,6 +277,8 @@ class Oms {
   [[nodiscard]] std::uint64_t recon_mismatches() const noexcept { return recon_mismatches_; }
   [[nodiscard]] std::uint64_t refused_by_storage() const noexcept { return refused_; }
   [[nodiscard]] std::uint64_t duplicate_fills() const noexcept { return duplicate_fills_; }
+  // New orders and risk-adding modifies refused while the order log wasn't durable (ADR-027).
+  [[nodiscard]] std::uint64_t outage_refusals() const noexcept { return outage_refusals_; }
 
  private:
   struct TradeSlot {
@@ -271,6 +298,8 @@ class Oms {
                                                                 const EventDetails& details) noexcept;
 
   [[nodiscard]] std::expected<OrderStatus, Error> illegal(const Order& order, OrderEvent event) noexcept;
+  // `detail` must be static text: Error keeps a view of it.
+  [[nodiscard]] std::unexpected<Error> refuse_in_outage(OutageRefusal kind, std::string_view detail) noexcept;
   [[nodiscard]] std::optional<OrderHandle> find_client(std::string_view client_order_id) const noexcept;
   void index_client(OrderHandle handle) noexcept;
   [[nodiscard]] std::expected<OrderStatus, Error> record(Order& order, OrderStatus to, std::int32_t filled,
@@ -289,6 +318,7 @@ class Oms {
   std::uint64_t recon_mismatches_{0};
   std::uint64_t refused_{0};
   std::uint64_t duplicate_fills_{0};
+  std::uint64_t outage_refusals_{0};
 };
 
 }  // namespace vyuha::oms

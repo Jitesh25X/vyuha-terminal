@@ -1,4 +1,4 @@
-// Package config loads gateway settings from the environment (see .env.example).
+// Package config loads gateway settings from the environment (see env.example).
 package config
 
 import (

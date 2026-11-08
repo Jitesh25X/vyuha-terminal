@@ -27,6 +27,7 @@ class IOrderSender {
   IOrderSender(IOrderSender&&) = delete;
   IOrderSender& operator=(IOrderSender&&) = delete;
   virtual ~IOrderSender() = default;
+  // A spent approval approves nothing: an implementation returns false for it and sends nothing.
   [[nodiscard]] virtual bool send(const risk::ApprovedOrder& order, std::string_view broker_tag) noexcept = 0;
   // Asks the broker to cancel. A cancel only reduces risk, so it takes the order as the OMS has it. Repeating
   // it is harmless. The order may have no broker_order_id yet (handed over with no ack, or restored and not
@@ -75,14 +76,23 @@ enum class Venue : std::uint8_t { kPaper, kLive };
 inline constexpr Nanos kDefaultApprovalMaxAge = kNanosPerSecond / 10;  // 100 ms
 inline constexpr std::int64_t kMaxApprovalMaxAgeMs = 10'000;           // a sanity ceiling on the setting
 
+// A queued order (APPROVED, not yet sent) older than this, from its gate stamp, is never sent: it becomes
+// EXPIRED (EXPIRED_IN_QUEUE), audited and alerted (ADR-027). Owner, 2026-11-07: 5 s by default, set by
+// ORDER_QUEUE_MAX_AGE_MS. It bounds how stale an order can be when an outage ends.
+inline constexpr Nanos kDefaultQueueMaxAge = 5 * kNanosPerSecond;
+inline constexpr std::int64_t kMaxQueueMaxAgeMs = 60'000;
+
 // RISK_APPROVAL_MAX_AGE_MS: whole milliseconds, 1 to 10,000. Unset or empty is the default; anything else is
 // kInvalidArgument, and the engine must refuse to start rather than guess.
 [[nodiscard]] std::expected<Nanos, Error> parse_approval_max_age_ms(std::string_view text) noexcept;
+// ORDER_QUEUE_MAX_AGE_MS: the same rules, 1 to 60,000.
+[[nodiscard]] std::expected<Nanos, Error> parse_queue_max_age_ms(std::string_view text) noexcept;
 
 struct RouterConfig {
   std::size_t tag_limit{0};
   std::size_t capacity{0};
   Nanos approval_max_age{kDefaultApprovalMaxAge};
+  Nanos queue_max_age{kDefaultQueueMaxAge};
 };
 
 // Persist before send (ADR-025). The core thread submits an approved order and polls; nothing here touches
@@ -109,7 +119,9 @@ class OrderRouter {
   // A full sink is kCapacityExceeded and the order stays NEW. Only this queue reaches the adapter, so an
   // order marked APPROVED some other way (Oms::apply, recovery) is never sent.
   [[nodiscard]] std::expected<void, Error> submit(OrderHandle handle, risk::ApprovedOrder approved) noexcept;
-  // Sends what's durable, in order; returns how many it handed to the adapter. Never blocks.
+  // Sends what's durable, in order; returns how many it handed to the adapter. Never blocks. An order whose
+  // turn comes after queue_max_age from its gate stamp is expired instead; if that can't be recorded (a
+  // full sink) the queue waits, and it is never sent.
   std::size_t poll() noexcept;
   [[nodiscard]] std::size_t pending() const noexcept { return pending_.size() - head_; }
   // Gate stamp to handing over to the adapter, per order sent: vyuha_engine_approval_to_send_seconds. It
@@ -117,6 +129,7 @@ class OrderRouter {
   // the approval limit.
   [[nodiscard]] const LatencyHistogram& approval_to_send() const noexcept { return approval_to_send_; }
   [[nodiscard]] std::uint64_t stale_approvals() const noexcept { return stale_approvals_; }
+  [[nodiscard]] std::uint64_t expired_in_queue() const noexcept { return expired_in_queue_; }
 
   // Cancels everything the broker may hold, for the kill switch (M2.7). Nothing here waits on or is refused
   // by the order log: a cancel only reduces risk, so an outage, a full ring or a refused order can't stop
@@ -157,10 +170,12 @@ class OrderRouter {
   std::size_t tag_limit_;
   std::size_t capacity_;
   Nanos approval_max_age_;
+  Nanos queue_max_age_;
   std::vector<Pending> pending_;
   std::size_t head_{0};
   LatencyHistogram approval_to_send_;
   std::uint64_t stale_approvals_{0};
+  std::uint64_t expired_in_queue_{0};
 };
 
 }  // namespace vyuha::oms

@@ -2,7 +2,7 @@
 # CI path filter: which service jobs a change needs. Writes engine/gateway/quant/web=true|false to
 # $GITHUB_OUTPUT (or stdout). Plain git, no third-party action.
 #   scripts/ci-changes.sh BASE HEAD     (BASE empty / all zeros / unknown → everything runs)
-# Shared inputs (Makefile, scripts, workflows, dev compose, .env.example) run everything; docs-only
+# Shared inputs (Makefile, scripts, workflows, dev compose, env.example) run everything; docs-only
 # changes run only the hygiene job.
 set -euo pipefail
 
@@ -23,7 +23,7 @@ files="$(git diff --name-only "$base" "$head")"
 
 match() { grep -Eq "$1" <<<"$files" && echo true || echo false; }
 
-if [ "$(match '^(Makefile|scripts/|\.github/workflows/|deploy/docker-compose\.dev\.yml|\.env\.example)')" = true ]; then
+if [ "$(match '^(Makefile|scripts/|\.github/workflows/|deploy/docker-compose\.dev\.yml|env\.example)')" = true ]; then
   all "shared build/CI inputs changed"
 fi
 {

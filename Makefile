@@ -18,6 +18,10 @@ endif
 ifeq ($(shell uname -s),Darwin)
   TIDY_EXTRA := -extra-arg=-fexperimental-library -extra-arg=-nostdinc++ -extra-arg=-isystem$(shell brew --prefix llvm@18 2>/dev/null)/include/c++/v1
 endif
+# clang 18 flags a designated initializer that omits a field; clang 19, Apple Clang and GCC 14 (the build compilers)
+# don't. OrderDetails is built only that way since is_paper became required (M2.2b): PaperFlag's deleted default
+# constructor is what enforces the required field.
+TIDY_EXTRA += -extra-arg=-Wno-missing-field-initializers
 # Engine compiler: GCC 14 on Ubuntu (24.04 defaults to GCC 13); Apple Clang on macOS. Override with CC=/CXX=.
 ifeq ($(shell uname -s),Linux)
   ifeq ($(origin CC),default)
@@ -28,7 +32,7 @@ ifeq ($(shell uname -s),Linux)
   endif
 endif
 # .env is optional in dev: fall back to the committed example (no secrets) until the owner creates one.
-ENV_FILE := $(if $(wildcard .env),.env,.env.example)
+ENV_FILE := $(if $(wildcard .env),.env,env.example)
 COMPOSE := docker compose -f deploy/docker-compose.dev.yml --env-file $(ENV_FILE) $(foreach p,$(PROFILES),--profile $(p))
 
 # $(1) = marker file that exists once the service is scaffolded, $(2) = command
@@ -73,7 +77,7 @@ proto-lint:
 	@command -v buf >/dev/null || { echo "✖ buf not found: make bootstrap C=proto"; exit 1; }
 	cd proto && buf lint && buf format -d --exit-code
 
-# Dev secrets: JWT signing key + VYUHA_MASTER_KEY in .env (created from .env.example). Never printed or overwritten.
+# Dev secrets: JWT signing key + VYUHA_MASTER_KEY in .env (created from env.example). Never printed or overwritten.
 dev-secrets:
 	cd gateway && go run ./cmd/vyuhactl secrets init
 
