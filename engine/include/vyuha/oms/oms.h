@@ -72,15 +72,18 @@ class PaperFlag {
 inline constexpr PaperFlag kPaperOrder{true};
 inline constexpr PaperFlag kLiveOrder{false};
 
+// NOLINTBEGIN(readability-redundant-member-init): every field without a value gets {} so that designated
+// initializers (the only way to build these since is_paper became required, M2.2b) don't trip GCC's
+// -Wmissing-field-initializers.
 // What an order is: the Postgres `order` row. Only a modify changes it: qty, price and trigger_price, once
 // the broker confirms; order_event keeps what they were. (Brackets arrive with M2.5.)
 struct OrderDetails {
-  Uuid id;
-  std::optional<Uuid> parent_id;
-  FixedString<64> client_order_id;
-  Uuid account_id;
-  Uuid user_id;
-  std::optional<Uuid> strategy_id;
+  Uuid id{};
+  std::optional<Uuid> parent_id{};
+  FixedString<64> client_order_id{};
+  Uuid account_id{};
+  Uuid user_id{};
+  std::optional<Uuid> strategy_id{};
   Source source{Source::kManual};
   std::int64_t instrument_id{0};
   Side side{Side::kBuy};
@@ -88,10 +91,10 @@ struct OrderDetails {
   OrderType order_type{OrderType::kLimit};
   Product product{Product::kMis};
   Validity validity{Validity::kDay};
-  std::optional<Price> price;
-  std::optional<Price> trigger_price;
-  std::optional<std::int32_t> market_protection_millipct;  // numeric(6,3), so 2.000 % is 2000
-  FixedString<32> tag;
+  std::optional<Price> price{};
+  std::optional<Price> trigger_price{};
+  std::optional<std::int32_t> market_protection_millipct{};  // numeric(6,3), so 2.000 % is 2000
+  FixedString<32> tag{};
   PaperFlag is_paper;  // required: no default (see PaperFlag)
   Nanos created_at{0};
   bool operator==(const OrderDetails&) const = default;
@@ -102,7 +105,7 @@ struct Order {
   OrderStatus status{OrderStatus::kNew};
   std::int32_t seq{0};  // of the last event
   std::int32_t filled_qty{0};
-  FixedString<40> broker_order_id;
+  FixedString<40> broker_order_id{};
   // Restored after a restart. The events are written behind, so the broker may know more than Postgres
   // does: until reconciled this order is never sent or modified.
   bool needs_reconcile{false};
@@ -111,36 +114,37 @@ struct Order {
   bool modify_out{false};
   std::int32_t qty_before_modify{0};
   std::int32_t modify_qty{0};  // 0: unchanged
-  std::optional<Price> modify_price;
-  std::optional<Price> modify_trigger;
+  std::optional<Price> modify_price{};
+  std::optional<Price> modify_trigger{};
 };
 
 // A modify, as an event records it.
 struct ModifyRecord {
   std::int32_t qty{0};  // asked for or confirmed; 0: unchanged
-  std::optional<Price> price;
-  std::optional<Price> trigger;
+  std::optional<Price> price{};
+  std::optional<Price> trigger{};
   std::int32_t row_qty{0};  // what `order.qty` becomes now; 0: unchanged
   bool applied{false};      // price and trigger go on the `order` row: the broker confirmed them
 };
 
 // One row of `order_event`, plus what it changes on the `order` row.
 struct OrderEventRecord {
-  Uuid order_id;
+  Uuid order_id{};
   std::int32_t seq{0};
-  std::optional<OrderStatus> from;  // nullopt on the first event, which also inserts the order
+  std::optional<OrderStatus> from{};  // nullopt on the first event, which also inserts the order
   OrderStatus to{OrderStatus::kNew};
-  FixedString<32> reason_code;
+  FixedString<32> reason_code{};
   std::int32_t filled_qty{0};
   std::int32_t fill_qty{0};  // this event's fill
-  Price fill_price;
-  FixedString<40> broker_order_id;
-  FixedString<40> broker_trade_id;
-  ModifyRecord modify;
+  Price fill_price{};
+  FixedString<40> broker_order_id{};
+  FixedString<40> broker_trade_id{};
+  ModifyRecord modify{};
   Nanos ts{0};
-  std::optional<risk::GateStamp> gate;  // on APPROVED, and on RISK_REJECTED for R-APPROVAL-STALE
-  std::optional<OrderDetails> details;  // set on the first event (`from` is nullopt), which inserts the order
+  std::optional<risk::GateStamp> gate{};  // on APPROVED, and on RISK_REJECTED for R-APPROVAL-STALE
+  std::optional<OrderDetails> details{};  // on the first event (`from` is nullopt), which inserts the order
 };
+// NOLINTEND(readability-redundant-member-init)
 
 // What the OMS refuses while the order log isn't durable (ADR-027): anything that adds risk.
 enum class OutageRefusal : std::uint8_t { kNewOrder, kModifyQtyUp, kModifyPrice };
@@ -208,14 +212,16 @@ struct EventDetails {
 };
 
 // What recovery reads back from Postgres.
+// NOLINTBEGIN(readability-redundant-member-init): see OrderDetails
 struct RecoveredOrder {
   OrderDetails details;  // no default: is_paper must be given
   OrderStatus status{OrderStatus::kNew};
   std::int32_t seq{0};
   std::int32_t filled_qty{0};
-  std::string broker_order_id;
-  std::vector<std::string> trade_ids;  // already counted: a replay after a restart is still a duplicate
+  std::string broker_order_id{};
+  std::vector<std::string> trade_ids{};  // already counted: a replay after a restart is still a duplicate
 };
+// NOLINTEND(readability-redundant-member-init)
 
 // Order state machine (F-EX-2). Single writer: only the core thread calls it. All storage is reserved up
 // front, and nothing here allocates after construction.

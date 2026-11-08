@@ -18,10 +18,6 @@ endif
 ifeq ($(shell uname -s),Darwin)
   TIDY_EXTRA := -extra-arg=-fexperimental-library -extra-arg=-nostdinc++ -extra-arg=-isystem$(shell brew --prefix llvm@18 2>/dev/null)/include/c++/v1
 endif
-# clang 18 flags a designated initializer that omits a field; clang 19, Apple Clang and GCC 14 (the build compilers)
-# don't. OrderDetails is built only that way since is_paper became required (M2.2b): PaperFlag's deleted default
-# constructor is what enforces the required field.
-TIDY_EXTRA += -extra-arg=-Wno-missing-field-initializers
 # Engine compiler: GCC 14 on Ubuntu (24.04 defaults to GCC 13); Apple Clang on macOS. Override with CC=/CXX=.
 ifeq ($(shell uname -s),Linux)
   ifeq ($(origin CC),default)
