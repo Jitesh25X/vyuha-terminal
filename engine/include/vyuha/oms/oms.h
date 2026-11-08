@@ -122,7 +122,7 @@ struct OrderEventRecord {
   FixedString<40> broker_trade_id;
   ModifyRecord modify;
   Nanos ts{0};
-  std::optional<risk::GateStamp> gate;  // on APPROVED from the router
+  std::optional<risk::GateStamp> gate;  // on APPROVED, and on RISK_REJECTED for R-APPROVAL-STALE
   OrderDetails details;                 // set when `from` is nullopt
 };
 
@@ -154,6 +154,8 @@ inline constexpr std::string_view kReconMismatch = "RECON_MISMATCH";
 inline constexpr std::string_view kLateAck = "LATE_ACK";
 inline constexpr std::string_view kExpiredOnRestart = "EXPIRED_ON_RESTART";
 inline constexpr std::string_view kDuplicateFill = "DUPLICATE_FILL";
+// The router's rejection of an approval older than its limit (owner, 2026-11-08): audited and alerted.
+inline constexpr std::string_view kApprovalStale = "R-APPROVAL-STALE";
 
 struct Intake {
   OrderHandle handle{0};
@@ -175,8 +177,8 @@ struct EventDetails {
   std::int32_t modified_qty{0};
   std::optional<Price> modified_price{};    // NOLINT(readability-redundant-member-init)
   std::optional<Price> modified_trigger{};  // NOLINT(readability-redundant-member-init)
-  // kRiskApprove: the gate's stamp, stored in the event's payload. OrderRouter::submit sets it. Recording a
-  // gate rejection with its stamp and R-code comes with the intent path.
+  // kRiskApprove, and kRiskReject for R-APPROVAL-STALE: the gate's stamp, stored in the event's payload.
+  // OrderRouter::submit sets it. Recording a gate rejection with its stamp and R-code comes with M2.8.
   std::optional<risk::GateStamp> gate{};  // NOLINT(readability-redundant-member-init)
 };
 

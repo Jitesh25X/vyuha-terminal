@@ -15,6 +15,7 @@ enum class ErrorCode : std::uint8_t {
   kOrderDup,             // ORDER_DUP: this client_order_id already has an order with a different body
   kOrderRecovery,        // open orders in Postgres couldn't be read back
   kOrderLogUnavailable,  // order events aren't reaching Postgres, so nothing may be sent
+  kApprovalStale,        // R-APPROVAL-STALE: the gate's approval is too old to send; the order is rejected
 };
 
 // Errors are values (std::expected<T, Error>); `detail` points at static text, never at user data.

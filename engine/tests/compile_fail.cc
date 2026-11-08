@@ -60,7 +60,8 @@ void probe(IOrderSender& sender, OrderRouter& router, const Order& order, const 
 #elif defined(VYUHA_CASE_SUBMIT_WITHOUT_APPROVAL)
   static_cast<void>(router.submit(0));
 #elif defined(VYUHA_CASE_BITCAST)
-  const auto forged = std::bit_cast<ApprovedOrder>(Bytes{details, stamp, false});
+  const Bytes raw{details, stamp, false};
+  const auto forged = std::bit_cast<ApprovedOrder>(raw);  // invariant-allow: compile-fail fixture
   static_cast<void>(forged);
 #elif defined(VYUHA_CASE_TEMP_CLOCK)
   static_cast<void>(RiskGate::create(std::span<const Rule>{}, vyuha::SimClock{}));

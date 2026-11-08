@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "vyuha/core/error.h"
+#include "vyuha/core/latency_histogram.h"
 #include "vyuha/core/price.h"
 #include "vyuha/oms/oms.h"
 #include "vyuha/risk/approved_order.h"
@@ -68,9 +69,21 @@ class IBrokerOrderBook {
 // ones, so a flag left at its paper default can't reach a broker with only the paper rules behind it.
 enum class Venue : std::uint8_t { kPaper, kLive };
 
-// An approval is evaluated and submitted in the same pass of the core thread. Older than this, the kill
-// switch or the limits may have changed since: evaluate again. Tight on purpose (fail closed).
-inline constexpr Nanos kMaxApprovalAge = kNanosPerSecond / 10;  // 100 ms
+// An approval is evaluated and submitted in the same pass of the core thread. Older than the limit, the kill
+// switch or the limits may have changed since. Owner, 2026-11-08: 100 ms by default, set by
+// RISK_APPROVAL_MAX_AGE_MS.
+inline constexpr Nanos kDefaultApprovalMaxAge = kNanosPerSecond / 10;  // 100 ms
+inline constexpr std::int64_t kMaxApprovalMaxAgeMs = 10'000;           // a sanity ceiling on the setting
+
+// RISK_APPROVAL_MAX_AGE_MS: whole milliseconds, 1 to 10,000. Unset or empty is the default; anything else is
+// kInvalidArgument, and the engine must refuse to start rather than guess.
+[[nodiscard]] std::expected<Nanos, Error> parse_approval_max_age_ms(std::string_view text) noexcept;
+
+struct RouterConfig {
+  std::size_t tag_limit{0};
+  std::size_t capacity{0};
+  Nanos approval_max_age{kDefaultApprovalMaxAge};
+};
 
 // Persist before send (ADR-025). The core thread submits an approved order and polls; nothing here touches
 // Postgres. An order goes to the adapter only once its APPROVED event is durable, and is recorded SENT after
@@ -82,19 +95,28 @@ class OrderRouter {
     kUnresolved,  // a mismatch is raised or the sink is full, and the order stays blocked until retried
   };
 
-  OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, Venue venue, std::size_t tag_limit,
-              std::size_t capacity);
+  // The venue is a separate argument so no default can choose it.
+  OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, Venue venue, const RouterConfig& config);
 
   // Records APPROVED, with the gate's stamp, and queues the order to send what the gate approved. The order
-  // must be NEW, and the approval must be for exactly its details, for this router's venue, unspent and no
-  // older than kMaxApprovalAge by the OMS's clock: anything else is kInvalidArgument. A full
-  // sink is kCapacityExceeded, the order stays NEW, and the approval is lost with the call: evaluate again.
-  // Only this queue reaches the adapter, so an order marked APPROVED some other way (Oms::apply, recovery)
-  // is never sent.
+  // must be NEW, and the approval must be for exactly its details, for this router's venue and unspent:
+  // anything else is kInvalidArgument and changes nothing.
+  //
+  // An approval older than approval_max_age by the OMS's clock, or dated in its future, ends the order: it is
+  // recorded RISK_REJECTED with R-APPROVAL-STALE and the stamp, which the writer audits and alerts in the
+  // same transaction, and the result is kApprovalStale. Nothing retries it: a new order is a new decision.
+  //
+  // A full sink is kCapacityExceeded and the order stays NEW. Only this queue reaches the adapter, so an
+  // order marked APPROVED some other way (Oms::apply, recovery) is never sent.
   [[nodiscard]] std::expected<void, Error> submit(OrderHandle handle, risk::ApprovedOrder approved) noexcept;
   // Sends what's durable, in order; returns how many it handed to the adapter. Never blocks.
   std::size_t poll() noexcept;
   [[nodiscard]] std::size_t pending() const noexcept { return pending_.size() - head_; }
+  // Gate stamp to handing over to the adapter, per order sent: vyuha_engine_approval_to_send_seconds. It
+  // includes waiting for the APPROVED event to be durable, so it shows how close real latency gets to
+  // the approval limit.
+  [[nodiscard]] const LatencyHistogram& approval_to_send() const noexcept { return approval_to_send_; }
+  [[nodiscard]] std::uint64_t stale_approvals() const noexcept { return stale_approvals_; }
 
   // Cancels everything the broker may hold, for the kill switch (M2.7). Nothing here waits on or is refused
   // by the order log: a cancel only reduces risk, so an outage, a full ring or a refused order can't stop
@@ -134,8 +156,11 @@ class OrderRouter {
   Venue venue_;
   std::size_t tag_limit_;
   std::size_t capacity_;
+  Nanos approval_max_age_;
   std::vector<Pending> pending_;
   std::size_t head_{0};
+  LatencyHistogram approval_to_send_;
+  std::uint64_t stale_approvals_{0};
 };
 
 }  // namespace vyuha::oms

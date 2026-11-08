@@ -13,6 +13,7 @@
 
 #include "test_gate.h"
 #include "vyuha/core/clock.h"
+#include "vyuha/core/latency_histogram.h"
 #include "vyuha/risk/risk_gate.h"
 
 namespace vyuha::oms {
@@ -118,7 +119,7 @@ struct Rig {
   LaggingSink sink;
   FakeBroker broker;
   Oms oms{sink, clock, 8};
-  OrderRouter router{oms, sink, broker, Venue::kPaper, kTagLimit, 8};
+  OrderRouter router{oms, sink, broker, Venue::kPaper, {.tag_limit = kTagLimit, .capacity = 8}};
 
   OrderHandle fresh(std::int32_t qty = 10) { return oms.create(order_of(qty)).value(); }
   // Through the gate, as every order is.
@@ -688,7 +689,7 @@ constexpr auto kAllPass = all_pass(std::make_index_sequence<risk::kRuleCount>{})
 // A paper flag left at its default can't reach a live sender, and a live approval can't go to paper.
 TEST(OrderRouter, PaperAndLiveDontMix) {
   Rig r;
-  OrderRouter live{r.oms, r.sink, r.broker, Venue::kLive, kTagLimit, 8};
+  OrderRouter live{r.oms, r.sink, r.broker, Venue::kLive, {.tag_limit = kTagLimit, .capacity = 8}};
   const OrderHandle paper = r.fresh();
   EXPECT_EQ(live.submit(paper, testing::approve(r.oms.order(paper).details, r.clock)).error().code,
             ErrorCode::kInvalidArgument);
@@ -708,18 +709,95 @@ TEST(OrderRouter, PaperAndLiveDontMix) {
   EXPECT_TRUE(live.submit(h, std::move(again.approved).value()).has_value());  // NOLINT
 }
 
-// Evaluated and submitted in one pass: an approval held back may predate a kill switch or a limit cut.
-TEST(OrderRouter, AStaleOrFutureApprovalIsRefused) {
+// Evaluated and submitted in one pass: an approval held back may predate a kill switch or a limit cut. A
+// stale one ends the order (owner, 2026-11-08): RISK_REJECTED with R-APPROVAL-STALE and the stamp, no retry.
+TEST(OrderRouter, AStaleApprovalRejectsTheOrderForGood) {
   Rig r;  // the OMS clock reads 1'000
   const OrderHandle h = r.fresh();
-  const SimClock too_old(1'000 - kMaxApprovalAge - 1);
+  const SimClock too_old(1'000 - kDefaultApprovalMaxAge - 1);
   EXPECT_EQ(r.router.submit(h, testing::approve(r.oms.order(h).details, too_old)).error().code,
-            ErrorCode::kInvalidArgument);
+            ErrorCode::kApprovalStale);
+  EXPECT_EQ(r.oms.order(h).status, kRiskRejected);
+  ASSERT_EQ(r.sink.events.size(), 2U);
+  EXPECT_EQ(r.sink.events[1].to, kRiskRejected);
+  EXPECT_EQ(r.sink.events[1].reason_code.view(), kApprovalStale);
+  ASSERT_TRUE(r.sink.events[1].gate.has_value());
+  EXPECT_EQ(r.sink.events[1].gate.value_or(risk::GateStamp{}).ts, 1'000 - kDefaultApprovalMaxAge - 1);
+  EXPECT_EQ(r.router.stale_approvals(), 1U);
+  EXPECT_EQ(r.router.pending(), 0U);
+
+  // A fresh approval can't revive it: it's no longer NEW.
+  EXPECT_EQ(r.submit(h).error().code, ErrorCode::kInvalidArgument);
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_TRUE(r.broker.tags.empty());
+}
+
+TEST(OrderRouter, AnApprovalFromTheFutureIsStaleToo) {
+  Rig r;
+  const OrderHandle h = r.fresh();
   const SimClock ahead(2'000);
-  EXPECT_FALSE(r.router.submit(h, testing::approve(r.oms.order(h).details, ahead)).has_value());
+  EXPECT_EQ(r.router.submit(h, testing::approve(r.oms.order(h).details, ahead)).error().code,
+            ErrorCode::kApprovalStale);
+  EXPECT_EQ(r.oms.order(h).status, kRiskRejected);
+}
+
+TEST(OrderRouter, AnApprovalExactlyAtTheLimitGoes) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  const SimClock at_limit(1'000 - kDefaultApprovalMaxAge);
+  EXPECT_TRUE(r.router.submit(h, testing::approve(r.oms.order(h).details, at_limit)).has_value());
+  EXPECT_EQ(r.oms.order(h).status, kApproved);
+}
+
+TEST(OrderRouter, AStaleRejectionThatCantBeRecordedLeavesTheOrderNew) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  r.sink.full = true;
+  const SimClock too_old(1'000 - kDefaultApprovalMaxAge - 1);
+  EXPECT_EQ(r.router.submit(h, testing::approve(r.oms.order(h).details, too_old)).error().code,
+            ErrorCode::kCapacityExceeded);
   EXPECT_EQ(r.oms.order(h).status, kNew);
-  const SimClock just_in_time(1'000 - kMaxApprovalAge);
-  EXPECT_TRUE(r.router.submit(h, testing::approve(r.oms.order(h).details, just_in_time)).has_value());
+  EXPECT_EQ(r.router.stale_approvals(), 0U);
+}
+
+TEST(OrderRouter, TheApprovalAgeLimitIsConfigurable) {
+  Rig r;
+  OrderRouter tight{r.oms,
+                    r.sink,
+                    r.broker,
+                    Venue::kPaper,
+                    {.tag_limit = kTagLimit, .capacity = 8, .approval_max_age = 500}};
+  const OrderHandle h = r.fresh();
+  const SimClock six_hundred_ns_ago(400);  // well inside the default, outside this router's 500 ns
+  EXPECT_EQ(tight.submit(h, testing::approve(r.oms.order(h).details, six_hundred_ns_ago)).error().code,
+            ErrorCode::kApprovalStale);
+}
+
+TEST(OrderRouter, RecordsApprovalToSendTime) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  const SimClock approved_at(1'000 - 30'000);  // 30 µs before the OMS clock's 1'000
+  ASSERT_TRUE(r.router.submit(h, testing::approve(r.oms.order(h).details, approved_at)));
+  EXPECT_EQ(r.router.approval_to_send().count(), 0U);  // not sent yet
+  r.sink.durable_count = r.sink.events.size();
+  ASSERT_EQ(r.router.poll(), 1U);
+  const LatencyHistogram& m = r.router.approval_to_send();
+  EXPECT_EQ(m.count(), 1U);
+  EXPECT_EQ(m.sum(), 30'000);
+  EXPECT_EQ(m.max(), 30'000);
+  EXPECT_EQ(m.bucket(1), 1U);  // (10 µs, 50 µs]
+}
+
+TEST(ApprovalMaxAge, ParsesWholeMillisecondsInRange) {
+  EXPECT_EQ(parse_approval_max_age_ms("").value_or(0), kDefaultApprovalMaxAge);
+  EXPECT_EQ(parse_approval_max_age_ms("100").value_or(0), 100'000'000);
+  EXPECT_EQ(parse_approval_max_age_ms("1").value_or(0), 1'000'000);
+  EXPECT_EQ(parse_approval_max_age_ms("10000").value_or(0), 10'000'000'000);
+  for (const std::string_view bad :
+       {"0", "-5", "10001", "100ms", " 100", "1.5", "abc", "99999999999999999999"}) {
+    EXPECT_FALSE(parse_approval_max_age_ms(bad).has_value()) << bad;
+  }
 }
 
 TEST(OrderRouter, AMovedFromApprovalApprovesNothing) {

@@ -24,9 +24,10 @@ check "engine: no double/float prices in oms/risk/broker" \
 check "engine: ApprovedOrder's only friend is RiskGate" \
   "grep -nE '^[[:space:]]*friend[[:space:]]' engine/include/vyuha/risk/approved_order.h | grep -v 'friend class RiskGate;'"
 
-# compile_fail.cc holds such lines on purpose: ctest compile_fail.* requires each to fail to compile.
+# compile_fail.cc holds such lines on purpose (ctest compile_fail.* requires each to fail to compile). Only a line
+# in that file that also carries the marker is skipped, so a real violation elsewhere in it is still caught.
 check "engine: no cast or byte copy makes an ApprovedOrder" \
-  "grep -RInE '(reinterpret_cast|bit_cast|const_cast|memcpy|memmove|start_lifetime_as)[^;]*ApprovedOrder' engine/src engine/include engine/tests engine/bindings engine/bench 2>/dev/null | grep -v '^engine/tests/compile_fail.cc:'"
+  "grep -RInE '(reinterpret_cast|bit_cast|const_cast|memcpy|memmove|start_lifetime_as)[^;]*ApprovedOrder' engine/src engine/include engine/tests engine/bindings engine/bench 2>/dev/null | grep -vE '^engine/tests/compile_fail\.cc:[0-9]+:.*// invariant-allow: compile-fail fixture\$'"
 
 check "audit_event never updated/deleted/truncated" \
   "grep -RInEi '(update|delete from|truncate)[[:space:]]+(table[[:space:]]+)?audit_event' --include='*.go' --include='*.py' --include='*.sql' --include='*.cc' gateway quant intel engine db 2>/dev/null | grep -v 'audit_no_update\|audit_immutable\|REVOKE'"
