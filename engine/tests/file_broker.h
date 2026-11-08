@@ -24,7 +24,7 @@ class FileBroker final : public oms::IOrderSender, public oms::IBrokerOrderBook 
   FileBroker(std::string path, CrashPoint crash) : path_(std::move(path)), crash_(crash) {}
 
   // NOLINTNEXTLINE(bugprone-exception-escape): a test's failure may terminate
-  [[nodiscard]] bool send(const oms::Order& /*order*/, std::string_view tag) noexcept override {
+  [[nodiscard]] bool send(const risk::ApprovedOrder& /*order*/, std::string_view tag) noexcept override {
     if (crash_ == CrashPoint::kBeforeSend) {
       std::raise(SIGKILL);  // NOLINT(cert-err33-c): it doesn't return
     }

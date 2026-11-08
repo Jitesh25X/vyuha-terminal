@@ -144,7 +144,19 @@ Current milestone: **M4.1, then M2**
   - deps: M2.1
   - needs: nothing new
   - done: crash test above; property tests over the new table
-- [ ] **M2.2** RiskGate framework (`ApprovedOrder` construct-only-by-gate, rule table, GateContext)
+- [x] **M2.2** RiskGate framework (`ApprovedOrder` construct-only-by-gate, rule table, GateContext) — 2026-11-08: done.
+  - **What was built:** `risk::ApprovedOrder` (final, move-only, private constructor, friend `RiskGate` only, not trivially copyable) and `RiskGate` with a rule table of plain functions in §3 order. The table is validated at `create`, and the first hard reject stops the chain. Warnings are kept; an unknown verdict counts as a reject. A table missing any of the 22 rules refuses every live order with `R-LIVE-DISABLED`. Every order counts as opening until M2.6.
+  - **Order path:** `IOrderSender::send` takes `ApprovedOrder`. `OrderRouter::submit(handle, ApprovedOrder)` records APPROVED with the gate stamp in `order_event.payload.gate`. It refuses an approval that is spent, for another order, for the other `Venue` (a required router argument), or older than 100 ms. Intake refuses a reused order id (carried over from the M2.1b review).
+  - **Done criterion:** ctest `compile_fail.*` compiles a control and 11 forbidden cases (raw `Order` or details to `send`/`submit`, construct, brace, default, copy, derive, `bit_cast`, temporary clock). Each must fail with its own error text. `check-invariants.sh` checks for extra friends and casts. RapidCheck checks the chain against §3; the bench is `BM_RiskGateFullChainPasses`. RISK_ENGINE §3 notes updated.
+  - **risk-reviewer:** APPROVE with P1s, all fixed before commit: `bit_cast` forgery, the paper default reaching a live sender, stale or moved-from approvals. P2s fixed: the borrowed rule table and temporary clock, `ts` in the payload, the duplicate order id, case-specific compile-fail errors.
+  - **Owner decisions (2026-11-08):**
+    - (1) **Approval age** 100 ms, configurable by `RISK_APPROVAL_MAX_AGE_MS` (whole ms, 1–10,000; anything else refuses to start). A stale or future-dated approval ends the order: RISK_REJECTED with `R-APPROVAL-STALE` and the stamp. It gets an `order.approval_stale` audit row and an `APPROVAL_STALE` alert (warn) to active admins, in the same transaction, and is never retried. Metric: approval-to-send histogram `vyuha_engine_approval_to_send_seconds` (`OrderRouter::approval_to_send`; exported once the engine has a metrics endpoint). Done here, with unit tests and a Postgres test.
+    - (2) Recording gate rejections → added to M2.8's done check.
+    - (3) Stateful rules are two-phase → written into M2.3's spec and done check.
+    - (4) `is_paper` becomes a required field with no default → M2.2b.
+    - (5) `ApprovedModify` arrives with the modify send path.
+  - **Gate bench, release build, local (M-series Mac, one run; the official numbers come from the staging VM):** full 22-rule chain with pass-through rules, 1,000,000 timed evaluations: p50 83 ns, p99 125 ns, p99.9 167 ns, max 37 µs (one scheduler outlier). Target p99 < 20 µs.
+  - **Process:** the `bit_cast` fixture in `compile_fail.cc` is excluded from the cast check only by its inline marker `// invariant-allow: compile-fail fixture`, so a real violation elsewhere in that file is still caught.
   - deps: M2.1
   - needs: nothing new
   - done: Compile-time test that adapters can't receive raw intents
@@ -152,11 +164,12 @@ Current milestone: **M4.1, then M2**
 - [ ] **M2.2b** Outage rules (owner, 2026-11-07): while the order log isn't durable, nothing that adds risk goes out; a queued order has an age limit. New ADR.
   - deps: M2.1b (may start after M2.2; must finish before M2.3)
   - needs: nothing new
-  - done: (1) While `healthy()` is false, these are refused with a clear error code and an alert: new orders, a modify that raises qty, and a price or trigger modify on an opening order. Cancels and `cancel_all` always go through. Until positions exist (M2.6), the OMS can't tell an opening order from a reducing one, so every price or trigger modify counts as opening (fail closed); revisit at M2.6. (2) A queued order (`APPROVED`, not yet sent) older than `ORDER_QUEUE_MAX_AGE` (default 5 s, configurable) is never sent: it becomes `EXPIRED` with an audit row and an alert, in the same transaction as the restart rule (reason e.g. `EXPIRED_IN_QUEUE`). (3) Unit tests for each refused kind and for each cancel path during an outage; age-limit tests on both sides of the limit, plus a Postgres test that the expiry, audit and alert land together.
+  - done: (0) `OrderDetails::is_paper` is a required field with no default, so forgetting it is a compile error (owner, 2026-11-08). (1) While `healthy()` is false, these are refused with a clear error code and an alert: new orders, a modify that raises qty, and a price or trigger modify on an opening order. Cancels and `cancel_all` always go through. Until positions exist (M2.6), the OMS can't tell an opening order from a reducing one, so every price or trigger modify counts as opening (fail closed); revisit at M2.6. (2) A queued order (`APPROVED`, not yet sent) older than `ORDER_QUEUE_MAX_AGE` (measured from its gate stamp `ts`, M2.2 review) (default 5 s, configurable) is never sent: it becomes `EXPIRED` with an audit row and an alert, in the same transaction as the restart rule (reason e.g. `EXPIRED_IN_QUEUE`). (3) Unit tests for each refused kind and for each cancel path during an outage; age-limit tests on both sides of the limit, plus a Postgres test that the expiry, audit and alert land together.
 - [ ] **M2.3** Rules R-KILL…R-ORDER-SHAPE, R-FAT-FINGER, R-ORDER-VALUE, R-DUP, R-OPS
   - deps: M2.2, M2.2b
   - needs: nothing new
-  - done: Per-rule unit tests; bench p99 < 20 µs
+  - done: Per-rule unit tests; bench p99 < 20 µs (p50/p99 from `BM_RiskGateFullChainPercentiles`); a rejected order leaves the R-OPS token bucket and the R-DUP window unchanged (test).
+  - spec (owner, 2026-11-08): **stateful rules are two-phase.** Each stateful rule (`R-DUP`, `R-OPS`) has a pure `check()` and a separate `on_approved()`. The gate runs every `check()` first; only when the whole chain passes does it call `on_approved()` on each, in chain order. A rejected order never uses up an OPS token or creates a duplicate-window entry. The core thread is the only writer, so there's no race between check and commit.
 - [ ] **M2.4** Rules R-OPEN-ORDERS…R-DISCIPLINE with incremental scope aggregation
   - deps: M2.3
   - needs: nothing new
@@ -178,7 +191,7 @@ Current milestone: **M4.1, then M2**
 - [ ] **M2.8** Gateway: orders/positions/pnl/limits/kill APIs + WS channels
   - deps: M2.7
   - needs: nothing new
-  - done: API tests
+  - done: API tests; every gate rejection is persisted with its stamp, rule code, limit and current value (owner, 2026-11-08).
   - notes: `POST /orders` calls `Oms::intake` and maps `kOrderDup` to 409 `ORDER_DUP`. Also check Postgres for `client_order_id`, because intake only knows this run: an order finished earlier must return the existing order, not reach the writer.
 - [ ] **M2.9** Web: `ORD` ticket with live preview, `BLT`, `POS`, `PNL`, `LIM`, `KILL`, hotkeys
   - deps: M2.8

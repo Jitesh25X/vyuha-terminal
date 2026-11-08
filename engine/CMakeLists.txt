@@ -72,11 +72,18 @@ add_library(vyuha_upstox
 )
 add_library(vyuha::upstox ALIAS vyuha_upstox)
 
-# Market-data bus: protobuf encoders + NATS publisher (md.tick.*, md.bar.*, KV md_last).
+# Order state machine and router.
 add_library(vyuha_oms STATIC src/oms/oms.cc src/oms/order_router.cc)
 add_library(vyuha::oms ALIAS vyuha_oms)
 target_link_libraries(vyuha_oms PUBLIC vyuha::core PRIVATE vyuha_warnings)
 
+# The pre-trade RiskGate (RISK_ENGINE §3). ApprovedOrder is header-only, so the router can take one without
+# linking the gate.
+add_library(vyuha_risk STATIC src/risk/risk_gate.cc)
+add_library(vyuha::risk ALIAS vyuha_risk)
+target_link_libraries(vyuha_risk PUBLIC vyuha::oms PRIVATE vyuha_warnings)
+
+# Market-data bus: protobuf encoders + NATS publisher (md.tick.*, md.bar.*, KV md_last).
 add_library(vyuha_bus src/bus/md_encode.cc src/bus/md_publisher.cc)
 add_library(vyuha::bus ALIAS vyuha_bus)
 target_link_libraries(vyuha_bus PUBLIC vyuha::core PRIVATE vyuha_warnings cnats::nats_static)

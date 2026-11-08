@@ -14,6 +14,7 @@
 
 #include "pg_temp_db.h"
 #include "require_services.h"
+#include "test_gate.h"
 #include "vyuha/core/clock.h"
 #include "vyuha/oms/oms.h"
 #include "vyuha/oms/order_router.h"
@@ -518,7 +519,7 @@ TEST(PgOrderStore, ARetriedExpiryChangesNothing) {
 class RecordingBroker final : public IOrderSender {
  public:
   // NOLINTNEXTLINE(bugprone-exception-escape): a test's allocation failure may terminate
-  [[nodiscard]] bool send(const Order& /*order*/, std::string_view tag) noexcept override {
+  [[nodiscard]] bool send(const risk::ApprovedOrder& /*order*/, std::string_view tag) noexcept override {
     sent.emplace_back(tag);
     return true;
   }
@@ -530,6 +531,45 @@ class RecordingBroker final : public IOrderSender {
   std::vector<std::string> sent;
   std::vector<std::string> cancelled;
 };
+
+// Owner, 2026-11-08: a stale approval ends the order, and the rejection, its audit row and the admins' alert
+// land in one transaction.
+TEST(PgOrderStore, AStaleApprovalIsRejectedAuditedAndAlertedTogether) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  const SimClock gate_clock(clock.now() - kDefaultApprovalMaxAge - 1'000);
+  RecordingBroker broker;
+  {
+    PgOrderEventWriter writer(db.url());
+    Oms oms(writer, clock, 2);
+    OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8});
+    const OrderHandle h = oms.create(details(s, 1, 10)).value();
+    EXPECT_EQ(router.submit(h, testing::approve(oms.order(h).details, gate_clock)).error().code,
+              ErrorCode::kApprovalStale);
+    wait_written(writer, 2);
+  }
+  EXPECT_TRUE(broker.sent.empty());
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  const auto order = tx.exec("SELECT status::text, reject_code FROM \"order\"").one_row();
+  EXPECT_EQ(order[0].as<std::string>(), "RISK_REJECTED");
+  EXPECT_EQ(order[1].as<std::string>(), "R-APPROVAL-STALE");
+  const auto audit =
+      tx.exec(
+            "SELECT payload->>'reason_code', (payload->>'approval_age_ns')::bigint FROM audit_event "
+            "WHERE action = 'order.approval_stale'")
+          .one_row();
+  EXPECT_EQ(audit[0].as<std::string>(), "R-APPROVAL-STALE");
+  EXPECT_EQ(audit[1].as<std::int64_t>(), kDefaultApprovalMaxAge + 1'000);
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM alert_event WHERE title = 'APPROVAL_STALE'"), 1);
+  EXPECT_EQ(tx.query_value<std::string>("SELECT payload->'gate'->>'ts_ns' FROM order_event WHERE seq = 2"),
+            std::to_string(gate_clock.now()));
+}
 
 // A duplicate of an order from an earlier run gets past intake, which only knows this run. The owner's rule:
 // it fails alone, nothing else stops, and the kill switch's cancels go through.
@@ -551,17 +591,15 @@ TEST(PgOrderStore, ADuplicateAtTheWriterFailsOnlyItselfAndCancelAllStillGoesThro
   RecordingBroker broker;
   PgOrderEventWriter writer(db.url());
   Oms oms(writer, clock, 8);
-  OrderRouter router(oms, writer, broker, 20, 8);
+  OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8});
 
   OrderDetails duplicate = details(s, 2, 5);  // a new order id, client-1 again
   ASSERT_TRUE(duplicate.client_order_id.assign("client-1"));
   const OrderHandle dup = oms.create(duplicate).value();
-  ASSERT_TRUE(oms.apply(dup, E::kRiskApprove));
-  ASSERT_TRUE(router.submit(dup));
+  ASSERT_TRUE(router.submit(dup, testing::approve(oms.order(dup).details, clock)));
 
   const OrderHandle other = oms.create(details(s, 3, 5)).value();  // in the same batch or the next
-  ASSERT_TRUE(oms.apply(other, E::kRiskApprove));
-  ASSERT_TRUE(router.submit(other));
+  ASSERT_TRUE(router.submit(other, testing::approve(oms.order(other).details, clock)));
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
   while (router.pending() > 0 && std::chrono::steady_clock::now() < deadline) {
@@ -594,6 +632,10 @@ TEST(PgOrderStore, ADuplicateAtTheWriterFailsOnlyItselfAndCancelAllStillGoesThro
       tx.query_value<std::string>("SELECT status::text FROM \"order\" WHERE client_order_id = 'client-1'"),
       "RISK_REJECTED");  // the earlier order is untouched
   EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM \"order\""), 2);
+  EXPECT_EQ(tx.query_value<std::string>(
+                "SELECT e.payload->'gate'->>'ruleset_version' FROM order_event e JOIN \"order\" o ON o.id = "
+                "e.order_id WHERE o.client_order_id = 'client-3' AND e.to_status = 'APPROVED'"),
+            "0");  // the gate's stamp, on the APPROVED event
   const auto alert = tx.exec(
                            "SELECT severity, body->>'client_order_id', body->>'sqlstate' FROM alert_event "
                            "WHERE title = 'ORDER_EVENT_REFUSED'")

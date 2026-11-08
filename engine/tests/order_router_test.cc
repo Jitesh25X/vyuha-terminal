@@ -2,6 +2,8 @@
 
 #include "vyuha/oms/order_router.h"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -9,7 +11,10 @@
 
 #include <gtest/gtest.h>
 
+#include "test_gate.h"
 #include "vyuha/core/clock.h"
+#include "vyuha/core/latency_histogram.h"
+#include "vyuha/risk/risk_gate.h"
 
 namespace vyuha::oms {
 namespace {
@@ -18,6 +23,7 @@ using enum OrderStatus;
 using E = OrderEvent;
 using Recovery = OrderRouter::Recovery;
 using BrokerState = BrokerOrderView::State;
+using risk::Outcome;
 
 class FixedClock final : public IClock {
  public:
@@ -55,11 +61,12 @@ class LaggingSink final : public IOrderEventSink {
 class FakeBroker final : public IOrderSender, public IBrokerOrderBook {
  public:
   // NOLINTNEXTLINE(bugprone-exception-escape): a test's allocation failure may terminate
-  [[nodiscard]] bool send(const Order& /*order*/, std::string_view tag) noexcept override {
+  [[nodiscard]] bool send(const risk::ApprovedOrder& order, std::string_view tag) noexcept override {
     if (busy) {
       return false;
     }
     tags.emplace_back(tag);
+    sent_qty.push_back(order.order().qty);
     return true;
   }
   // NOLINTNEXTLINE(bugprone-exception-escape): a test's allocation failure may terminate
@@ -84,6 +91,7 @@ class FakeBroker final : public IOrderSender, public IBrokerOrderBook {
     return out;
   }
   std::vector<std::string> tags;
+  std::vector<std::int32_t> sent_qty;
   std::vector<Uuid> cancels;
   BrokerOrderView view;
   bool busy{false};
@@ -97,6 +105,9 @@ std::string tag_of_client() { return broker_tag(kClient, kTagLimit); }
 OrderDetails order_of(std::int32_t qty, std::string_view client = kClient) {
   OrderDetails d;
   d.id.bytes.fill(1);
+  for (std::size_t i = 0; i < client.size(); ++i) {  // one id per client id: intake refuses a reused id
+    d.id.bytes.at(i % d.id.bytes.size()) ^= static_cast<std::uint8_t>(client[i]);
+  }
   EXPECT_TRUE(d.client_order_id.assign(client));
   d.qty = qty;
   d.price = Price::from_units(1'000'000);
@@ -108,12 +119,12 @@ struct Rig {
   LaggingSink sink;
   FakeBroker broker;
   Oms oms{sink, clock, 8};
-  OrderRouter router{oms, sink, broker, kTagLimit, 8};
+  OrderRouter router{oms, sink, broker, Venue::kPaper, {.tag_limit = kTagLimit, .capacity = 8}};
 
-  OrderHandle approved(std::int32_t qty = 10) {
-    const OrderHandle h = oms.create(order_of(qty)).value();
-    EXPECT_TRUE(oms.apply(h, E::kRiskApprove).has_value());
-    return h;
+  OrderHandle fresh(std::int32_t qty = 10) { return oms.create(order_of(qty)).value(); }
+  // Through the gate, as every order is.
+  std::expected<void, Error> submit(OrderHandle h) {
+    return router.submit(h, testing::approve(oms.order(h).details, clock));
   }
   OrderHandle restored(OrderStatus status, std::int32_t filled = 0, std::int32_t qty = 10) {
     RecoveredOrder r;
@@ -133,8 +144,8 @@ TEST(BrokerTag, KeepsLettersAndDigitsAndTheTail) {
 
 TEST(OrderRouter, NothingIsSentUntilApprovedIsDurable) {
   Rig r;
-  const OrderHandle h = r.approved();
-  ASSERT_TRUE(r.router.submit(h));
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
   EXPECT_EQ(r.sink.events.size(), 2U);  // NEW, APPROVED
 
   r.sink.durable_count = 1;  // NEW only
@@ -156,8 +167,8 @@ TEST(OrderRouter, NothingIsSentUntilApprovedIsDurable) {
 
 TEST(OrderRouter, SendsNothingWhileTheWriterIsUnhealthy) {
   Rig r;
-  const OrderHandle h = r.approved();
-  ASSERT_TRUE(r.router.submit(h));
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
   r.sink.durable_count = 2;
   r.sink.is_healthy = false;
   EXPECT_EQ(r.router.poll(), 0U);
@@ -168,8 +179,8 @@ TEST(OrderRouter, SendsNothingWhileTheWriterIsUnhealthy) {
 
 TEST(OrderRouter, ABusyAdapterIsRetried) {
   Rig r;
-  const OrderHandle h = r.approved();
-  ASSERT_TRUE(r.router.submit(h));
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
   r.sink.durable_count = 2;
   r.broker.busy = true;
   EXPECT_EQ(r.router.poll(), 0U);
@@ -181,8 +192,8 @@ TEST(OrderRouter, ABusyAdapterIsRetried) {
 
 TEST(OrderRouter, AFullSinkAfterSendingNeverSendsAgain) {
   Rig r;
-  const OrderHandle h = r.approved();
-  ASSERT_TRUE(r.router.submit(h));
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
   r.sink.durable_count = 2;
   r.sink.full = true;
   EXPECT_EQ(r.router.poll(), 1U);
@@ -197,11 +208,10 @@ TEST(OrderRouter, AFullSinkAfterSendingNeverSendsAgain) {
 
 TEST(OrderRouter, OrdersGoOutInOrder) {
   Rig r;
-  const OrderHandle a = r.approved();
+  const OrderHandle a = r.fresh();
   const OrderHandle b = r.oms.create(order_of(5, "second-order")).value();
-  ASSERT_TRUE(r.oms.apply(b, E::kRiskApprove));
-  ASSERT_TRUE(r.router.submit(a));
-  ASSERT_TRUE(r.router.submit(b));
+  ASSERT_TRUE(r.submit(a));
+  ASSERT_TRUE(r.submit(b));
   r.sink.durable_count = 4;
   EXPECT_EQ(r.router.poll(), 2U);
   ASSERT_EQ(r.broker.tags.size(), 2U);
@@ -211,9 +221,8 @@ TEST(OrderRouter, OrdersGoOutInOrder) {
 TEST(OrderRouter, AnOrderThatMovedOnWhileWaitingIsNotSent) {
   Rig r;
   const OrderHandle h = r.oms.create(order_of(1)).value();
-  ASSERT_TRUE(r.oms.apply(h, E::kRiskApprove));
-  ASSERT_TRUE(r.router.submit(h));
-  EXPECT_FALSE(r.router.submit(99).has_value());
+  ASSERT_TRUE(r.submit(h));
+  EXPECT_FALSE(r.router.submit(99, testing::approve(r.oms.order(h).details, r.clock)).has_value());
   r.sink.durable_count = 2;
   ASSERT_TRUE(r.oms.record_sent(h));  // something else moved it
   EXPECT_EQ(r.router.poll(), 0U);
@@ -223,8 +232,8 @@ TEST(OrderRouter, AnOrderThatMovedOnWhileWaitingIsNotSent) {
 
 TEST(OrderRouter, AnOrderStorageRefusedIsNeverSentThoughItsEventsCountAsDurable) {
   Rig r;
-  const OrderHandle h = r.approved();
-  ASSERT_TRUE(r.router.submit(h));
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
   r.sink.refused.push_back(r.oms.order(h).details.id);
   r.sink.durable_count = 2;
   EXPECT_EQ(r.router.poll(), 0U);
@@ -237,8 +246,8 @@ TEST(OrderRouter, AnOrderStorageRefusedIsNeverSentThoughItsEventsCountAsDurable)
 // The owner's rule: one bad request never stops a kill-switch cancel.
 TEST(OrderRouter, ADuplicateThenCancelAllStillGoesThrough) {
   Rig r;
-  const OrderHandle live = r.approved();
-  ASSERT_TRUE(r.router.submit(live));
+  const OrderHandle live = r.fresh();
+  ASSERT_TRUE(r.submit(live));
   r.sink.durable_count = 2;
   ASSERT_EQ(r.router.poll(), 1U);
   ASSERT_TRUE(r.oms.apply(live, E::kBrokerAck));
@@ -257,14 +266,13 @@ TEST(OrderRouter, ADuplicateThenCancelAllStillGoesThrough) {
 
 TEST(OrderRouter, CancelAllIgnoresTheStateOfTheOrderLog) {
   Rig r;
-  const OrderHandle live = r.approved();
-  ASSERT_TRUE(r.router.submit(live));
+  const OrderHandle live = r.fresh();
+  ASSERT_TRUE(r.submit(live));
   r.sink.durable_count = 2;
   ASSERT_EQ(r.router.poll(), 1U);
   ASSERT_TRUE(r.oms.apply(live, E::kBrokerAck));
   const OrderHandle queued = r.oms.create(order_of(5, "queued-order")).value();
-  ASSERT_TRUE(r.oms.apply(queued, E::kRiskApprove));
-  ASSERT_TRUE(r.router.submit(queued));
+  ASSERT_TRUE(r.submit(queued));
   const OrderHandle restored = r.restored(kPartiallyFilled, 1);
 
   r.sink.is_healthy = false;  // Postgres down, the ring full, and durable() far behind
@@ -307,7 +315,7 @@ TEST(OrderRouterRecovery, ApprovedAndNotAtTheBrokerExpiresAndIsNeverSent) {
 
   r.sink.durable_count = r.sink.events.size();
   EXPECT_FALSE(r.oms.can_send(h));
-  EXPECT_FALSE(r.router.submit(h).has_value());  // nor can anyone queue it by hand
+  EXPECT_FALSE(r.submit(h).has_value());  // nor can anyone queue it by hand
   EXPECT_EQ(r.router.pending(), 0U);
   EXPECT_EQ(r.router.poll(), 0U);
   EXPECT_TRUE(r.broker.tags.empty());
@@ -321,7 +329,7 @@ TEST(OrderRouterRecovery, ExpiryThatCantBeRecordedLeavesTheOrderBlocked) {
   EXPECT_EQ(r.oms.order(h).status, kApproved);
   EXPECT_TRUE(r.oms.order(h).needs_reconcile);
   EXPECT_FALSE(r.oms.can_send(h));
-  EXPECT_FALSE(r.router.submit(h).has_value());
+  EXPECT_FALSE(r.submit(h).has_value());
 
   r.sink.full = false;  // the next pass finishes the job
   EXPECT_EQ(r.router.recover(h, r.broker), Recovery::kResolved);
@@ -338,7 +346,7 @@ TEST(OrderRouterRecovery, AdoptionThatCantBeRecordedLeavesTheOrderBlocked) {
   EXPECT_EQ(r.router.recover(h, r.broker), Recovery::kUnresolved);
   EXPECT_EQ(r.oms.order(h).status, kApproved);
   EXPECT_FALSE(r.oms.can_send(h));  // the broker has it: this must not look sendable
-  EXPECT_FALSE(r.router.submit(h).has_value());
+  EXPECT_FALSE(r.submit(h).has_value());
   EXPECT_EQ(r.broker.tags.size(), 1U);
 }
 
@@ -414,24 +422,22 @@ TEST(OrderRouterRecovery, OpenWithFillsIsPartlyFilled) {
 // The kill switch's flatten orders queue behind whatever went before, so nothing here may wedge the queue.
 TEST(OrderRouter, NewOrdersStillGoOutAfterCancelAll) {
   Rig r;
-  const OrderHandle sent = r.approved();
-  ASSERT_TRUE(r.router.submit(sent));
+  const OrderHandle sent = r.fresh();
+  ASSERT_TRUE(r.submit(sent));
   r.sink.durable_count = r.sink.events.size();
   ASSERT_EQ(r.router.poll(), 1U);
 
   OrderDetails queued_details = order_of(10, "client-queued");
   queued_details.id.bytes.fill(2);
   const OrderHandle queued = r.oms.create(queued_details).value();
-  ASSERT_TRUE(r.oms.apply(queued, E::kRiskApprove));
-  ASSERT_TRUE(r.router.submit(queued));
+  ASSERT_TRUE(r.submit(queued));
   ASSERT_TRUE(r.router.cancel_all().failed == 0U);
   EXPECT_EQ(r.router.pending(), 0U);
 
   OrderDetails later_details = order_of(10, "client-later");
   later_details.id.bytes.fill(3);
   const OrderHandle later = r.oms.create(later_details).value();
-  ASSERT_TRUE(r.oms.apply(later, E::kRiskApprove));
-  ASSERT_TRUE(r.router.submit(later));
+  ASSERT_TRUE(r.submit(later));
   r.sink.durable_count = r.sink.events.size();
   EXPECT_EQ(r.router.poll(), 1U);
   EXPECT_EQ(r.oms.order(later).status, kSent);
@@ -441,8 +447,8 @@ TEST(OrderRouter, NewOrdersStillGoOutAfterCancelAll) {
 
 TEST(OrderRouter, CancelAllAsksForAnOrderHandedOverButNotYetRecorded) {
   Rig r;
-  const OrderHandle h = r.approved();
-  ASSERT_TRUE(r.router.submit(h));
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
   r.sink.durable_count = r.sink.events.size();
   r.sink.full = true;  // the adapter takes it, and SENT can't be recorded
   ASSERT_EQ(r.router.poll(), 1U);
@@ -460,8 +466,7 @@ TEST(OrderRouter, CancelAllAsksForARestoredApprovedOrderButNotAQueuedOne) {
   OrderDetails queued_details = order_of(10, "client-queued");
   queued_details.id.bytes.fill(2);
   const OrderHandle queued = r.oms.create(queued_details).value();
-  ASSERT_TRUE(r.oms.apply(queued, E::kRiskApprove));
-  ASSERT_TRUE(r.router.submit(queued));
+  ASSERT_TRUE(r.submit(queued));
   const auto out = r.router.cancel_all();
   EXPECT_EQ(out.asked, 1U);
   ASSERT_EQ(r.broker.cancels.size(), 1U);
@@ -618,6 +623,204 @@ TEST(OrderRouterRecovery, AnOpenOrderTheBrokerLacksIsAMismatch) {
   EXPECT_EQ(r.oms.recon_mismatches(), 1U);
   EXPECT_EQ(r.oms.order(h).status, kOpen);
   EXPECT_TRUE(r.oms.order(h).needs_reconcile);
+}
+
+// Invariant 1: what reaches the adapter is what the gate passed, and the APPROVED event says which limit set.
+TEST(OrderRouter, SendsWhatTheGateApprovedAndRecordsItsStamp) {
+  Rig r;
+  const OrderHandle h = r.fresh(7);
+  ASSERT_TRUE(r.submit(h));
+  ASSERT_EQ(r.sink.events.size(), 2U);
+  EXPECT_EQ(r.sink.events[1].to, kApproved);
+  EXPECT_TRUE(r.sink.events[1].gate.has_value());
+  EXPECT_FALSE(r.sink.events[0].gate.has_value());  // NEW isn't the gate's
+  r.sink.durable_count = 2;
+  ASSERT_EQ(r.router.poll(), 1U);
+  EXPECT_EQ(r.broker.sent_qty, std::vector<std::int32_t>{7});
+}
+
+TEST(OrderRouter, AnApprovalForAnotherOrderIsRefused) {
+  Rig r;
+  const OrderHandle h = r.fresh(10);
+  OrderDetails bigger = r.oms.order(h).details;
+  bigger.qty = 1'000;  // same id, different body: not what the order is
+  EXPECT_EQ(r.router.submit(h, testing::approve(bigger, r.clock)).error().code, ErrorCode::kInvalidArgument);
+  OrderDetails other = order_of(10, "other-client");
+  other.id.bytes.fill(9);
+  EXPECT_EQ(r.router.submit(h, testing::approve(other, r.clock)).error().code, ErrorCode::kInvalidArgument);
+  EXPECT_EQ(r.oms.order(h).status, kNew);
+  EXPECT_EQ(r.sink.events.size(), 1U);  // nothing recorded
+  EXPECT_EQ(r.router.pending(), 0U);
+}
+
+TEST(OrderRouter, AFullSinkAtSubmitLeavesTheOrderNew) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  r.sink.full = true;
+  EXPECT_EQ(r.submit(h).error().code, ErrorCode::kCapacityExceeded);
+  EXPECT_EQ(r.oms.order(h).status, kNew);
+  EXPECT_EQ(r.router.pending(), 0U);
+  r.sink.full = false;
+  EXPECT_TRUE(r.submit(h).has_value());  // a fresh evaluation goes through
+}
+
+// Oms::apply can mark an order APPROVED, but only the router's queue reaches the adapter, and it takes only
+// the gate's approval of a NEW order.
+TEST(OrderRouter, AnOrderMarkedApprovedWithoutTheGateIsNeverSent) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.oms.apply(h, E::kRiskApprove));
+  EXPECT_FALSE(r.submit(h).has_value());
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_TRUE(r.broker.tags.empty());
+}
+
+Outcome pass_rule(const risk::GateContext& /*ctx*/, const OrderDetails& /*order*/,
+                  const risk::GateFacts& /*facts*/) noexcept {
+  return {};
+}
+template <std::size_t... I>
+constexpr std::array<risk::Rule, risk::kRuleCount> all_pass(std::index_sequence<I...> /*seq*/) {
+  return {risk::Rule{.code = static_cast<risk::RuleCode>(I + 1), .eval = &pass_rule}...};
+}
+constexpr auto kAllPass = all_pass(std::make_index_sequence<risk::kRuleCount>{});
+
+// A paper flag left at its default can't reach a live sender, and a live approval can't go to paper.
+TEST(OrderRouter, PaperAndLiveDontMix) {
+  Rig r;
+  OrderRouter live{r.oms, r.sink, r.broker, Venue::kLive, {.tag_limit = kTagLimit, .capacity = 8}};
+  const OrderHandle paper = r.fresh();
+  EXPECT_EQ(live.submit(paper, testing::approve(r.oms.order(paper).details, r.clock)).error().code,
+            ErrorCode::kInvalidArgument);
+  EXPECT_EQ(r.oms.order(paper).status, kNew);
+
+  OrderDetails real = order_of(10, "live-client");
+  real.id.bytes.fill(4);
+  real.is_paper = false;
+  const OrderHandle h = r.oms.create(real).value();
+  const auto gate = risk::RiskGate::create(kAllPass, r.clock).value();
+  auto decision = gate.evaluate({}, real);
+  ASSERT_TRUE(decision.approved.has_value());
+  EXPECT_EQ(r.router.submit(h, std::move(decision.approved).value()).error().code,  // NOLINT
+            ErrorCode::kInvalidArgument);                                           // the paper router
+  auto again = gate.evaluate({}, real);
+  ASSERT_TRUE(again.approved.has_value());
+  EXPECT_TRUE(live.submit(h, std::move(again.approved).value()).has_value());  // NOLINT
+}
+
+// Evaluated and submitted in one pass: an approval held back may predate a kill switch or a limit cut. A
+// stale one ends the order (owner, 2026-11-08): RISK_REJECTED with R-APPROVAL-STALE and the stamp, no retry.
+TEST(OrderRouter, AStaleApprovalRejectsTheOrderForGood) {
+  Rig r;  // the OMS clock reads 1'000
+  const OrderHandle h = r.fresh();
+  const SimClock too_old(1'000 - kDefaultApprovalMaxAge - 1);
+  EXPECT_EQ(r.router.submit(h, testing::approve(r.oms.order(h).details, too_old)).error().code,
+            ErrorCode::kApprovalStale);
+  EXPECT_EQ(r.oms.order(h).status, kRiskRejected);
+  ASSERT_EQ(r.sink.events.size(), 2U);
+  EXPECT_EQ(r.sink.events[1].to, kRiskRejected);
+  EXPECT_EQ(r.sink.events[1].reason_code.view(), kApprovalStale);
+  ASSERT_TRUE(r.sink.events[1].gate.has_value());
+  EXPECT_EQ(r.sink.events[1].gate.value_or(risk::GateStamp{}).ts, 1'000 - kDefaultApprovalMaxAge - 1);
+  EXPECT_EQ(r.router.stale_approvals(), 1U);
+  EXPECT_EQ(r.router.pending(), 0U);
+
+  // A fresh approval can't revive it: it's no longer NEW.
+  EXPECT_EQ(r.submit(h).error().code, ErrorCode::kInvalidArgument);
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_TRUE(r.broker.tags.empty());
+}
+
+TEST(OrderRouter, AnApprovalFromTheFutureIsStaleToo) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  const SimClock ahead(2'000);
+  EXPECT_EQ(r.router.submit(h, testing::approve(r.oms.order(h).details, ahead)).error().code,
+            ErrorCode::kApprovalStale);
+  EXPECT_EQ(r.oms.order(h).status, kRiskRejected);
+}
+
+TEST(OrderRouter, AnApprovalExactlyAtTheLimitGoes) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  const SimClock at_limit(1'000 - kDefaultApprovalMaxAge);
+  EXPECT_TRUE(r.router.submit(h, testing::approve(r.oms.order(h).details, at_limit)).has_value());
+  EXPECT_EQ(r.oms.order(h).status, kApproved);
+}
+
+TEST(OrderRouter, AStaleRejectionThatCantBeRecordedLeavesTheOrderNew) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  r.sink.full = true;
+  const SimClock too_old(1'000 - kDefaultApprovalMaxAge - 1);
+  EXPECT_EQ(r.router.submit(h, testing::approve(r.oms.order(h).details, too_old)).error().code,
+            ErrorCode::kCapacityExceeded);
+  EXPECT_EQ(r.oms.order(h).status, kNew);
+  EXPECT_EQ(r.router.stale_approvals(), 0U);
+}
+
+TEST(OrderRouter, TheApprovalAgeLimitIsConfigurable) {
+  Rig r;
+  OrderRouter tight{r.oms,
+                    r.sink,
+                    r.broker,
+                    Venue::kPaper,
+                    {.tag_limit = kTagLimit, .capacity = 8, .approval_max_age = 500}};
+  const OrderHandle h = r.fresh();
+  const SimClock six_hundred_ns_ago(400);  // well inside the default, outside this router's 500 ns
+  EXPECT_EQ(tight.submit(h, testing::approve(r.oms.order(h).details, six_hundred_ns_ago)).error().code,
+            ErrorCode::kApprovalStale);
+}
+
+TEST(OrderRouter, RecordsApprovalToSendTime) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  const SimClock approved_at(1'000 - 30'000);  // 30 µs before the OMS clock's 1'000
+  ASSERT_TRUE(r.router.submit(h, testing::approve(r.oms.order(h).details, approved_at)));
+  EXPECT_EQ(r.router.approval_to_send().count(), 0U);  // not sent yet
+  r.sink.durable_count = r.sink.events.size();
+  ASSERT_EQ(r.router.poll(), 1U);
+  const LatencyHistogram& m = r.router.approval_to_send();
+  EXPECT_EQ(m.count(), 1U);
+  EXPECT_EQ(m.sum(), 30'000);
+  EXPECT_EQ(m.max(), 30'000);
+  EXPECT_EQ(m.bucket(1), 1U);  // (10 µs, 50 µs]
+}
+
+TEST(ApprovalMaxAge, ParsesWholeMillisecondsInRange) {
+  EXPECT_EQ(parse_approval_max_age_ms("").value_or(0), kDefaultApprovalMaxAge);
+  EXPECT_EQ(parse_approval_max_age_ms("100").value_or(0), 100'000'000);
+  EXPECT_EQ(parse_approval_max_age_ms("1").value_or(0), 1'000'000);
+  EXPECT_EQ(parse_approval_max_age_ms("10000").value_or(0), 10'000'000'000);
+  for (const std::string_view bad :
+       {"0", "-5", "10001", "100ms", " 100", "1.5", "abc", "99999999999999999999"}) {
+    EXPECT_FALSE(parse_approval_max_age_ms(bad).has_value()) << bad;
+  }
+}
+
+TEST(OrderRouter, AMovedFromApprovalApprovesNothing) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  risk::ApprovedOrder first = testing::approve(r.oms.order(h).details, r.clock);
+  risk::ApprovedOrder taken = std::move(first);
+  // NOLINTNEXTLINE(bugprone-use-after-move,hicpp-invalid-access-moved): that's the test
+  EXPECT_TRUE(first.spent());
+  EXPECT_FALSE(taken.spent());
+  // NOLINTNEXTLINE(bugprone-use-after-move,hicpp-invalid-access-moved): that's the test
+  EXPECT_EQ(r.router.submit(h, std::move(first)).error().code, ErrorCode::kInvalidArgument);
+  EXPECT_TRUE(r.router.submit(h, std::move(taken)).has_value());
+}
+
+// One id is one order (M2.1b review: intake must refuse an id reused with another client id).
+TEST(OrderRouter, IntakeRefusesAnOrderIdAlreadyUsed) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  OrderDetails reused = order_of(10, "another-client");
+  reused.id = r.oms.order(h).details.id;
+  EXPECT_EQ(r.oms.create(reused).error().code, ErrorCode::kOrderDup);
+  EXPECT_EQ(r.oms.size(), 1U);
 }
 
 }  // namespace

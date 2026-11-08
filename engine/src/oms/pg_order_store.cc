@@ -137,6 +137,34 @@ void log_retry(std::size_t events, std::string_view sqlstate) {
   return url + (url.find('?') == std::string::npos ? "?" : "&") + "connect_timeout=5";
 }
 
+// A stale approval (owner, 2026-11-08) ends the order: audited and alerted in the status's transaction, so a
+// dropped order is never silent. Only on the transition, so a later event can't repeat it; any other event is
+// left alone.
+void record_approval_stale(pqxx::work& tx, const std::string& id, const OrderEventRecord& e) {
+  if (e.to != OrderStatus::kRiskRejected || e.from == e.to || e.reason_code.view() != kApprovalStale) {
+    return;
+  }
+  const Nanos age = e.gate.has_value() ? e.ts - e.gate->ts : 0;
+  tx.exec(
+      R"(INSERT INTO audit_event (actor_kind, action, entity, entity_id, payload)
+         SELECT 'engine', 'order.approval_stale', 'order', o.id::text,
+                jsonb_build_object('reason_code', $2::text, 'seq', $3::int, 'approval_age_ns', $4::bigint,
+                                   'client_order_id', o.client_order_id, 'account_id', o.account_id,
+                                   'instrument_id', o.instrument_id, 'side', o.side, 'qty', o.qty,
+                                   'is_paper', o.is_paper)
+         FROM "order" o WHERE o.id = $1::uuid)",
+      pqxx::params{id, std::string(e.reason_code.view()), e.seq, age});
+  tx.exec(
+      R"(INSERT INTO alert_event (user_id, severity, title, body)
+         SELECT u.id, 'warn', 'APPROVAL_STALE',
+                jsonb_build_object('order_id', o.id, 'client_order_id', o.client_order_id,
+                                   'account_id', o.account_id, 'approval_age_ns', $2::bigint,
+                                   'is_paper', o.is_paper)
+         FROM "order" o CROSS JOIN app_user u
+         WHERE o.id = $1::uuid AND u.role = 'admin' AND u.is_active)",
+      pqxx::params{id, age});
+}
+
 void write_event(pqxx::work& tx, const OrderEventRecord& e) {
   const std::string id = e.order_id.to_string();
   const Nanos micros = e.ts / kNanosPerMicro;
@@ -187,6 +215,10 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
   }
   if (e.modify.trigger.has_value()) {
     payload += std::format(R"(,"modified_trigger":"{}")", e.modify.trigger->to_string());
+  }
+  if (e.gate.has_value()) {
+    payload += std::format(R"(,"gate":{{"ruleset_version":{},"eval_ns":{},"ts_ns":{}}})",
+                           e.gate->ruleset_version, e.gate->eval_ns, e.gate->ts);
   }
   payload += '}';
   // A retry after an unknown commit finds the row already there, so nothing is written or alerted twice.
@@ -242,6 +274,7 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
            SELECT id, 'critical', 'RECON_MISMATCH', $1::jsonb FROM app_user WHERE role = 'admin' AND is_active)",
         pqxx::params{body});
   }
+  record_approval_stale(tx, id, e);
   // The restart rule (ADR-025): one transaction with the status, so an expiry is never unaudited or
   // unalerted. The transition, not the status: a late fill on an expired order is also recorded with to =
   // EXPIRED.
