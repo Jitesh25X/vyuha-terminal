@@ -62,7 +62,9 @@ TEST(CoreLoop, SequencesTicksUpdatesBookAndBuildsBars) {
 
   ASSERT_TRUE(kite->try_push(trade(1, ist(2026, 10, 28, 9, 15, 1), 100, 10)));
   ASSERT_TRUE(upstox->try_push(trade(2, ist(2026, 10, 28, 9, 15, 2), 200, 5)));
-  ASSERT_TRUE(kite->try_push(trade(1, ist(2026, 10, 28, 9, 15, 30), 105, 20)));
+  auto stamped = trade(1, ist(2026, 10, 28, 9, 15, 30), 105, 20);
+  stamped.recv_mono = 77;  // the gate ages the LTP from this, so it has to reach the book (D-26)
+  ASSERT_TRUE(kite->try_push(stamped));
   EXPECT_EQ(core.poll(), 3U);
 
   ASSERT_EQ(sink.ticks.size(), 3U);
@@ -70,6 +72,7 @@ TEST(CoreLoop, SequencesTicksUpdatesBookAndBuildsBars) {
   EXPECT_EQ(sink.ticks[1].instrument_id, 2U);
   EXPECT_EQ(sink.ticks[2].seq, 3U);
   EXPECT_EQ(core.book().find(1)->ltp, vyuha::Price::from_units(105 * vyuha::Price::kUnitsPerRupee));
+  EXPECT_EQ(core.book().find(1)->recv_mono, 77);
   EXPECT_NE(core.bars(BarInterval::k1m).forming(1), nullptr);
 
   // The clock (not a tick) closes 09:15 once 09:16 + grace has passed.

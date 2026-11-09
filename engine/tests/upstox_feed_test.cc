@@ -210,6 +210,11 @@ TEST(UpstoxFeed, AuthorizesEachConnectionResubscribesAndLogsTheGap) {
   }
   feed.stop();
   ASSERT_EQ(got.size(), 6U);  // 3 instruments × 2 connections
+  // D-26: stamped from the monotonic clock on arrival, which a wall-clock reading could not satisfy.
+  const vyuha::Nanos after = clock.monotonic();
+  EXPECT_TRUE(std::ranges::all_of(got, [after](const auto& t) {
+    return t.recv_mono > 0 && t.recv_mono <= after && after - t.recv_mono < 60 * vyuha::kNanosPerSecond;
+  }));
   EXPECT_TRUE(std::ranges::all_of(got, [](const auto& t) { return t.feed_id == 9U; }));  // ADR-009 routing
 
   const auto stats = feed.stats();

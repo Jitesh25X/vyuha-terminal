@@ -22,8 +22,8 @@ class IClock {
   IClock& operator=(IClock&&) = delete;
   virtual ~IClock() = default;
   [[nodiscard]] virtual Nanos now() const noexcept = 0;
-  // Nanoseconds since an arbitrary start. Never steps, so it measures elapsed time where a wall-clock step
-  // would matter; the OPS budgets use it (D-25). Comparable only with other readings of this clock.
+  // Nanoseconds since an arbitrary start. Never steps, so every duration a decision rests on uses it (D-25,
+  // D-26). Comparable only with other readings of this clock, so never publish or store it.
   [[nodiscard]] virtual Nanos monotonic() const noexcept = 0;
 };
 

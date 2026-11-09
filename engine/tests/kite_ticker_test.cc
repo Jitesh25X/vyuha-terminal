@@ -187,6 +187,11 @@ TEST(KiteTicker, ReconnectsResubscribesAndLogsTheGap) {
   ASSERT_EQ(got.size(), 10U);
   EXPECT_EQ(got[0].instrument_id, 1U);
   EXPECT_EQ(got[5].instrument_id, 1U);  // same stream again after the reconnect
+  // D-26: stamped from the monotonic clock on arrival, which a wall-clock reading could not satisfy.
+  const vyuha::Nanos after = clock.monotonic();
+  EXPECT_TRUE(std::ranges::all_of(got, [after](const auto& t) {
+    return t.recv_mono > 0 && t.recv_mono <= after && after - t.recv_mono < 60 * vyuha::kNanosPerSecond;
+  }));
   EXPECT_TRUE(std::ranges::all_of(got, [](const auto& t) { return t.feed_id == 7U; }));  // ADR-009 routing
 
   const auto stats = ticker.stats();

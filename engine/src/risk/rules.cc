@@ -29,17 +29,19 @@ constexpr std::int64_t saturate(Wide value) noexcept {
                                                           : static_cast<std::int64_t>(value);
 }
 
-// The LTP if there is one and it arrived within kLtpMaxAge. Too far in the future counts as stale as well.
-std::optional<Price> fresh_ltp(const GateContext& ctx, std::int64_t instrument_id, Nanos now) noexcept {
+// The LTP if there is one and it arrived within kLtpMaxAge. The book is the core thread's, as the gate is, so
+// a tick can't be newer than the gate's reading: one that looks it, or has no stamp, is refused.
+std::optional<Price> fresh_ltp(const GateContext& ctx, std::int64_t instrument_id, Nanos monotonic) noexcept {
   if (ctx.book == nullptr || instrument_id <= 0) {
     return std::nullopt;
   }
   const md::Tick* tick = ctx.book->find(static_cast<md::InstrumentId>(instrument_id));
-  if (tick == nullptr || tick->ltp <= Price{}) {
+  if (tick == nullptr || tick->ltp <= Price{} || tick->recv_mono <= 0) {
     return std::nullopt;
   }
-  const Nanos age = now - tick->recv_ts;
-  return age <= kLtpMaxAge && age >= -kLtpMaxAge ? std::optional{tick->ltp} : std::nullopt;
+  const Nanos age =
+      monotonic - tick->recv_mono;  // the engine's own receive stamp, never exchange time (D-26)
+  return age <= kLtpMaxAge && age >= 0 ? std::optional{tick->ltp} : std::nullopt;
 }
 
 // A hard limit that's breached rejects and a soft one warns. `over` says whether a limit value is breached.
@@ -282,7 +284,7 @@ Outcome fat_finger(const GateContext& ctx, const OrderDetails& o, const GateFact
   if (known == nullptr) {
     return reject();
   }
-  const std::optional<Price> ltp = fresh_ltp(ctx, o.instrument_id, f.now);
+  const std::optional<Price> ltp = fresh_ltp(ctx, o.instrument_id, f.monotonic);
   if (!ltp.has_value()) {
     return reject();  // no LTP or a stale one (D-22)
   }
@@ -312,7 +314,7 @@ Outcome order_value(const GateContext& ctx, const OrderDetails& o, const GateFac
   // market, so it takes the higher of its trigger and the LTP: a low trigger can't understate it.
   std::optional<Price> at = o.price;
   if (o.order_type == OrderType::kMarket || o.order_type == OrderType::kSlM) {
-    at = fresh_ltp(ctx, o.instrument_id, f.now);
+    at = fresh_ltp(ctx, o.instrument_id, f.monotonic);
     if (o.order_type == OrderType::kSlM && at.has_value() && o.trigger_price.has_value()) {
       at = std::max(*at, *o.trigger_price);
     }
@@ -364,7 +366,7 @@ Outcome dup_check(const GateContext& ctx, const OrderDetails& o, const GateFacts
   bool warned = false;
   std::size_t live = 0;
   for (const DupEntry& e : std::span(ctx.dup.entries).first(ctx.dup.count)) {
-    const Nanos age = f.now - e.ts;
+    const Nanos age = f.monotonic - e.ts;
     if (age >= e.keep) {
       continue;  // gone as far as this order is concerned
     }
@@ -391,7 +393,7 @@ void dup_commit(GateContext& ctx, const OrderDetails& o, const GateFacts& f) noe
   DupTable& t = ctx.dup;
   std::size_t kept = 0;
   for (std::size_t i = 0; i < t.count; ++i) {
-    if (f.now - t.entries[i].ts < t.entries[i].keep) {
+    if (f.monotonic - t.entries[i].ts < t.entries[i].keep) {
       t.entries[kept++] = t.entries[i];
     }
   }
@@ -404,7 +406,7 @@ void dup_commit(GateContext& ctx, const OrderDetails& o, const GateFacts& f) noe
                                     .price = o.price,
                                     .trigger = o.trigger_price,
                                     .slice = o.slice,
-                                    .ts = f.now,
+                                    .ts = f.monotonic,
                                     .keep = keep};
   }
 }

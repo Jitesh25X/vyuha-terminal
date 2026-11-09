@@ -361,7 +361,7 @@ struct DupEntry {
   std::optional<Price> price{};
   std::optional<Price> trigger{};
   oms::SliceIntent slice{};
-  Nanos ts{0};
+  Nanos ts{0};    // IClock::monotonic when approved (D-26)
   Nanos keep{0};  // how long this entry can still matter
 };
 

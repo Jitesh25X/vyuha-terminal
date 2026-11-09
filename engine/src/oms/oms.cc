@@ -329,6 +329,7 @@ std::expected<OrderStatus, Error> Oms::record(Order& order, OrderStatus to, std:
   event.broker_order_id = broker_id;
   event.modify = modify;
   event.gate = details.gate;
+  event.approval_age = details.approval_age;
   // Too long to store is the caller's mismatch to raise; the fill itself must still go in.
   if (!event.broker_trade_id.assign(details.broker_trade_id)) {
     event.broker_trade_id = {};

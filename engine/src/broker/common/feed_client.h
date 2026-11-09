@@ -60,7 +60,8 @@ class FeedProtocol {
   // Sent after every (re)connect, so a reconnect restores the full subscription set.
   [[nodiscard]] virtual std::vector<std::string> subscribe_messages(std::size_t shard) const = 0;
   [[nodiscard]] virtual bool binary_requests() const noexcept = 0;
-  virtual void on_frame(std::size_t shard, bool binary, std::span<const std::uint8_t> bytes, Nanos now) = 0;
+  virtual void on_frame(std::size_t shard, bool binary, std::span<const std::uint8_t> bytes, Nanos now,
+                        Nanos recv_mono) = 0;
 };
 
 struct FeedClientConfig {

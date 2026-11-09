@@ -117,6 +117,7 @@ struct Desk {
     t.instrument_id = static_cast<md::InstrumentId>(id);
     t.ltp = ltp;
     t.recv_ts = recv;
+    t.recv_mono = recv;
     ASSERT_TRUE(book.update(t));
   }
 
@@ -143,6 +144,9 @@ struct Desk {
 
   // Runs one rule on its own, so a live order doesn't stop at the "incomplete chain" refusal.
   [[nodiscard]] Outcome check(RuleCode code, const OrderDetails& o) const {
+    return check_at(code, o, clock.monotonic());
+  }
+  [[nodiscard]] Outcome check_at(RuleCode code, const OrderDetails& o, Nanos monotonic) const {
     const Rule* found = nullptr;
     for (const Rule& r : pre_trade_rules()) {
       if (r.code == code) {
@@ -151,7 +155,7 @@ struct Desk {
     }
     EXPECT_NE(found, nullptr);
     const GateFacts facts{.now = clock.now(),
-                          .monotonic = clock.monotonic(),
+                          .monotonic = monotonic,
                           .opening = true,
                           .instrument = instruments.find(o.instrument_id),
                           .account = std::as_const(ctx).accounts.find(o.account_id)};
@@ -739,6 +743,53 @@ TEST(RFatFinger, AnLtpFarInTheFutureIsStaleToo) {
   EXPECT_REJECT(d, kFatFinger, d.order());
 }
 
+// D-26: an LTP's age comes from the monotonic receive stamp, whatever the wall clock does.
+TEST(RFatFinger, AWallClockStepInEitherDirectionDoesntChangeAnLtpsAge) {
+  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, Nanos{10} * kNanosPerSecond}) {
+    Desk d;
+    d.clock.step_wall(step);
+    EXPECT_PASS(d, kFatFinger, d.order());
+    d.clock.advance(kLtpMaxAge + 1);
+    d.clock.step_wall(step);
+    EXPECT_REJECT(d, kFatFinger, d.order());
+  }
+}
+
+TEST(RFatFinger, ATickWithNoReceiveStampIsStaleOnAClockNearZero) {
+  Desk d;
+  d.tick(kEquity, rupees(100), 0);
+  EXPECT_EQ(d.check_at(RuleCode::kFatFinger, d.order(), 1).verdict, Verdict::kReject);
+}
+
+TEST(RFatFinger, ATickAheadOfTheGatesReadingIsRefused) {
+  Desk d;
+  d.tick(kEquity, rupees(100), kNow + 1);
+  EXPECT_REJECT(d, kFatFinger, d.order());
+}
+
+TEST(RFatFinger, TheWallClockReceiveTimeIsNotUsed) {
+  Desk d;
+  md::Tick t;
+  t.instrument_id = static_cast<md::InstrumentId>(kEquity);
+  t.ltp = rupees(100);
+  t.recv_ts = d.clock.now();                           // says fresh
+  t.recv_mono = d.clock.monotonic() - kLtpMaxAge - 1;  // says stale
+  ASSERT_TRUE(d.book.update(t));
+  EXPECT_REJECT(d, kFatFinger, d.order());
+}
+
+TEST(RFatFinger, TheExchangeTimeIsNotUsed) {
+  Desk d;
+  md::Tick t;
+  t.instrument_id = static_cast<md::InstrumentId>(kEquity);
+  t.ltp = rupees(100);
+  t.exchange_ts = d.clock.now() - (Nanos{60} * kNanosPerSecond);  // an old exchange time
+  t.recv_ts = d.clock.now();
+  t.recv_mono = d.clock.monotonic();
+  ASSERT_TRUE(d.book.update(t));
+  EXPECT_PASS(d, kFatFinger, d.order());
+}
+
 TEST(RFatFinger, AGateWithNoBookRefuses) {
   Desk d;
   d.ctx.book = nullptr;
@@ -1042,6 +1093,20 @@ TEST(RFatFinger, AMissingLimitIsRefused) {
 
 // ---- R-ORDER-VALUE ----
 
+TEST(ROrderValue, AMarketOrdersLtpIsAgedOnTheMonotonicClock) {
+  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, Nanos{10} * kNanosPerSecond}) {
+    Desk d;
+    OrderDetails o = d.order();
+    o.order_type = OrderType::kMarket;
+    o.price.reset();
+    d.clock.step_wall(step);
+    EXPECT_PASS(d, kOrderValue, o);
+    d.clock.advance(kLtpMaxAge + 1);
+    d.clock.step_wall(step);
+    EXPECT_REJECT(d, kOrderValue, o);
+  }
+}
+
 TEST(ROrderValue, TheNotionalLimit) {
   Desk d;
   OrderDetails o = d.order();
@@ -1255,11 +1320,64 @@ TEST(RDup, AZeroWindowChecksNothingAndKeepsNothing) {
   EXPECT_PASS(d, kDup, d.order());
 }
 
-TEST(RDup, AClockThatSteppedBackStillFindsTheDuplicate) {
+TEST(RDup, AWallClockStepInEitherDirectionKeepsTheWindow) {
+  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, Nanos{10} * kNanosPerSecond}) {
+    Desk d;
+    d.clock.step_wall(step);
+    ASSERT_TRUE(d.run(d.order()).approved.has_value());
+    d.clock.step_wall(step);
+    EXPECT_REJECT(d, kDup, d.order());
+    d.clock.advance((Nanos{1'500} * kNanosPerSecond / 1'000) - 1);
+    EXPECT_REJECT(d, kDup, d.order());
+    d.clock.advance(1);
+    EXPECT_PASS(d, kDup, d.order());
+  }
+}
+
+// Another order's commit prunes the table, which must not evict a live entry.
+TEST(RDup, AForwardClockStepDoesntPruneALiveEntry) {
   Desk d;
   ASSERT_TRUE(d.run(d.order()).approved.has_value());
-  d.clock.set(kNow - kNanosPerSecond);
+  d.clock.step_wall(Nanos{10} * kNanosPerSecond);
+  OrderDetails other = d.order();
+  other.qty = 11;
+  ASSERT_TRUE(d.run(other).approved.has_value());
   EXPECT_REJECT(d, kDup, d.order());
+}
+
+TEST(GateStampClocks, EvaluationTimeIsMeasuredOnTheMonotonicClock) {
+  // The wall clock jumps on every read and the monotonic one doesn't move.
+  class JumpingWall final : public IClock {
+   public:
+    [[nodiscard]] Nanos now() const noexcept override {
+      return kNow + (7 * kNanosPerSecond) + (reads_++ * kNanosPerSecond);
+    }
+    [[nodiscard]] Nanos monotonic() const noexcept override { return kNow; }
+
+   private:
+    mutable Nanos reads_{0};
+  };
+  Desk d;
+  const JumpingWall clock;
+  const RiskGate gate = RiskGate::create(pre_trade_rules(), clock).value();
+  EXPECT_EQ(gate.evaluate(d.ctx, d.order()).stamp.eval_ns, 0);
+}
+
+TEST(GateStampClocks, SessionHoursFollowTheWallClock) {
+  Desk d;
+  d.clock.step_wall(at(9, 14) - kNow);  // the monotonic clock still reads inside the session
+  const GateDecision out = d.run(d.order());
+  ASSERT_TRUE(out.rejection.has_value());
+  EXPECT_EQ(out.rejection.value().code, RuleCode::kMktHours);
+}
+
+TEST(GateStampClocks, TheStampCarriesBothClocks) {
+  Desk d;
+  d.clock.step_wall(Nanos{10} * kNanosPerSecond);
+  const GateDecision out = d.run(d.order());
+  ASSERT_TRUE(out.approved.has_value());
+  EXPECT_EQ(out.stamp.ts, d.clock.now());
+  EXPECT_EQ(out.stamp.monotonic, d.clock.monotonic());
 }
 
 TEST(RDup, ExpiredEntriesLeaveTheTableOnTheNextApproval) {
@@ -1296,7 +1414,7 @@ TEST(RDup, ATableFullOfExpiredEntriesIsNotFull) {
   Desk d;
   fill_dup_table(d);
   d.clock.advance(61 * kNanosPerSecond);
-  d.tick(kEquity, rupees(100), d.clock.now());
+  d.tick(kEquity, rupees(100), d.clock.monotonic());
   const GateDecision out = d.run(d.order());
   ASSERT_TRUE(out.approved.has_value());
   EXPECT_EQ(d.ctx.dup.count, 1U);
@@ -1362,17 +1480,17 @@ TEST(ROps, ATenSecondForwardClockStepReleasesNoToken) {
 TEST(ROps, TheGateUsesTheMonotonicClockAcrossSteps) {
   Desk d;
   d.clock.step_wall(10 * kNanosPerSecond);
-  d.tick(kEquity, rupees(100), d.clock.now());
+  d.tick(kEquity, rupees(100), d.clock.monotonic());
   for (int i = 0; i < 8; ++i) {
     ASSERT_TRUE(d.run(nth(d, i)).approved.has_value()) << i;
   }
   d.clock.step_wall(10 * kNanosPerSecond);
-  d.tick(kEquity, rupees(100), d.clock.now());
+  d.tick(kEquity, rupees(100), d.clock.monotonic());
   const GateDecision stepped = d.run(nth(d, 8));
   ASSERT_TRUE(stepped.rejection.has_value());
   EXPECT_EQ(stepped.rejection.value().code, RuleCode::kOps);
   d.clock.advance(kNanosPerSecond);
-  d.tick(kEquity, rupees(100), d.clock.now());
+  d.tick(kEquity, rupees(100), d.clock.monotonic());
   EXPECT_TRUE(d.run(nth(d, 8)).approved.has_value());
 }
 

@@ -236,6 +236,7 @@ struct FeedClient::Impl final : HttpGetter {
         co_return;
       }
       const Nanos now = clock.now();
+      const Nanos recv_mono = clock.monotonic();  // what LTP age is measured from (D-26)
       st.last_frame = now;
       if (first) {
         // Healthy again: close the gap and let the next outage start from the short delay.
@@ -250,7 +251,8 @@ struct FeedClient::Impl final : HttpGetter {
       const auto data = buf.cdata();
       protocol.on_frame(
           shard, wsock.got_binary(),
-          std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(data.data()), data.size()), now);
+          std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(data.data()), data.size()), now,
+          recv_mono);
       buf.consume(buf.size());
     }
   }
