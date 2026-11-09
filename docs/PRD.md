@@ -177,7 +177,7 @@ Functions: `Q` quote, `CH` chart (candles, volume, indicators, drawing), `DOM` d
 2. System opens ticket pre-filled (account = trader's default, qty = 1 lot, LIMIT at LTP).
 3. Trader edits and presses `Ctrl+Enter`.
 4. System runs risk gate; if pass, routes to broker; ticket closes; blotter shows `PENDING → OPEN`.
-5. If fail, ticket stays open with red reason list (e.g. `R-LOSS-DAILY: daily loss limit ₹25,000 would be breached`).
+5. If fail, ticket stays open with red reason list (e.g. `R-LOSS-DAILY: daily loss limit ₹25,000 reached`).
 **Acceptance criteria:**
 - [ ] Given qty above exchange freeze quantity, then the engine auto-slices into child orders ≤ freeze qty, each passing the gate, and shows them as one parent in the blotter.
 - [ ] Given MARKET/SL-M, then the adapter sends the broker's market-protection parameter as configured (`[DECISION NEEDED: §13 #8]`).

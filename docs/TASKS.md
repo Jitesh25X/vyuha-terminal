@@ -217,7 +217,8 @@ Current milestone: **M4.1, then M2**
 - [ ] **M2.4** Rules R-OPEN-ORDERS…R-DISCIPLINE with incremental scope aggregation
   - deps: M2.3, M2.3d
   - needs: nothing new
-  - done: Property tests (RISK_ENGINE §3)
+  - done: Property tests (RISK_ENGINE §3). For each data source (positions, P&L, margin, Greeks), a test that with it missing or stale a live opening order is refused with `R-DATA-MISSING:<source>` and a reducing order still passes (the positions case: see D-27). `RISK_GREEKS_MAX_AGE_MS` is parsed like `RISK_APPROVAL_MAX_AGE_MS`, default 15,000.
+  - notes: Owner decisions 2026-11-09, D-27 to D-33 in `DECISIONS.md`. D-35 holds three readings of the spec that are built on defaults until the owner confirms. Position-reducing orders skip rules 14 to 22 (D-29). `R-SHORT-OPT:no-cover` is its own reason, for the ticket's "buy the hedge first".
 - [ ] **M2.5** SimBroker (paper) on live ticks; brackets/OCO; freeze-qty slicer
   - deps: M2.4
   - needs: nothing new
@@ -237,7 +238,7 @@ Current milestone: **M4.1, then M2**
   - deps: M2.7
   - needs: nothing new
   - done: API tests; every gate rejection is persisted with its stamp, rule code, limit and current value (owner, 2026-11-08).
-  - notes: The engine binary creates the order writer here: pass it a started `SystemAlertPublisher` (M2.2c) and parse `RISK_APPROVAL_MAX_AGE_MS` and `ORDER_QUEUE_MAX_AGE_MS` at startup, refusing to start on a bad value. Load the `GateContext` (M2.3) from Postgres and refuse to start if a table doesn't fit: instruments without index rows, accounts, entitlements, live strategies, limits, the holiday calendar and its coverage. Give the router a `GateSendLimits` on that context. Set `live_trading_enabled` with `live_trading_allowed`. Record a rejection's reason with `reason_text`, so a full duplicate table raises its alert. `POST /orders` calls `Oms::intake` and maps `kOrderDup` to 409 `ORDER_DUP`. Also check Postgres for `client_order_id`, because intake only knows this run: an order finished earlier must return the existing order, not reach the writer. Record the reason with `reason_text`, not `code_text`, or `R-TRIGGER-SIDE`, `R-TRIGGER-BAND` and the full duplicate table are lost. When a modify path reaches the gate, run rules 9 and 10 on the merged order. Keep `RiskGate::evaluate` on the core thread: LTP age depends on it, as does the book. Any later tick producer (sim, replay) must set `Tick::recv_mono`, or every priced order is refused.
+  - notes: Greeks stale (D-28): while the engine's Greeks cache is stale, publish a critical `GREEKS_STALE` on `sys.alert`, as `ORDER_LOG_OUTAGE` does (M2.2c), repeated while it holds and ended when fresh values arrive; the gateway relays it as a sticky status-bar banner, "Greeks stale — new option positions blocked". Parse `RISK_GREEKS_MAX_AGE_MS` at startup, refusing to start on a bad value. The engine binary creates the order writer here: pass it a started `SystemAlertPublisher` (M2.2c) and parse `RISK_APPROVAL_MAX_AGE_MS` and `ORDER_QUEUE_MAX_AGE_MS` at startup, refusing to start on a bad value. Load the `GateContext` (M2.3) from Postgres and refuse to start if a table doesn't fit: instruments without index rows, accounts, entitlements, live strategies, limits, the holiday calendar and its coverage. Give the router a `GateSendLimits` on that context. Set `live_trading_enabled` with `live_trading_allowed`. Record a rejection's reason with `reason_text`, so a full duplicate table raises its alert. `POST /orders` calls `Oms::intake` and maps `kOrderDup` to 409 `ORDER_DUP`. Also check Postgres for `client_order_id`, because intake only knows this run: an order finished earlier must return the existing order, not reach the writer. Record the reason with `reason_text`, not `code_text`, or `R-TRIGGER-SIDE`, `R-TRIGGER-BAND` and the full duplicate table are lost. When a modify path reaches the gate, run rules 9 and 10 on the merged order. Keep `RiskGate::evaluate` on the core thread: LTP age depends on it, as does the book. Any later tick producer (sim, replay) must set `Tick::recv_mono`, or every priced order is refused.
 - [ ] **M2.9** Web: `ORD` ticket with live preview, `BLT`, `POS`, `PNL`, `LIM`, `KILL`, hotkeys
   - deps: M2.8
   - needs: nothing new (reuse grid/chart libs)
@@ -380,7 +381,11 @@ Current milestone: **M4.1, then M2**
 
 **M5 exit:** desk Greeks, VaR, scenarios and factor exposures refresh within NFR targets on staging; auto triggers proven in integration tests.
 - [ ] M5 exit verified (`/milestone-exit`)
-
+- [ ] **M5.8** Delta and vega in the engine (Black-76 from cached IV), so `R-GREEKS` stops depending on the Python service (D-28)
+  - deps: M5.1, M2.4
+  - needs: nothing new
+  - done: The engine computes per-instrument delta and vega from cached IV and the forward, matching `quant`'s vectors; the gate uses them, and a quant outage no longer blocks option openings. `RISK_GREEKS_MAX_AGE_MS` then applies to the IV cache.
+  - notes: Owner, 2026-11-09. Until then `R-GREEKS` reads quant's published values.
 
 ## M6 — Knowledge graph & context mapping
 

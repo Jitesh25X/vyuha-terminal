@@ -20,6 +20,7 @@ must not copy Bloomberg's name, logo, trademarked function codes or screens.
 │ OPEN ● KITE ZR1234 ● UPSTOX UP5678 ● data 42ms │ engine OK │ P&L −₹3,240 (6% of limit) │ │  ← status bar (22px)
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
+Sticky status-bar warnings stay until their cause clears, for every user: `ORDER LOG DOWN: new orders blocked` (ADR-027) and `Greeks stale — new option positions blocked` (D-28).
 
 ## 2. Command grammar
 ```
@@ -100,6 +101,7 @@ Monaco editor in `STRAT` uses `@monaco-editor/react`, with Python language suppo
 - **Live preview** (debounced 150 ms via `/orders/preview`): notional, margin required/available, gate pass/fail with reason codes, limit headroom bars, reward:risk, slices count, estimated costs.
 - Header colour: live BUY green border, live SELL red border, paper = cyan border with a `PAPER` tag.
 - The ticket stays open with errors on rejection. On success it closes and focus returns to the source panel.
+- A short option refused with `R-SHORT-OPT:no-cover` shows "buy the hedge first": working orders don't count as cover, so the hedge has to be filled before the short is sent (D-31).
 - AI-drafted tickets show an `AI DRAFT` badge and the copilot's rationale (collapsible). The human must review and submit.
 
 ## 6. Visual design tokens

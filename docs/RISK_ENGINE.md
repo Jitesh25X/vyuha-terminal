@@ -23,7 +23,7 @@ Limits are versioned (`LimitSet.version`). Changes hot-reload via gRPC `ReloadLi
 | `max_net_delta_inr` | ₹ | 50,00,000 | Rupee delta |
 | `max_net_vega_inr` | ₹/vol-pt | 50,000 | |
 | `max_short_option_lots` | lots | 20 | Σ short option lots |
-| `naked_short_options` | bool | 0 (disallowed) | 1 allows short options without a covering long within the same underlying/expiry |
+| `naked_short_options` | bool | 0 (disallowed) | 1 allows short options with no cover (D-31) |
 | `max_daily_loss` | ₹ | 50,000 | Realised + MTM − costs since session start |
 | `max_drawdown_from_peak` | ₹ | 75,000 | Intraday peak P&L − current |
 | `max_open_orders` | count | 50 | |
@@ -60,8 +60,8 @@ Desk defaults are **seed values for a staging desk**. The owner sets real values
 | 14 | `R-OPEN-ORDERS` | `max_open_orders` | opening |
 | 15 | `R-POSITION` | Post-trade projected position within `max_position_lots/notional` | opening |
 | 16 | `R-EXPOSURE` | Projected gross/net exposure within limits | opening |
-| 17 | `R-GREEKS` | Projected net delta/vega within limits | opening |
-| 18 | `R-SHORT-OPT` | Short option lots / naked short rule | opening sells of options |
+| 17 | `R-GREEKS` | Projected net delta/vega within limits. Greeks come from quant's cache; older than `RISK_GREEKS_MAX_AGE_MS` (default 15,000 ms) counts as missing: `R-DATA-MISSING:greeks` (D-27, D-28) | opening |
+| 18 | `R-SHORT-OPT` | Short option lots / naked short rule. Cover: a long of the same underlying, expiry and option type with at least as many lots, or a long future (for calls) or short future (for puts) on the same underlying with expiry at or after the option's, lot for lot. Working orders don't count as cover. No cover is `R-SHORT-OPT:no-cover` (D-31) | opening sells of options |
 | 19 | `R-LOSS-DAILY` | Current daily P&L > −`max_daily_loss` (opening orders blocked once breached; closing allowed) | opening |
 | 20 | `R-DRAWDOWN` | Intraday drawdown | opening |
 | 21 | `R-MARGIN` | Margin cache: required × (1+buffer) ≤ available; for orders > ₹10 lakh notional, preview calls the broker margin API (async, before submit) | opening |
@@ -81,6 +81,7 @@ Desk defaults are **seed values for a staging desk**. The owner sets real values
 - **Incomplete chain:** a gate whose table lacks any of the 22 rules refuses every live order (`is_paper` false) with `R-LIVE-DISABLED`, before any rule runs. Paper orders still go through the rules it has. So until M2.4 finishes the chain, nothing the gate approves can be live.
 - **Opening vs reducing:** the gate works this out itself (`GateFacts::opening`); callers don't supply it. Until positions exist (M2.6), every order counts as opening, so every rule runs (fail closed). Property (a) below can only be tested from M2.6.
 - **A router refusal after the gate** (owner, 2026-11-09): the gate commits an approved order's OPS token and duplicate entry before `submit`, so an order the router then refuses has still used them. This fails closed, and it stays.
+- **Data a rule needs but doesn't have** (D-27): rules 14 to 22 read per-scope state that later tasks fill, each source with a loaded flag. A live order whose source isn't loaded or is stale is refused with `R-DATA-MISSING:<source>` (`positions`, `pnl`, `margin`, `greeks`); a paper order only for `positions` and `pnl`. Reducing orders skip these rules, except that with no positions loaded every order counts as opening.
 - **Stateful rules are two-phase** (owner, 2026-11-08; built in M2.3). Each stateful rule (`R-DUP`, `R-OPS`) has a pure `check()` and a separate `on_approved()`. The gate runs every `check()` first, and only when the whole chain passes does it call `on_approved()` on each. A rejected order never uses up an OPS token or creates a duplicate-window entry. The core thread is the only writer, so there is no race.
 - `ApprovedOrder` (`risk/approved_order.h`) holds exactly the `OrderDetails` the gate evaluated and its `GateStamp`. It is `final` and move-only, with a private constructor whose only friend is `RiskGate`. Its move is user-provided and empties the source (`spent()`), which also makes it not trivially copyable, so `std::bit_cast` can't forge one. `IOrderSender::send` takes nothing else. `OrderRouter::submit(handle, ApprovedOrder)` refuses an approval that:
   - is spent;

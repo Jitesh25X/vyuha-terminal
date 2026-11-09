@@ -6,8 +6,8 @@
 - Errors: RFC 9457 `application/problem+json`:
 ```json
 { "type": "https://vyuha.dev/errors/risk-rejected", "title": "Order rejected by risk gate",
-  "status": 422, "detail": "Daily loss limit ₹25,000.00 would be breached (current ₹24,310.50)",
-  "code": "R-LOSS-DAILY", "reasons": [{"code":"R-LOSS-DAILY","limit":"25000.00","current":"24310.50"}] }
+  "status": 422, "detail": "Daily loss limit ₹25,000.00 reached (current loss ₹25,310.50)",
+  "code": "R-LOSS-DAILY", "reasons": [{"code":"R-LOSS-DAILY","limit":"25000.00","current":"25310.50"}] }
 ```
 - Common status codes: `400` validation, `401` unauthenticated, `403` RBAC/entitlement, `404`, `409` conflict/idempotency mismatch, `422` business rule (risk), `423` locked (kill switch / account awaiting login), `429` rate limited, `503` engine unavailable.
 - Money/prices in JSON are **strings** with up to 4 decimals (`"24310.5000"`). Quantities are integers in units.
