@@ -18,6 +18,7 @@
 #include "vyuha/md/session.h"
 #include "vyuha/risk/risk_gate.h"
 #include "vyuha/risk/rules.h"
+#include "vyuha/risk/scope_book.h"
 
 namespace {
 
@@ -169,6 +170,89 @@ void record_percentiles(benchmark::State& state, std::vector<std::int64_t>& samp
   state.counters["max_ns"] = static_cast<double>(samples.back());
 }
 
+// A scope book with 500 instruments held at three scopes, and loose limits for the scope rules (M2.4a).
+void prepare_scope_book(BenchDesk& desk, vyuha::risk::ScopeBook& book) {
+  using vyuha::risk::LimitKey;
+  constexpr std::int64_t kScale = BenchDesk::kScale;
+  desk.ctx->scopes = &book;
+  book.set_positions_loaded(true);
+  book.set_pnl_loaded(true);
+  const vyuha::risk::Attribution who{.account = desk.account, .trader = desk.user};
+  for (std::int64_t id = 1; id <= 500; ++id) {
+    static_cast<void>(book.set_mark(id, vyuha::Price::from_units(1'000'000)));
+    static_cast<void>(book.apply_fill({.who = who,
+                                       .instrument_id = id,
+                                       .side = vyuha::oms::Side::kBuy,
+                                       .qty = 100,
+                                       .price = vyuha::Price::from_units(1'000'000)}));
+  }
+  static_cast<void>(book.add_open_orders(who, 5));
+  const auto limit = [&desk](LimitKey key, std::int64_t value) {
+    static_cast<void>(desk.ctx->limits.add(key, {.value = value}));
+  };
+  limit(LimitKey::kMaxOpenOrders, 1'000 * kScale);
+  limit(LimitKey::kMaxPositionLots, 1'000'000 * kScale);
+  limit(LimitKey::kMaxPositionNotional, 1'000'000'000'000'000);
+  limit(LimitKey::kMaxGrossExposure, 1'000'000'000'000'000);
+  limit(LimitKey::kMaxNetDeltaInr, 1'000'000'000'000'000);
+  limit(LimitKey::kMaxNetVegaInr, 1'000'000'000'000'000);
+  limit(LimitKey::kMaxDailyLoss, 1'000'000'000'000'000);
+  limit(LimitKey::kMaxDrawdownFromPeak, 1'000'000'000'000'000);
+}
+
+// One scope rule on its own, with a book of 1,500 positions.
+void BM_ScopeRule(benchmark::State& state, RuleCode code) {
+  BenchDesk desk;
+  vyuha::risk::ScopeBook book(desk.instruments);
+  prepare_scope_book(desk, book);
+  const vyuha::risk::Rule* found = nullptr;
+  for (const Rule& r : vyuha::risk::scope_rules()) {
+    if (r.code == code) {
+      found = &r;
+    }
+  }
+  const std::array<Rule, 1> one{*found};
+  const auto gate = vyuha::risk::RiskGate::create(one, desk.clock).value();
+  const vyuha::oms::OrderDetails order = desk.order();
+  for (auto _ : state) {
+    auto decision = gate.evaluate(*desk.ctx, order);
+    benchmark::DoNotOptimize(decision);
+  }
+}
+BENCHMARK_CAPTURE(BM_ScopeRule, open_orders, RuleCode::kOpenOrders);
+BENCHMARK_CAPTURE(BM_ScopeRule, position, RuleCode::kPosition);
+BENCHMARK_CAPTURE(BM_ScopeRule, exposure, RuleCode::kExposure);
+BENCHMARK_CAPTURE(BM_ScopeRule, greeks, RuleCode::kGreeks);
+BENCHMARK_CAPTURE(BM_ScopeRule, loss_daily, RuleCode::kLossDaily);
+BENCHMARK_CAPTURE(BM_ScopeRule, drawdown, RuleCode::kDrawdown);
+
+// The book's updates: a fill, and a mark that moves three positions' P&L.
+void BM_ScopeBookFill(benchmark::State& state) {
+  BenchDesk desk;
+  vyuha::risk::ScopeBook book(desk.instruments);
+  prepare_scope_book(desk, book);
+  const vyuha::risk::Fill fill{.who = {.account = desk.account, .trader = desk.user},
+                               .instrument_id = 42,
+                               .side = vyuha::oms::Side::kBuy,
+                               .qty = 1,
+                               .price = vyuha::Price::from_units(1'000'000)};
+  for (auto _ : state) {
+    benchmark::DoNotOptimize(book.apply_fill(fill));
+  }
+}
+BENCHMARK(BM_ScopeBookFill);
+
+void BM_ScopeBookMark(benchmark::State& state) {
+  BenchDesk desk;
+  vyuha::risk::ScopeBook book(desk.instruments);
+  prepare_scope_book(desk, book);
+  std::int64_t i = 0;
+  for (auto _ : state) {
+    benchmark::DoNotOptimize(book.set_mark(42, vyuha::Price::from_units(1'000'000 + ((++i & 1) * 500))));
+  }
+}
+BENCHMARK(BM_ScopeBookMark);
+
 // One real rule, on its own: the entry each rule ships with. An order that keeps passing would fill the
 // stateful rules' tables, so each iteration starts them empty.
 void BM_RiskRule(benchmark::State& state, RuleCode code) {
@@ -231,12 +315,17 @@ void BM_RiskRuleStop(benchmark::State& state, RuleCode code, vyuha::oms::OrderTy
 BENCHMARK_CAPTURE(BM_RiskRuleStop, fat_finger_stop_market, RuleCode::kFatFinger, vyuha::oms::OrderType::kSlM);
 BENCHMARK_CAPTURE(BM_RiskRuleStop, order_shape_stop_limit, RuleCode::kOrderShape, vyuha::oms::OrderType::kSl);
 
-// The 13 real rules, approving every order, followed by 9 rules that only pass in M2.4's place.
+// The 19 real rules, approving every order, and 3 pass-through stand-ins for M2.4b.
 void BM_RiskGateRealRulesPercentiles(benchmark::State& state, bool full_duplicate_table) {
   BenchDesk desk;
-  std::vector<Rule> rules(vyuha::risk::pre_trade_rules().begin(), vyuha::risk::pre_trade_rules().end());
-  for (std::size_t i = rules.size(); i < vyuha::risk::kRuleCount; ++i) {
-    rules.push_back(kChain.at(i));
+  vyuha::risk::ScopeBook book(desk.instruments);
+  prepare_scope_book(desk, book);
+  // The real rules in their places, and the pass-through stand-ins for 18, 21 and 22 (M2.4b).
+  std::vector<Rule> rules(kChain.begin(), kChain.end());
+  for (const auto table : {vyuha::risk::pre_trade_rules(), vyuha::risk::scope_rules()}) {
+    for (const Rule& r : table) {
+      rules.at(static_cast<std::size_t>(r.code) - 1) = r;
+    }
   }
   const auto gate = vyuha::risk::RiskGate::create(rules, desk.clock).value();
   const vyuha::oms::OrderDetails order = desk.order();

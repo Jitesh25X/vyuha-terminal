@@ -62,7 +62,10 @@ enum class Verdict : std::uint8_t {
 };
 
 // Why a rule refused, when the rule's own code isn't specific enough. Only R-FAT-FINGER uses it.
-enum class RuleReason : std::uint8_t { kRule, kTriggerSide, kTriggerBand };
+enum class RuleReason : std::uint8_t { kRule, kTriggerSide, kTriggerBand, kDataMissing };
+
+// What a rule needed and didn't have (D-27). The refusal's reason names it: R-DATA-MISSING:positions.
+enum class DataSource : std::uint8_t { kNone, kPositions, kPnl, kMargin, kGreeks };
 
 // What a rule returns. limit and current are in the rule's own unit (price units, lots, a count); messages
 // are rendered later, off the core thread.
@@ -72,6 +75,7 @@ struct Outcome {
   std::int64_t current{0};
   bool alert{false};  // the desk must hear about this rejection (R-DUP's table being full)
   RuleReason reason{RuleReason::kRule};
+  DataSource source{DataSource::kNone};  // with kDataMissing
 };
 
 // An outcome with the code of the rule that gave it. The gate fills in the code, so a rule can't misreport.
@@ -82,6 +86,7 @@ struct RuleResult {
   std::int64_t current{0};
   bool alert{false};
   RuleReason reason{RuleReason::kRule};
+  DataSource source{DataSource::kNone};
 };
 
 inline constexpr std::string_view kTriggerSideReason = "R-TRIGGER-SIDE";
