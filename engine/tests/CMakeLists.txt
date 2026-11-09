@@ -16,6 +16,8 @@ add_executable(vyuha_tests
   price_test.cc
   risk_gate_test.cc
   risk_rules_test.cc
+  scope_book_test.cc
+  scope_rules_test.cc
   session_manager_test.cc
   upstox_feed_test.cc
   upstox_parser_test.cc
