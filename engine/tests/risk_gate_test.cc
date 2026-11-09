@@ -21,6 +21,13 @@
 namespace vyuha::risk {
 namespace {
 
+// For tests whose rules keep no state.
+risk::GateContext& no_state() {
+  static risk::GateContext ctx;
+  ctx = {};
+  return ctx;
+}
+
 // Invariant 1 by type. tests/compile_fail.cc checks the same from the outside, with a control.
 static_assert(!std::is_default_constructible_v<ApprovedOrder>);
 static_assert(!std::is_constructible_v<ApprovedOrder, const oms::OrderDetails&>);
@@ -44,6 +51,68 @@ template <typename T>
 concept Submittable = requires(oms::OrderRouter& r, T t) { r.submit(oms::OrderHandle{0}, std::move(t)); };
 static_assert(Submittable<ApprovedOrder>);
 static_assert(!Submittable<oms::OrderDetails>);
+
+// ---- Two-phase stateful rules (owner, 2026-11-08) ----
+// `used` stands in for an OPS token or a duplicate-window entry: LimitSet::version is the only field of
+// GateContext so far, and it's enough to see whether a rule changed anything, and in what order.
+Outcome stateful_check(const GateContext& /*ctx*/, const oms::OrderDetails& /*o*/,
+                       const GateFacts& /*f*/) noexcept {
+  return {};
+}
+void first_commit(GateContext& ctx, const oms::OrderDetails& /*o*/, const GateFacts& /*f*/) noexcept {
+  ctx.limits.version = (ctx.limits.version * 10) + 1;
+}
+void second_commit(GateContext& ctx, const oms::OrderDetails& /*o*/, const GateFacts& /*f*/) noexcept {
+  ctx.limits.version = (ctx.limits.version * 10) + 2;
+}
+Outcome always_rejects(const GateContext& /*ctx*/, const oms::OrderDetails& /*o*/,
+                       const GateFacts& /*f*/) noexcept {
+  return {.verdict = Verdict::kReject};
+}
+
+oms::OrderDetails stateful_order() {
+  oms::OrderDetails order{.is_paper = oms::kPaperOrder};
+  order.qty = 1;
+  return order;
+}
+
+TEST(TwoPhase, AnApprovedOrderCommitsEachStatefulRuleInChainOrder) {
+  const SimClock clock{1};
+  const std::array rules{
+      Rule{.code = RuleCode::kDup, .eval = &stateful_check, .on_approved = &first_commit},
+      Rule{.code = RuleCode::kOps, .eval = &stateful_check, .on_approved = &second_commit},
+  };
+  const RiskGate gate = RiskGate::create(rules, clock).value();
+  GateContext ctx;
+  EXPECT_TRUE(gate.evaluate(ctx, stateful_order()).approved.has_value());
+  EXPECT_EQ(ctx.limits.version, 12U);
+}
+
+// The rejecting rule runs after both stateful rules have checked: nothing they'd record may be recorded.
+TEST(TwoPhase, ARejectedOrderLeavesStatefulStateUnchanged) {
+  const SimClock clock{1};
+  const std::array rules{
+      Rule{.code = RuleCode::kDup, .eval = &stateful_check, .on_approved = &first_commit},
+      Rule{.code = RuleCode::kOps, .eval = &stateful_check, .on_approved = &second_commit},
+      Rule{.code = RuleCode::kOpenOrders, .eval = &always_rejects},
+  };
+  const RiskGate gate = RiskGate::create(rules, clock).value();
+  GateContext ctx;
+  const GateDecision d = gate.evaluate(ctx, stateful_order());
+  EXPECT_FALSE(d.approved.has_value());
+  EXPECT_EQ(ctx.limits.version, 0U);
+}
+
+TEST(TwoPhase, ALiveOrderRefusedByAnIncompleteChainCommitsNothing) {
+  const SimClock clock{1};
+  const std::array rules{Rule{.code = RuleCode::kOps, .eval = &stateful_check, .on_approved = &first_commit}};
+  const RiskGate gate = RiskGate::create(rules, clock).value();
+  GateContext ctx;
+  oms::OrderDetails live{.is_paper = oms::kLiveOrder};
+  live.qty = 1;
+  EXPECT_FALSE(gate.evaluate(ctx, live).approved.has_value());
+  EXPECT_EQ(ctx.limits.version, 0U);
+}
 
 constexpr std::size_t kCodes = kRuleCount + 1;  // indexed by the code; 0 unused
 
@@ -125,7 +194,7 @@ TEST(RiskGate, ApprovesExactlyWhatItEvaluatedAndStampsIt) {
   reset();
   const SimClock clock(5'000);
   const RiskGate gate = RiskGate::create(kFull, clock).value();
-  const GateContext ctx{.limits = {.version = 42}};
+  GateContext ctx{.limits = {.version = 42}};
   const oms::OrderDetails order = paper_order();
   const GateDecision d = gate.evaluate(ctx, order);
   ASSERT_TRUE(d.approved.has_value());
@@ -149,7 +218,7 @@ TEST(RiskGate, TheFirstHardFailureStopsTheChain) {
   script().outcome.at(std::to_underlying(RuleCode::kOrderValue)) = {
       .verdict = Verdict::kReject, .limit = 500'000, .current = 900'000};
   script().outcome.at(std::to_underlying(RuleCode::kMargin)) = {.verdict = Verdict::kReject};
-  const GateDecision d = gate.evaluate({}, paper_order());
+  const GateDecision d = gate.evaluate(no_state(), paper_order());
   EXPECT_FALSE(d.approved.has_value());
   ASSERT_TRUE(d.rejection.has_value());
   EXPECT_EQ(rejection_of(d).code, RuleCode::kOrderValue);
@@ -165,7 +234,7 @@ TEST(RiskGate, ASoftLimitWarnsAndPasses) {
   const RiskGate gate = RiskGate::create(kFull, clock).value();
   script().outcome.at(std::to_underlying(RuleCode::kFatFinger)) = {.verdict = Verdict::kWarn, .limit = 5};
   script().outcome.at(std::to_underlying(RuleCode::kExposure)) = {.verdict = Verdict::kWarn, .limit = 7};
-  const GateDecision d = gate.evaluate({}, paper_order());
+  const GateDecision d = gate.evaluate(no_state(), paper_order());
   EXPECT_TRUE(d.approved.has_value());
   ASSERT_EQ(d.warning_list().size(), 2U);
   EXPECT_EQ(d.warning_list()[0].code, RuleCode::kFatFinger);
@@ -178,7 +247,7 @@ TEST(RiskGate, AVerdictNoRuleShouldReturnIsARejection) {
   const SimClock clock;
   const RiskGate gate = RiskGate::create(kFull, clock).value();
   script().outcome.at(std::to_underlying(RuleCode::kDup)) = {.verdict = static_cast<Verdict>(9)};
-  const GateDecision d = gate.evaluate({}, paper_order());
+  const GateDecision d = gate.evaluate(no_state(), paper_order());
   EXPECT_FALSE(d.approved.has_value());
   ASSERT_TRUE(d.rejection.has_value());
   EXPECT_EQ(rejection_of(d).code, RuleCode::kDup);
@@ -193,19 +262,19 @@ TEST(RiskGate, ALiveOrderNeedsTheWholeChain) {
   live.is_paper = oms::kLiveOrder;
 
   const RiskGate empty = RiskGate::create({}, clock).value();
-  const GateDecision refused = empty.evaluate({}, live);
+  const GateDecision refused = empty.evaluate(no_state(), live);
   EXPECT_FALSE(refused.approved.has_value());
   ASSERT_TRUE(refused.rejection.has_value());
   EXPECT_EQ(rejection_of(refused).code, RuleCode::kLiveDisabled);
 
   const std::array partial{rule_for(RuleCode::kKill), rule_for(RuleCode::kOrderShape)};
   const RiskGate some = RiskGate::create(partial, clock).value();
-  EXPECT_EQ(rejection_of(some.evaluate({}, live)).code, RuleCode::kLiveDisabled);
+  EXPECT_EQ(rejection_of(some.evaluate(no_state(), live)).code, RuleCode::kLiveDisabled);
   EXPECT_TRUE(script().calls.empty());  // refused before any rule ran
-  EXPECT_TRUE(some.evaluate({}, paper_order()).approved.has_value());
+  EXPECT_TRUE(some.evaluate(no_state(), paper_order()).approved.has_value());
 
   const RiskGate full = RiskGate::create(kFull, clock).value();
-  EXPECT_TRUE(full.evaluate({}, live).approved.has_value());
+  EXPECT_TRUE(full.evaluate(no_state(), live).approved.has_value());
 }
 
 TEST(RiskGate, OnlyRules14To22AreSkippedForAReducingOrder) {
@@ -223,7 +292,7 @@ TEST(RiskGate, EveryOrderCountsAsOpeningUntilPositionsExist) {
   const SimClock clock;
   const std::array opening_only{rule_for(RuleCode::kPosition)};
   const RiskGate gate = RiskGate::create(opening_only, clock).value();
-  static_cast<void>(gate.evaluate({}, paper_order()));
+  static_cast<void>(gate.evaluate(no_state(), paper_order()));
   EXPECT_EQ(script().calls, std::vector{RuleCode::kPosition});
 }
 
@@ -260,7 +329,7 @@ TEST(RiskGate, PropertyTheChainFollowsSection3) {
       }
     }
 
-    const GateDecision first = gate.evaluate({}, paper_order());
+    const GateDecision first = gate.evaluate(no_state(), paper_order());
     RC_ASSERT(script().calls == expect_calls);
     RC_ASSERT(first.approved.has_value() == !expect_reject.has_value());
     RC_ASSERT(first.rejection.has_value() == expect_reject.has_value());
@@ -274,7 +343,7 @@ TEST(RiskGate, PropertyTheChainFollowsSection3) {
     }
 
     script().calls.clear();
-    const GateDecision again = gate.evaluate({}, paper_order());
+    const GateDecision again = gate.evaluate(no_state(), paper_order());
     RC_ASSERT(script().calls == expect_calls);
     RC_ASSERT(again.approved.has_value() == first.approved.has_value());
     RC_ASSERT(again.warning_count == first.warning_count);

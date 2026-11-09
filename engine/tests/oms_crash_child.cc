@@ -89,7 +89,7 @@ int run(std::span<char*> args) {
   vyuha::oms::PgOrderEventWriter writer(url, nullptr);
   vyuha::oms::Oms oms(writer, clock, 8);
   vyuha::oms::OrderRouter router(oms, writer, broker, vyuha::oms::Venue::kPaper,
-                                 {.tag_limit = kTagLimit, .capacity = 8});
+                                 {.tag_limit = kTagLimit, .capacity = 8}, vyuha::testing::open_limits());
 
   if (recover) {
     if (!recover_all(url, oms, router, broker)) {

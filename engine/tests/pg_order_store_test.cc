@@ -10,6 +10,8 @@
 #include <thread>
 #include <vector>
 
+#include <memory>
+
 #include <gtest/gtest.h>
 #include <pqxx/pqxx>
 
@@ -689,7 +691,8 @@ TEST(PgOrderStore, AStaleApprovalIsRejectedAuditedAndAlertedTogether) {
   {
     PgOrderEventWriter writer(db.url(), nullptr);
     Oms oms(writer, clock, 2);
-    OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8});
+    OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8},
+                       testing::open_limits());
     const OrderHandle h = oms.create(details(s, 1, 10)).value();
     EXPECT_EQ(router.submit(h, testing::approve(oms.order(h).details, gate_clock)).error().code,
               ErrorCode::kApprovalStale);
@@ -713,6 +716,92 @@ TEST(PgOrderStore, AStaleApprovalIsRejectedAuditedAndAlertedTogether) {
             std::to_string(gate_clock.now()));
 }
 
+// D-24: when R-DUP's table is full the order is refused, and the desk hears about it in the same transaction.
+TEST(PgOrderStore, ARefusalBecauseTheDuplicateTableIsFullIsAuditedAndAlerted) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  {
+    PgOrderEventWriter writer(db.url(), nullptr);
+    Oms oms(writer, clock, 2);
+    const OrderHandle h = oms.create(details(s, 1, 10)).value();
+    ASSERT_TRUE(oms.apply(h, OrderEvent::kRiskReject, {.reason_code = kDupTableFull}).has_value());
+    wait_written(writer, 2);
+  }
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  EXPECT_EQ(tx.query_value<std::string>("SELECT reject_code FROM \"order\""), "R-DUP-TABLE-FULL");
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM audit_event WHERE action = 'order.dup_table_full'"), 1);
+  const auto alert =
+      tx.exec("SELECT severity, title FROM alert_event WHERE title = 'DUP_TABLE_FULL'").one_row();
+  EXPECT_EQ(alert[0].as<std::string>(), "critical");
+}
+
+// D-23: Postgres records a kill order's real source, and reading it back can't grant the exemption.
+TEST(PgOrderStore, AKillOrderIsStoredAsSuchAndRestoredWithoutTheExemption) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  const auto gate_ctx = std::make_unique<risk::GateContext>();
+  gate_ctx->kill.block(risk::KillSwitch::Scope::kDesk);
+  {
+    PgOrderEventWriter writer(db.url(), nullptr);
+    Oms oms(writer, clock, 2);
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): .value() throws, which fails the test
+    (void)oms.create(gate_ctx->kill.kill_generated(details(s, 1, 10)).value()).value();
+    wait_written(writer, 1);
+  }
+  {
+    pqxx::connection c(db.url());
+    pqxx::read_transaction tx(c);
+    EXPECT_EQ(tx.query_value<std::string>("SELECT source::text FROM \"order\""), "kill_flatten");
+  }
+  const auto restored = load_open_orders(db.url());
+  ASSERT_TRUE(restored.has_value());
+  // NOLINTBEGIN(bugprone-unchecked-optional-access): ASSERT_TRUE above
+  ASSERT_EQ(restored->size(), 1U);
+  EXPECT_FALSE(restored->front().details.source.kill_generated());
+  // NOLINTEND(bugprone-unchecked-optional-access)
+}
+
+// A cancel that beats the send: audited as an expiry, and no alert, because someone asked for it.
+TEST(PgOrderStore, AnOrderCancelledWhileQueuedIsAuditedWithNoAlert) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  RecordingBroker broker;
+  {
+    PgOrderEventWriter writer(db.url(), nullptr);
+    Oms oms(writer, clock, 2);
+    OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8},
+                       testing::open_limits());
+    const OrderHandle h = oms.create(details(s, 1, 10)).value();
+    ASSERT_TRUE(router.submit(h, testing::approve(oms.order(h).details, clock)).has_value());
+    ASSERT_TRUE(router.cancel(h));
+    wait_written(writer, 3);
+  }
+  EXPECT_TRUE(broker.sent.empty());
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  const auto order = tx.exec("SELECT status::text, reject_code FROM \"order\"").one_row();
+  EXPECT_EQ(order[0].as<std::string>(), "EXPIRED");
+  EXPECT_EQ(order[1].as<std::string>(), "CANCELLED_IN_QUEUE");
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM audit_event WHERE action = 'order.expire'"), 1);
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM alert_event WHERE title LIKE 'ORDER_EXPIRED%'"), 0);
+}
+
 // ADR-027: a queued order past the age limit is expired, never sent, and the expiry, its audit row and the
 // admins' alert land in one transaction, as the restart rule's do.
 TEST(PgOrderStore, AnOrderExpiredInTheQueueIsAuditedAndAlertedTogether) {
@@ -727,7 +816,8 @@ TEST(PgOrderStore, AnOrderExpiredInTheQueueIsAuditedAndAlertedTogether) {
   {
     PgOrderEventWriter writer(db.url(), nullptr);
     Oms oms(writer, clock, 2);
-    OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8});
+    OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8},
+                       testing::open_limits());
     const OrderHandle h = oms.create(details(s, 1, 10)).value();
     ASSERT_TRUE(router.submit(h, testing::approve(oms.order(h).details, clock)));
     clock.advance(kDefaultQueueMaxAge + 1);
@@ -769,7 +859,8 @@ TEST(PgOrderStore, ADuplicateAtTheWriterFailsOnlyItselfAndCancelAllStillGoesThro
   RecordingBroker broker;
   PgOrderEventWriter writer(db.url(), nullptr);
   Oms oms(writer, clock, 8);
-  OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8});
+  OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8},
+                     testing::open_limits());
 
   OrderDetails duplicate = details(s, 2, 5);  // a new order id, client-1 again
   ASSERT_TRUE(duplicate.client_order_id.assign("client-1"));

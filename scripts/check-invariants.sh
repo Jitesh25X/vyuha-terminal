@@ -24,6 +24,14 @@ check "engine: no double/float prices in oms/risk/broker" \
 check "engine: ApprovedOrder's only friend is RiskGate" \
   "grep -nE '^[[:space:]]*friend[[:space:]]' engine/include/vyuha/risk/approved_order.h | grep -v 'friend class RiskGate;'"
 
+# D-23 and D-24: the kill-generated source only from the kill-switch code, a slice intent only from the slicer.
+check "engine: Source's only friend is KillSwitch and SliceIntent's only friend is FreezeSlicer" \
+  "grep -nE '^[[:space:]]*friend[[:space:]]' engine/include/vyuha/oms/oms.h | grep -vE 'friend class (risk::KillSwitch|FreezeSlicer);|friend bool operator=='"
+check "engine: only the kill-switch code names the kill-generated source" \
+  "grep -RIn 'Source::kKillFlatten' engine/src engine/include engine/bindings engine/bench 2>/dev/null | grep -vE '^engine/include/vyuha/(oms/oms\.h|risk/kill_switch\.h):'"
+check "engine: no cast or byte copy makes a Source or SliceIntent" \
+  "grep -RInE '(reinterpret_cast|bit_cast|const_cast|memcpy|memmove|start_lifetime_as)[^;]*(\bSource\b|SliceIntent)' engine/src engine/include engine/tests engine/bindings engine/bench 2>/dev/null"
+
 # compile_fail.cc holds such lines on purpose (ctest compile_fail.* requires each to fail to compile). Only a line
 # in that file that also carries the marker is skipped, so a real violation elsewhere in it is still caught.
 check "engine: no cast or byte copy makes an ApprovedOrder" \

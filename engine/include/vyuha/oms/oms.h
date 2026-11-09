@@ -54,7 +54,63 @@ enum class Side : std::uint8_t { kBuy, kSell };
 enum class OrderType : std::uint8_t { kLimit, kMarket, kSl, kSlM };
 enum class Product : std::uint8_t { kCnc, kMis, kNrml };
 enum class Validity : std::uint8_t { kDay, kIoc };
-enum class Source : std::uint8_t { kManual, kStrategy, kAiDraft, kSystem };
+
+}  // namespace vyuha::oms
+
+namespace vyuha::risk {
+class KillSwitch;
+}
+
+namespace vyuha::oms {
+
+class FreezeSlicer;
+
+// Where an order came from. A kill-generated order is the only kind R-KILL lets through (D-23), so that value
+// can't be named or built outside the kill-switch code: kKillFlatten is private and KillSwitch is the only
+// friend. tests/compile_fail.cc checks that. It stays trivially copyable because order events go through the
+// writer's ring, so the compiler can't stop a std::bit_cast; scripts/check-invariants.sh refuses one instead.
+class Source final {
+ public:
+  enum class Kind : std::uint8_t { kManual, kStrategy, kAiDraft, kSystem, kKillFlatten };
+
+  static const Source kManual;
+  static const Source kStrategy;
+  static const Source kAiDraft;
+  static const Source kSystem;
+
+  constexpr Source() noexcept = default;
+
+  [[nodiscard]] constexpr Kind kind() const noexcept { return kind_; }
+  [[nodiscard]] constexpr bool kill_generated() const noexcept { return kind_ == Kind::kKillFlatten; }
+  constexpr bool operator==(const Source&) const noexcept = default;
+
+ private:
+  friend class risk::KillSwitch;
+  static const Source kKillFlatten;
+  constexpr explicit Source(Kind kind) noexcept : kind_(kind) {}
+  Kind kind_{Kind::kManual};
+};
+inline constexpr Source Source::kManual{Source::Kind::kManual};
+inline constexpr Source Source::kStrategy{Source::Kind::kStrategy};
+inline constexpr Source Source::kAiDraft{Source::Kind::kAiDraft};
+inline constexpr Source Source::kSystem{Source::Kind::kSystem};
+inline constexpr Source Source::kKillFlatten{Source::Kind::kKillFlatten};
+
+// Marks the children of one freeze-qty slice. R-DUP exempts two orders from each other only when both carry
+// the same intent (D-24). Only the slicer can make one, so a caller's parent_id, or anything else a caller
+// supplies, can't earn the exemption. Not stored: it matters only inside the duplicate window.
+class SliceIntent final {
+ public:
+  constexpr SliceIntent() noexcept = default;
+
+  [[nodiscard]] constexpr bool sliced() const noexcept { return id_ != 0; }
+  constexpr bool operator==(const SliceIntent&) const noexcept = default;
+
+ private:
+  friend class FreezeSlicer;
+  constexpr explicit SliceIntent(std::uint64_t id) noexcept : id_(id) {}
+  std::uint64_t id_{0};
+};
 
 // Paper or live, stated by whoever makes the order. It has no default, so an OrderDetails can't be made
 // without saying which (owner, 2026-11-08): forgetting it is a compile error, not a quiet paper order.
@@ -97,6 +153,7 @@ struct OrderDetails {
   FixedString<32> tag{};
   PaperFlag is_paper;  // required: no default (see PaperFlag)
   Nanos created_at{0};
+  SliceIntent slice{};  // set only by FreezeSlicer; not stored
   bool operator==(const OrderDetails&) const = default;
 };
 
@@ -185,6 +242,12 @@ inline constexpr std::string_view kDuplicateFill = "DUPLICATE_FILL";
 inline constexpr std::string_view kApprovalStale = "R-APPROVAL-STALE";
 // A queued order (APPROVED, not sent) older than the queue limit (ADR-027): never sent, EXPIRED instead.
 inline constexpr std::string_view kExpiredInQueue = "EXPIRED_IN_QUEUE";
+// R-DUP's table had no room, so the order was refused (D-24): audited and alerted, because duplicates can't
+// be checked while it lasts.
+inline constexpr std::string_view kDupTableFull = "R-DUP-TABLE-FULL";
+// Cancelled while it waited to be sent, so it never reached the broker. Audited, with no alert: someone
+// asked.
+inline constexpr std::string_view kCancelledInQueue = "CANCELLED_IN_QUEUE";
 
 struct Intake {
   OrderHandle handle{0};
@@ -276,6 +339,7 @@ class Oms {
 
   [[nodiscard]] const Order& order(OrderHandle handle) const noexcept { return orders_[handle]; }
   [[nodiscard]] std::size_t size() const noexcept { return orders_.size(); }
+  [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
   [[nodiscard]] const IClock& clock() const noexcept { return *clock_; }
   // The M2 exit criterion: zero of these over a paper day.
   [[nodiscard]] std::uint64_t illegal_transitions() const noexcept { return illegal_; }

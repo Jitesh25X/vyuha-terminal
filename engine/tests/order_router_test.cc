@@ -3,6 +3,7 @@
 #include "vyuha/oms/order_router.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -18,6 +19,13 @@
 
 namespace vyuha::oms {
 namespace {
+
+// For tests whose rules keep no state.
+risk::GateContext& no_state() {
+  static risk::GateContext ctx;
+  ctx = {};
+  return ctx;
+}
 
 using enum OrderStatus;
 using E = OrderEvent;
@@ -122,7 +130,8 @@ struct Rig {
   LaggingSink sink;
   FakeBroker broker;
   Oms oms{sink, clock, 8};
-  OrderRouter router{oms, sink, broker, Venue::kPaper, {.tag_limit = kTagLimit, .capacity = 8}};
+  OrderRouter router{
+      oms, sink, broker, Venue::kPaper, {.tag_limit = kTagLimit, .capacity = 8}, testing::open_limits()};
 
   OrderHandle fresh(std::int32_t qty = 10) { return oms.create(order_of(qty)).value(); }
   // Through the gate, as every order is.
@@ -443,7 +452,7 @@ TEST(OrderRouter, NewOrdersStillGoOutAfterCancelAll) {
   r.sink.durable_count = r.sink.events.size();
   EXPECT_EQ(r.router.poll(), 1U);
   EXPECT_EQ(r.oms.order(later).status, kSent);
-  EXPECT_EQ(r.oms.order(queued).status, kApproved);  // never went out
+  EXPECT_EQ(r.oms.order(queued).status, kExpired);  // ended by the cancel, and never went out
   EXPECT_EQ(r.router.pending(), 0U);
 }
 
@@ -690,7 +699,8 @@ constexpr auto kAllPass = all_pass(std::make_index_sequence<risk::kRuleCount>{})
 // A paper flag left at its default can't reach a live sender, and a live approval can't go to paper.
 TEST(OrderRouter, PaperAndLiveDontMix) {
   Rig r;
-  OrderRouter live{r.oms, r.sink, r.broker, Venue::kLive, {.tag_limit = kTagLimit, .capacity = 8}};
+  OrderRouter live{
+      r.oms, r.sink, r.broker, Venue::kLive, {.tag_limit = kTagLimit, .capacity = 8}, testing::open_limits()};
   const OrderHandle paper = r.fresh();
   EXPECT_EQ(live.submit(paper, testing::approve(r.oms.order(paper).details, r.clock)).error().code,
             ErrorCode::kInvalidArgument);
@@ -701,11 +711,11 @@ TEST(OrderRouter, PaperAndLiveDontMix) {
   real.is_paper = kLiveOrder;
   const OrderHandle h = r.oms.create(real).value();
   const auto gate = risk::RiskGate::create(kAllPass, r.clock).value();
-  auto decision = gate.evaluate({}, real);
+  auto decision = gate.evaluate(no_state(), real);
   ASSERT_TRUE(decision.approved.has_value());
   EXPECT_EQ(r.router.submit(h, std::move(decision.approved).value()).error().code,  // NOLINT
             ErrorCode::kInvalidArgument);                                           // the paper router
-  auto again = gate.evaluate({}, real);
+  auto again = gate.evaluate(no_state(), real);
   ASSERT_TRUE(again.approved.has_value());
   EXPECT_TRUE(live.submit(h, std::move(again.approved).value()).has_value());  // NOLINT
 }
@@ -768,7 +778,8 @@ TEST(OrderRouter, TheApprovalAgeLimitIsConfigurable) {
                     r.sink,
                     r.broker,
                     Venue::kPaper,
-                    {.tag_limit = kTagLimit, .capacity = 8, .approval_max_age = 500}};
+                    {.tag_limit = kTagLimit, .capacity = 8, .approval_max_age = 500},
+                    testing::open_limits()};
   const OrderHandle h = r.fresh();
   const SimClock six_hundred_ns_ago(400);  // well inside the default, outside this router's 500 ns
   EXPECT_EQ(tight.submit(h, testing::approve(r.oms.order(h).details, six_hundred_ns_ago)).error().code,
@@ -1010,7 +1021,8 @@ TEST(QueueAge, TheLimitIsConfigurable) {
                     r.sink,
                     r.broker,
                     Venue::kPaper,
-                    {.tag_limit = kTagLimit, .capacity = 8, .queue_max_age = kNanosPerSecond}};
+                    {.tag_limit = kTagLimit, .capacity = 8, .queue_max_age = kNanosPerSecond},
+                    testing::open_limits()};
   const OrderHandle h = r.fresh();
   ASSERT_TRUE(tight.submit(h, testing::approve(r.oms.order(h).details, r.clock)));
   r.clock.advance(kNanosPerSecond + 1);
@@ -1026,6 +1038,384 @@ TEST(QueueMaxAge, ParsesWholeMillisecondsInRange) {
   for (const std::string_view bad : {"0", "60001", "-1", "5s", "1e3"}) {
     EXPECT_FALSE(parse_queue_max_age_ms(bad).has_value()) << bad;
   }
+}
+
+}  // namespace
+}  // namespace vyuha::oms
+
+namespace vyuha::oms {
+namespace {
+
+// ---- The send budget (D-20) ----
+
+// A router with room for a burst, on a cap of 8.
+struct PacedRig {
+  SimClock clock{1'000};
+  LaggingSink sink;
+  FakeBroker broker;
+  testing::FixedSendLimits limits{8};
+  Oms oms{sink, clock, 256};
+  OrderRouter router{oms, sink, broker, Venue::kPaper, {.tag_limit = kTagLimit, .capacity = 256}, limits};
+
+  OrderHandle add(int n, std::uint8_t account = 7) {
+    OrderDetails d = order_of(10, "client-" + std::to_string(n));
+    d.account_id.bytes.fill(account);
+    return oms.create(d).value();
+  }
+  void queue(OrderHandle h) { ASSERT_TRUE(router.submit(h, testing::approve(oms.order(h).details, clock))); }
+  void mark_durable() { sink.durable_count = sink.events.size(); }
+  // An order the broker holds.
+  OrderHandle open_order(int n) {
+    const OrderHandle h = add(n);
+    queue(h);
+    mark_durable();
+    EXPECT_EQ(router.poll(), 1U);
+    EXPECT_TRUE(oms.apply(h, OrderEvent::kBrokerAck).has_value());
+    return h;
+  }
+};
+
+TEST(SendBudget, NoMoreThanTheCapLeaveInASecond) {
+  PacedRig r;
+  for (int i = 0; i < 20; ++i) {
+    r.queue(r.add(i));
+  }
+  r.mark_durable();
+  EXPECT_EQ(r.router.poll(), 8U);
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_EQ(r.router.pending(), 12U);
+  r.clock.advance(kNanosPerSecond - 1);
+  EXPECT_EQ(r.router.poll(), 0U);  // a token comes back one full second after it was used
+  r.clock.advance(1);
+  EXPECT_EQ(r.router.poll(), 8U);
+}
+
+TEST(SendBudget, OneAccountsBacklogDoesNotHoldUpAnother) {
+  PacedRig r;
+  for (int i = 0; i < 12; ++i) {
+    r.queue(r.add(i, 7));
+  }
+  r.queue(r.add(100, 9));
+  r.mark_durable();
+  EXPECT_EQ(r.router.poll(), 9U);  // 8 of the first account's, and the other account's one
+}
+
+TEST(SendBudget, AHeldOrderStillExpiresAtTheQueueLimit) {
+  PacedRig r;
+  std::vector<OrderHandle> all;
+  for (int i = 0; i < 9; ++i) {
+    all.push_back(r.add(i));
+    r.queue(all.back());
+  }
+  r.mark_durable();
+  EXPECT_EQ(r.router.poll(), 8U);
+  r.clock.advance(kDefaultQueueMaxAge + 1);
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_EQ(r.oms.order(all.back()).status, OrderStatus::kExpired);
+  EXPECT_EQ(r.router.expired_in_queue(), 1U);
+}
+
+TEST(SendBudget, ANewOrderWithNoCapIsHeldAndNeverSent) {
+  const SimClock clock{1'000};
+  LaggingSink sink;
+  FakeBroker broker;
+  const testing::FixedSendLimits none{0};
+  Oms oms{sink, clock, 8};
+  OrderRouter router{oms, sink, broker, Venue::kPaper, {.tag_limit = kTagLimit, .capacity = 8}, none};
+  const OrderHandle h = oms.create(order_of(10)).value();
+  ASSERT_TRUE(router.submit(h, testing::approve(oms.order(h).details, clock)));
+  sink.durable_count = sink.events.size();
+  EXPECT_EQ(router.poll(), 0U);
+  EXPECT_TRUE(broker.tags.empty());
+}
+
+TEST(SendBudget, ACancelGoesAheadOfNewOrdersAndUsesAToken) {
+  PacedRig r;
+  const OrderHandle live = r.open_order(0);  // 1 token used
+  r.clock.advance(kNanosPerSecond);
+  for (int i = 1; i <= 8; ++i) {
+    r.queue(r.add(i));  // these would take all 8 tokens
+  }
+  r.mark_durable();
+  EXPECT_TRUE(r.router.cancel(live));
+  ASSERT_EQ(r.broker.cancels.size(), 1U);  // first, though the new orders were queued before it
+  EXPECT_EQ(r.router.poll(), 7U);          // the cancel used one of the 8
+  EXPECT_EQ(r.router.pending(), 1U);
+}
+
+TEST(SendBudget, AKillBurstIsPacedAndEveryOrderIsCancelled) {
+  PacedRig r;
+  for (int i = 0; i < 20; ++i) {
+    r.clock.advance(kNanosPerSecond);
+    (void)r.open_order(i);
+  }
+  r.clock.advance(kNanosPerSecond);
+  const auto first = r.router.cancel_all();
+  EXPECT_EQ(first.asked, 8U);
+  EXPECT_EQ(first.queued, 12U);
+  EXPECT_EQ(r.broker.cancels.size(), 8U);
+  r.router.poll();
+  EXPECT_EQ(r.broker.cancels.size(), 8U);  // the second has no tokens left
+  r.clock.advance(kNanosPerSecond);
+  r.router.poll();
+  EXPECT_EQ(r.broker.cancels.size(), 16U);
+  r.clock.advance(kNanosPerSecond);
+  r.router.poll();
+  EXPECT_EQ(r.broker.cancels.size(), 20U);
+  EXPECT_EQ(r.router.cancels_queued(), 0U);
+  // Each order was asked once.
+  std::vector<Uuid> ids = r.broker.cancels;
+  std::ranges::sort(ids);
+  EXPECT_EQ(std::ranges::unique(ids).begin(), ids.end());
+}
+
+TEST(SendBudget, ACancelTheAdapterRefusedUsesNoTokenAndIsRetried) {
+  PacedRig r;
+  const OrderHandle live = r.open_order(0);
+  r.clock.advance(kNanosPerSecond);
+  r.broker.busy = true;
+  const auto out = r.router.cancel_all();
+  EXPECT_EQ(out.failed, 1U);
+  EXPECT_EQ(r.router.cancels_queued(), 1U);
+  r.broker.busy = false;
+  r.router.poll();
+  ASSERT_EQ(r.broker.cancels.size(), 1U);
+  EXPECT_EQ(r.broker.cancels[0], r.oms.order(live).details.id);
+  EXPECT_EQ(r.router.cancels_queued(), 0U);
+}
+
+TEST(SendBudget, ACancelStillGoesForAnAccountWithNoCapOnFile) {
+  const SimClock clock{1'000};
+  LaggingSink sink;
+  FakeBroker broker;
+  const testing::FixedSendLimits limits{8};
+  Oms oms{sink, clock, 8};
+  OrderRouter opening{oms, sink, broker, Venue::kPaper, {.tag_limit = kTagLimit, .capacity = 8}, limits};
+  const OrderHandle h = oms.create(order_of(10)).value();
+  ASSERT_TRUE(opening.submit(h, testing::approve(oms.order(h).details, clock)));
+  sink.durable_count = sink.events.size();
+  ASSERT_EQ(opening.poll(), 1U);
+  ASSERT_TRUE(oms.apply(h, OrderEvent::kBrokerAck).has_value());
+
+  const testing::FixedSendLimits none{0};
+  OrderRouter router{oms, sink, broker, Venue::kPaper, {.tag_limit = kTagLimit, .capacity = 8}, none};
+  EXPECT_EQ(router.cancel_all().asked, 1U);
+  EXPECT_EQ(broker.cancels.size(), 1U);
+}
+
+TEST(SendBudget, ACancelForAnOrderTheBrokerCantHoldIsRefused) {
+  PacedRig r;
+  EXPECT_FALSE(r.router.cancel(r.add(0)));  // NEW: never approved
+  EXPECT_FALSE(r.router.cancel(99));        // no such order
+}
+
+// An instrument not in the master could be on either exchange: instrument 99 here.
+class VenueLimits final : public ISendLimits {
+ public:
+  [[nodiscard]] std::uint8_t ops_cap(const Uuid& /*account*/) const noexcept override { return 8; }
+  [[nodiscard]] std::uint8_t ops_venue(std::int64_t instrument_id) const noexcept override {
+    return instrument_id == 99 ? kOpsVenueUnknown : 0;
+  }
+};
+
+TEST(SendBudget, ACancelForAnUnknownInstrumentUsesEveryExchangesBudget) {
+  const SimClock clock{1'000};
+  LaggingSink sink;
+  FakeBroker broker;
+  const VenueLimits limits;
+  Oms oms{sink, clock, 32};
+  OrderRouter router{oms, sink, broker, Venue::kPaper, {.tag_limit = kTagLimit, .capacity = 32}, limits};
+  for (int i = 0; i < 16; ++i) {
+    OrderDetails d = order_of(10, "client-" + std::to_string(i));
+    d.instrument_id = i < 8 ? 1 : 99;
+    RecoveredOrder restored{.details = d};
+    restored.status = kOpen;
+    restored.seq = 3;
+    ASSERT_TRUE(oms.restore(restored).has_value());
+  }
+  const auto out = router.cancel_all();
+  EXPECT_EQ(out.asked, 8U);  // not 16: those 8 could all be on the one exchange
+  EXPECT_EQ(out.queued, 8U);
+}
+
+TEST(SendBudget, AccountsBeyondTheTableShareABudget) {
+  PacedRig r;
+  for (int i = 0; i < 140; ++i) {
+    r.queue(r.add(i, static_cast<std::uint8_t>(i)));
+  }
+  r.mark_durable();
+  EXPECT_EQ(r.router.poll(), 135U);  // 127 accounts with their own bucket, then 8 from the shared last one
+}
+
+TEST(SendBudget, RepeatedCancelAllReachesEveryOrderWhenTheBrokerIsSilent) {
+  PacedRig r;
+  for (int i = 0; i < 20; ++i) {
+    r.clock.advance(kNanosPerSecond);
+    (void)r.open_order(i);
+  }
+  for (int second = 0; second < 3; ++second) {
+    r.clock.advance(kNanosPerSecond);
+    (void)r.router.cancel_all();
+  }
+  std::vector<Uuid> ids = r.broker.cancels;
+  std::ranges::sort(ids);
+  const auto [end, last] = std::ranges::unique(ids);
+  ids.erase(end, last);
+  EXPECT_EQ(ids.size(), 20U);
+}
+
+TEST(SendBudget, CancellingAnOrderStillWaitingForATokenMeansItNeverGoes) {
+  PacedRig r;
+  std::vector<OrderHandle> all;
+  for (int i = 0; i < 9; ++i) {
+    all.push_back(r.add(i));
+    r.queue(all.back());
+  }
+  r.mark_durable();
+  EXPECT_EQ(r.router.poll(), 8U);
+  EXPECT_TRUE(r.router.cancel(all.back()));
+  EXPECT_EQ(r.oms.order(all.back()).status, OrderStatus::kExpired);
+  EXPECT_EQ(r.sink.events.back().reason_code.view(), kCancelledInQueue);
+  r.clock.advance(kNanosPerSecond);
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_EQ(r.broker.tags.size(), 8U);
+  EXPECT_EQ(r.router.pending(), 0U);
+}
+
+TEST(SendBudget, CancelAllEndsTheOrdersItDrops) {
+  PacedRig r;
+  const OrderHandle h = r.add(0);
+  r.queue(h);
+  (void)r.router.cancel_all();
+  EXPECT_EQ(r.oms.order(h).status, OrderStatus::kExpired);
+  EXPECT_EQ(r.sink.events.back().reason_code.view(), kCancelledInQueue);
+}
+
+TEST(SendBudget, AClockThatSteppedBackHoldsCancelsUpForASecondAtMost) {
+  PacedRig r;
+  for (int i = 0; i < 12; ++i) {
+    r.clock.advance(kNanosPerSecond);
+    (void)r.open_order(i);
+  }
+  r.clock.advance(kNanosPerSecond);
+  EXPECT_EQ(r.router.cancel_all().asked, 8U);
+  r.clock.set(1'000);  // an hour's step back looks the same: every stamp is now in the future
+  r.router.poll();
+  EXPECT_EQ(r.broker.cancels.size(), 8U);  // the cap still holds
+  r.clock.advance(kNanosPerSecond);
+  r.router.poll();
+  EXPECT_EQ(r.broker.cancels.size(), 12U);  // and it doesn't wait for the clock to catch up
+}
+
+// The clock moves between reads, as a real one does. A frozen clock hides a stamp that looks like the future.
+class AdvancingClock final : public IClock {
+ public:
+  [[nodiscard]] Nanos now() const noexcept override { return now_.fetch_add(1, std::memory_order_relaxed); }
+
+ private:
+  mutable std::atomic<Nanos> now_{1'000};
+};
+
+TEST(SendBudget, ACancelBurstIsPacedOnAClockThatMovesBetweenReads) {
+  const AdvancingClock clock;
+  LaggingSink sink;
+  FakeBroker broker;
+  const testing::FixedSendLimits limits{8};
+  Oms oms{sink, clock, 64};
+  OrderRouter router{oms, sink, broker, Venue::kPaper, {.tag_limit = kTagLimit, .capacity = 8}, limits};
+  for (int i = 0; i < 40; ++i) {
+    RecoveredOrder restored{.details = order_of(10, "client-" + std::to_string(i))};
+    restored.status = kOpen;
+    restored.seq = 3;
+    ASSERT_TRUE(oms.restore(restored).has_value());
+  }
+  const auto out = router.cancel_all();
+  EXPECT_EQ(out.asked, 8U);
+  EXPECT_EQ(out.queued, 32U);
+  router.poll();
+  EXPECT_EQ(broker.cancels.size(), 8U);
+}
+
+TEST(SendBudget, CancellingAnOrderStorageRefusedRecordsNothingIllegal) {
+  PacedRig r;
+  const OrderHandle h = r.add(0);
+  r.queue(h);
+  r.oms.refuse(r.oms.order(h).details.id);
+  ASSERT_EQ(r.oms.order(h).status, OrderStatus::kRiskRejected);
+  EXPECT_FALSE(r.router.cancel(h));  // nothing was left to cancel
+  EXPECT_EQ(r.oms.illegal_transitions(), 0U);
+  EXPECT_EQ(r.oms.order(h).status, OrderStatus::kRiskRejected);
+}
+
+TEST(SendBudget, ATokenIsStampedWhenTheOrderLeavesNotWhenThePollBegan) {
+  class SlowBroker final : public IOrderSender {
+   public:
+    explicit SlowBroker(SimClock& clock) noexcept : clock_(&clock) {}
+    [[nodiscard]] bool send(const risk::ApprovedOrder& /*order*/,
+                            std::string_view /*tag*/) noexcept override {
+      clock_->advance(kNanosPerSecond / 2);
+      return true;
+    }
+    [[nodiscard]] bool cancel(const Order& /*order*/) noexcept override { return true; }
+
+   private:
+    SimClock* clock_;
+  };
+  SimClock clock{1'000};
+  LaggingSink sink;
+  SlowBroker broker(clock);
+  const testing::FixedSendLimits limits{1};
+  Oms oms{sink, clock, 8};
+  OrderRouter router{oms, sink, broker, Venue::kPaper, {.tag_limit = kTagLimit, .capacity = 8}, limits};
+  const OrderHandle h = oms.create(order_of(10)).value();
+  ASSERT_TRUE(router.submit(h, testing::approve(oms.order(h).details, clock)));
+  const OrderHandle second = oms.create(order_of(10, "client-2")).value();
+  ASSERT_TRUE(router.submit(second, testing::approve(oms.order(second).details, clock)));
+  sink.durable_count = sink.events.size();
+  EXPECT_EQ(router.poll(), 1U);  // it left at +0.5 s, so its token is back at +1.5 s
+  clock.advance(kNanosPerSecond - 1);
+  EXPECT_EQ(router.poll(), 0U);
+  clock.advance(1);
+  EXPECT_EQ(router.poll(), 1U);
+}
+
+TEST(OpsWindow, HoldsTheCapInEveryRollingSecond) {
+  OpsWindow w;
+  Nanos now = 1'000;
+  for (int i = 0; i < 8; ++i) {
+    ASSERT_TRUE(w.has_token(now, 8));
+    w.take(now);
+    now += kNanosPerSecond / 10;  // 8 orders in the first 0.7 s
+  }
+  EXPECT_FALSE(w.has_token(now, 8));
+  EXPECT_FALSE(w.has_token(1'000 + kNanosPerSecond - 1, 8));
+  EXPECT_TRUE(w.has_token(1'000 + kNanosPerSecond, 8));
+}
+
+TEST(OpsWindow, RefusesAZeroOrOverLimitCapAndAClockThatSteppedBack) {
+  OpsWindow w;
+  EXPECT_FALSE(w.has_token(1, 0));
+  EXPECT_FALSE(w.has_token(1, kMaxOpsCap + 1));
+  w.take(5'000);
+  EXPECT_FALSE(w.has_token(4'000, 1));
+}
+
+TEST(OpsWindow, ClampingTreatsAFutureStampAsNowAndKeepsTheCap) {
+  OpsWindow w;
+  w.take(5'000);
+  w.clamp_future(4'000);
+  EXPECT_FALSE(w.has_token(4'000, 1));
+  EXPECT_TRUE(w.has_token(4'000 + kNanosPerSecond, 1));
+}
+
+TEST(OpsWindow, ALowerCapAppliesToOrdersAlreadyInTheWindow) {
+  OpsWindow w;
+  for (int i = 0; i < 5; ++i) {
+    w.take(1'000);
+  }
+  EXPECT_TRUE(w.has_token(1'000, 6));
+  EXPECT_FALSE(w.has_token(1'000, 5));
+  EXPECT_FALSE(w.has_token(1'000, 2));
 }
 
 }  // namespace

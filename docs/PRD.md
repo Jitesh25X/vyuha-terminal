@@ -68,7 +68,7 @@ and the desk can trade, risk-manage, research and query the AI copilot end-to-en
 - [ ] Trader opens `NIFTY OC` (option chain) and sees live LTP/OI/IV/Greeks updating; tick-to-screen p95 < 400 ms.
 - [ ] Trader places a paper order and a live order (1 lot); both pass the risk gate, appear in the blotter, and the fill updates position and P&L within 1 s of the broker update.
 - [ ] An order that breaches any configured limit is rejected by the risk gate with a reason code and never reaches the broker (verified via mock broker in CI and broker order book in staging).
-- [ ] Desk kill switch cancels all open orders across all accounts and blocks new ones within 2 s.
+- [ ] Desk kill switch blocks new orders instantly, before any cancel is sent, then cancels all open orders across all accounts: cancels sent at the maximum compliant rate, i.e. within ⌈N/cap⌉ s per account, accounts in parallel.
 - [ ] Risk manager sees desk net Delta/Gamma/Vega/Theta, 1-day 99% historical VaR, and a spot×IV scenario grid, refreshing at ≤ 5 s.
 - [ ] Analyst downloads 2 years of 1-minute candles for the Nifty 50 constituents, backtests the reference SMA-cross strategy with Indian cost model, and results match the golden reference within 0.01% P&L.
 - [ ] The same strategy file runs unchanged in backtest, paper and live modes.
@@ -249,7 +249,8 @@ Full rule catalogue, limit hierarchy and formulas: `RISK_ENGINE.md`.
 #### F-RK-2: Kill switch
 **Description:** Scopes: desk, account, trader, strategy. Actions: (1) block new intents, (2) cancel all open orders, (3) optional flatten (square-off with marketable LIMIT orders at protection band). Triggers: manual (`Ctrl+Shift+K` + confirm, or `KILL` function), automatic (daily loss limit, desk drawdown, order-reject storm > N/min, broker-disconnect > N s with open positions — configurable).
 **Acceptance criteria:**
-- [ ] Desk kill: all open orders on all accounts cancelled and new intents blocked within 2 s (staging test with 20 open orders).
+- [ ] Desk kill: new intents are blocked instantly, before any cancel is sent. All open orders on all accounts are then cancelled: cancels sent at the maximum compliant rate, i.e. within ⌈N/cap⌉ s per account, accounts in parallel (staging test with 20 open orders; ADR-028).
+- [ ] The kill dialog shows progress while cancels go out, e.g. `cancelling 12/20`.
 - [ ] Release requires `risk_manager`/`admin` re-auth and a reason; audited.
 - [ ] Flatten is never automatic by default; it requires explicit config per scope. `[DECISION NEEDED: §13 #10]`
 
@@ -576,7 +577,7 @@ vyuha/
 | Terminal initial load (LCP) | < 2.0 s on LAN |
 | REST p95 (non-analytics) | < 100 ms |
 | Desk risk refresh | ≤ 5 s for 500 positions |
-| Kill switch (desk) | all cancels sent < 2 s |
+| Kill switch (desk) | new orders blocked instantly, before any cancel; cancels sent at the maximum compliant rate, i.e. within ⌈N/cap⌉ s per account, accounts in parallel |
 | Availability in market hours (09:00–15:45 IST) | 99.9% per month for engine + gateway |
 | Recovery | engine restart restores OMS state from Postgres + broker reconcile < 30 s |
 | Security | OWASP ASVS L2 for gateway; secrets encrypted at rest; no secrets in logs; TOTP mandatory |

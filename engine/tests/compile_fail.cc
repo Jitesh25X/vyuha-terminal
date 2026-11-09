@@ -3,6 +3,7 @@
 // with VYUHA_CASE_<name> (which must fail). A case's failure can then only be its own line.
 
 #include <bit>
+#include <cstdint>
 #include <string_view>
 #include <utility>
 
@@ -69,6 +70,19 @@ void probe(IOrderSender& sender, OrderRouter& router, const Order& order, const 
 #elif defined(VYUHA_CASE_PAPER_FROM_BOOL)
   const OrderDetails implicit{.is_paper = true};  // a bare bool isn't a PaperFlag
   static_cast<void>(implicit);
+#elif defined(VYUHA_CASE_KILL_SOURCE_NAMED)
+  OrderDetails marked = details;
+  marked.source = vyuha::oms::Source::kKillFlatten;  // D-23: only KillSwitch can name it
+  static_cast<void>(marked);
+#elif defined(VYUHA_CASE_KILL_SOURCE_CONSTRUCT)
+  const vyuha::oms::Source forged{vyuha::oms::Source::Kind::kKillFlatten};
+  static_cast<void>(forged);
+#elif defined(VYUHA_CASE_KILL_SWITCH_LOCAL)
+  const vyuha::risk::KillSwitch mine;  // a switch of your own would mark orders the real one doesn't cover
+  static_cast<void>(mine);
+#elif defined(VYUHA_CASE_SLICE_INTENT_CONSTRUCT)
+  const vyuha::oms::SliceIntent forged{std::uint64_t{7}};  // D-24: only FreezeSlicer can make one
+  static_cast<void>(forged);
 #elif defined(VYUHA_CASE_TEMP_CLOCK)
   static_cast<void>(RiskGate::create(std::span<const Rule>{}, vyuha::SimClock{}));
 #endif

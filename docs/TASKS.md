@@ -179,11 +179,25 @@ Current milestone: **M4.1, then M2**
   - **Guardrails (owner, 2026-11-08):** `.claude/settings.json` now denies Edit and Write on `.claude/hooks/**` and on itself. Future hook changes: the agent proposes a diff and the owner applies it.
   - deps: M2.2b
   - needs: nothing new
-- [ ] **M2.3** Rules R-KILL…R-ORDER-SHAPE, R-FAT-FINGER, R-ORDER-VALUE, R-DUP, R-OPS
+- [x] **M2.3** Rules R-KILL…R-ORDER-SHAPE, R-FAT-FINGER, R-ORDER-VALUE, R-DUP, R-OPS — 2026-11-09: done.
+  - **What was built:** rules 1 to 13 in `risk/rules.cc`, on `GateContext`, `KillSwitch`, `OpsWindow` and `FreezeSlicer`. `OrderRouter` has a send budget: cancels go first and still count (D-20). Nothing loads `GateContext` until M2.8.
+  - **Checked:** `make verify` green (debug 385/385, asan 374/374). Release, same machine and session: `BM_RiskGateFullChainPercentiles` p50 84 ns, p99 125 ns; the real rules p99 208 ns, or 3.5 µs with a nearly full duplicate table (target 20 µs).
+  - **risk-reviewer:** three passes. Two BLOCKs fixed (unknown-instrument venue at 2x cap; cancels unpaced on a real clock), then APPROVE. D-25 (a forward clock step could exceed the OPS cap) goes to M2.3b. A router refusal after the gate still uses the token and duplicate entry; that fails closed and stays (owner, 2026-11-09).
+  - **Owner decisions (2026-11-09):** D-20 to D-24 resolved; see `DECISIONS.md`. D-20's send budget is part of this task because invariant 7 needs it.
   - deps: M2.2, M2.2b, M2.2c
   - needs: nothing new
   - done: Per-rule unit tests; bench p99 < 20 µs (p50/p99 from `BM_RiskGateFullChainPercentiles`); a rejected order leaves the R-OPS token bucket and the R-DUP window unchanged (test).
   - spec (owner, 2026-11-08): **stateful rules are two-phase.** Each stateful rule (`R-DUP`, `R-OPS`) has a pure `check()` and a separate `on_approved()`. The gate runs every `check()` first; only when the whole chain passes does it call `on_approved()` on each, in chain order. A rejected order never uses up an OPS token or creates a duplicate-window entry. The core thread is the only writer, so there's no race between check and commit.
+- [ ] **M2.3b** OPS budgets on a monotonic clock (D-25); stop triggers checked (R-TRIGGER-SIDE)
+  - deps: M2.3
+  - needs: nothing new
+  - done: The OPS budgets (R-OPS and the send queue) read `steady_clock` through the injected clock interface; the wall clock stays for timestamps and session times only. A test shows a simulated 10 s forward clock step releases no extra tokens. SL and SL-M orders: a buy stop's trigger must be above LTP and a sell stop's below it, otherwise reject `R-TRIGGER-SIDE`; the trigger must be within the fat-finger band of LTP; the stale-LTP rule is the same as for priced orders (D-22). Per-case unit tests, a benchmark entry and `RISK_ENGINE.md §3` updated.
+  - notes: Owner, 2026-11-09. A stop with a typo'd trigger on the wrong side of the market fires immediately as a market order. The M2.4 rules reuse these buckets. Two P2s from the M2.3 review to fix here: call `drain_refused()` first in `OrderRouter::cancel`, with a test that has a refusal still in the sink, because until it's drained `cancel` returns true and records EXPIRED for a refused order (it never goes out); and add a test pinning `cancel` on a full sink (true, order stays APPROVED, never sent).
+- [ ] **M2.3c** Circuit bands from broker quotes (D-22)
+  - deps: M2.3
+  - needs: nothing new
+  - done: `InstrumentRef::lower_circuit` and `upper_circuit` are filled and kept current for the instruments the desk trades, with tests against a recorded fixture. Until then `R-FAT-FINGER` refuses every live order.
+  - notes: Verified 2026-11-09. Kite `GET /quote` returns `lower_circuit_limit` and `upper_circuit_limit`, up to 500 instruments per call; `/quote/ltp` and `/quote/ohlc` don't (https://kite.trade/docs/connect/v3/market-quotes/). Upstox `GET /v2/market-quote/quotes` returns the same two field names under `data`, up to 500 instrument keys (https://upstox.com/developer/api-documentation/get-full-market-quote/). Check each broker's rate limit and the Upstox V3 page before building. Bands can change during the day, so decide the refresh interval here. No scraping of exchange files (ADR-019).
 - [ ] **M2.4** Rules R-OPEN-ORDERS…R-DISCIPLINE with incremental scope aggregation
   - deps: M2.3
   - needs: nothing new
@@ -192,6 +206,7 @@ Current milestone: **M4.1, then M2**
   - deps: M2.4
   - needs: nothing new
   - done: F-EX-4 ACs
+  - notes: Build on `oms::FreezeSlicer` (M2.3), the only code that can make `SliceIntent`. It still needs lot rounding and ids for the children. `max_order_qty_lots` applies per order before slicing, so gate the parent's full size. Give each child its own id: until then, a child submitted twice has the sibling exemption from R-DUP.
 - [ ] **M2.6** Position/MTM projector + costs (temporary flat schedule until M4)
   - deps: M2.5
   - needs: nothing new
@@ -201,12 +216,12 @@ Current milestone: **M4.1, then M2**
   - deps: M2.6
   - needs: nothing new
   - done: F-RK-2 ACs (paper)
-  - notes: Use `OrderRouter::cancel_all` (M2.1b). The restart rule was closed in M2.1b, not here (owner, 2026-11-03).
+  - notes: Use `OrderRouter::cancel_all` (M2.1b). The restart rule was closed in M2.1b, not here (owner, 2026-11-03). Build on `risk::KillSwitch` (M2.3), the only code that can mark an order kill-generated: move `kill_generated` behind the flatten path here, because today any holder of the `GateContext` can call it while a kill is active. Flatten must work even if the user mapping is gone (e.g. a removed trader): run it under a system identity that skips the entitlement check, and test that case (owner, 2026-11-09). Only the kill-switch code should be able to use that identity, as D-23 does for the source. Block new orders before sending any cancel. Cancels are paced at the account's cap (D-20, ADR-028), so keep calling `poll` and expose progress for the kill dialog (`cancelling 12/20`).
 - [ ] **M2.8** Gateway: orders/positions/pnl/limits/kill APIs + WS channels
   - deps: M2.7
   - needs: nothing new
   - done: API tests; every gate rejection is persisted with its stamp, rule code, limit and current value (owner, 2026-11-08).
-  - notes: The engine binary creates the order writer here: pass it a started `SystemAlertPublisher` (M2.2c) and parse `RISK_APPROVAL_MAX_AGE_MS` and `ORDER_QUEUE_MAX_AGE_MS` at startup, refusing to start on a bad value. `POST /orders` calls `Oms::intake` and maps `kOrderDup` to 409 `ORDER_DUP`. Also check Postgres for `client_order_id`, because intake only knows this run: an order finished earlier must return the existing order, not reach the writer.
+  - notes: The engine binary creates the order writer here: pass it a started `SystemAlertPublisher` (M2.2c) and parse `RISK_APPROVAL_MAX_AGE_MS` and `ORDER_QUEUE_MAX_AGE_MS` at startup, refusing to start on a bad value. Load the `GateContext` (M2.3) from Postgres and refuse to start if a table doesn't fit: instruments without index rows, accounts, entitlements, live strategies, limits, the holiday calendar and its coverage. Give the router a `GateSendLimits` on that context. Set `live_trading_enabled` with `live_trading_allowed`. Record a rejection's reason with `reason_text`, so a full duplicate table raises its alert. `POST /orders` calls `Oms::intake` and maps `kOrderDup` to 409 `ORDER_DUP`. Also check Postgres for `client_order_id`, because intake only knows this run: an order finished earlier must return the existing order, not reach the writer.
 - [ ] **M2.9** Web: `ORD` ticket with live preview, `BLT`, `POS`, `PNL`, `LIM`, `KILL`, hotkeys
   - deps: M2.8
   - needs: nothing new (reuse grid/chart libs)
