@@ -767,6 +767,13 @@ TEST(RFatFinger, ATickAheadOfTheGatesReadingIsRefused) {
   EXPECT_REJECT(d, kFatFinger, d.order());
 }
 
+TEST(RFatFinger, ASuspendMakesAnLtpStale) {  // D-34
+  Desk d;
+  EXPECT_PASS(d, kFatFinger, d.order());
+  d.clock.suspend(kLtpMaxAge + 1);
+  EXPECT_REJECT(d, kFatFinger, d.order());
+}
+
 TEST(RFatFinger, TheWallClockReceiveTimeIsNotUsed) {
   Desk d;
   md::Tick t;
@@ -1345,6 +1352,13 @@ TEST(RDup, AForwardClockStepDoesntPruneALiveEntry) {
   EXPECT_REJECT(d, kDup, d.order());
 }
 
+TEST(RDup, ASuspendLongerThanTheWindowEndsIt) {  // D-34
+  Desk d;
+  ASSERT_TRUE(d.run(d.order()).approved.has_value());
+  d.clock.suspend((Nanos{1'500} * kNanosPerSecond / 1'000) + 1);
+  EXPECT_PASS(d, kDup, d.order());
+}
+
 TEST(GateStampClocks, EvaluationTimeIsMeasuredOnTheMonotonicClock) {
   // The wall clock jumps on every read and the monotonic one doesn't move.
   class JumpingWall final : public IClock {
@@ -1500,6 +1514,16 @@ TEST(ROps, AForwardClockStepDoesntClearASoftCapWarning) {
   ASSERT_TRUE(d.run(nth(d, 0)).approved.has_value());
   d.clock.step_wall(10 * kNanosPerSecond);
   EXPECT_WARN(d, kOps, nth(d, 1));
+}
+
+TEST(ROps, ASuspendReturnsTheTokens) {  // D-34
+  Desk d;
+  for (int i = 0; i < 8; ++i) {
+    ASSERT_TRUE(d.run(nth(d, i)).approved.has_value());
+  }
+  EXPECT_REJECT(d, kOps, nth(d, 8));
+  d.clock.suspend(kNanosPerSecond);
+  EXPECT_PASS(d, kOps, nth(d, 8));
 }
 
 TEST(ROps, AWallClockStepBackHoldsNoTokenBack) {

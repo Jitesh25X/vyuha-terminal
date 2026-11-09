@@ -7,6 +7,7 @@ add_executable(vyuha_tests
   bar_builder_test.cc
   last_value_test.cc
   core_loop_test.cc
+  clock_test.cc
   kite_parser_test.cc
   kite_ticker_test.cc
   md_publisher_test.cc

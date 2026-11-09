@@ -1001,6 +1001,43 @@ TEST(QueueAge, AWallClockStepInEitherDirectionCantSaveAnOldOrder) {
   }
 }
 
+// D-34: the host was suspended and the monotonic clock counted it. A clock that stops during suspend would
+// look like the wall-clock steps above, which change nothing, and let these orders go.
+TEST(QueueAge, ASuspendLongerThanTheQueueLimitExpiresEveryQueuedOrder) {
+  Rig r;
+  std::vector<OrderHandle> handles;
+  for (std::int32_t i = 0; i < 3; ++i) {
+    handles.push_back(r.oms.create(order_of(10, "client-" + std::to_string(i))).value());
+    ASSERT_TRUE(r.submit(handles.back()));
+  }
+  r.clock.suspend(kDefaultQueueMaxAge + 1);
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_TRUE(r.broker.tags.empty());
+  for (const OrderHandle h : handles) {
+    EXPECT_EQ(r.oms.order(h).status, kExpired);
+  }
+  EXPECT_EQ(r.router.expired_in_queue(), 3U);
+}
+
+TEST(QueueAge, AShortSuspendLeavesTheQueueAlone) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
+  r.clock.suspend(kDefaultQueueMaxAge - 1);
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 1U);
+  EXPECT_EQ(r.oms.order(h).status, kSent);
+}
+
+TEST(OrderRouter, ASuspendMakesAnApprovalStale) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  auto approved = testing::approve(r.oms.order(h).details, r.clock);
+  r.clock.suspend(kDefaultApprovalMaxAge + 1);
+  EXPECT_EQ(r.router.submit(h, std::move(approved)).error().code, ErrorCode::kApprovalStale);
+}
+
 TEST(OrderRouter, AWallClockStepInEitherDirectionDoesntMakeAnApprovalStale) {
   for (const Nanos step : {Nanos{-10} * kNanosPerSecond, Nanos{10} * kNanosPerSecond}) {
     Rig r;
