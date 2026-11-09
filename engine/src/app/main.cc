@@ -87,8 +87,12 @@ void warn_if_slew_unsafe(quill::Logger* log) {
   }
   const vyuha::SlewCheck check = vyuha::check_chrony_slew(conf);
   if (!check.ok) {
-    const char* why = check.unreadable ? " (a maxslewrate line can't be read)"
-                                       : (check.configured ? "" : " (its default: none is set)");
+    const char* why = "";
+    if (check.unreadable) {
+      why = " (a maxslewrate line can't be read)";
+    } else if (!check.configured) {
+      why = " (its default: none is set)";
+    }
     LOG_WARNING(log,
                 "clock: chrony's maxslewrate is {} ppm{}; set it to {} or less (D-36), or a clock-second can "
                 "be shorter than a real one during a correction",
