@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { enrollAndSignIn, run } from "./session";
 
 // M1.9 done check — PRD F-MD-2 AC4 / UI_SPEC §7 perf budget: a watchlist of 1,000 instruments, every
@@ -13,7 +13,45 @@ const password = process.env["VYUHA_E2E_PASSWORD"] ?? "";
 const ROWS = 1000;
 const HZ = 4;
 const SECONDS = Number(process.env["VYUHA_PERF_SECONDS"] ?? 60);
-const WARMUP_MS = 3000;
+// Before measuring, the page must have finished loading and had this long with no long task, so startup work
+// (grid mount, first batches, JIT) isn't measured as steady state. A page that never goes quiet is measured as
+// it is after SETTLE_CAP_MS, so it still fails honestly.
+const QUIET_MS = 1000;
+const SETTLE_CAP_MS = 20_000;
+
+async function settle(page: Page): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await page.waitForLoadState("load");
+    try {
+      await page.evaluate(
+        ([quietMs, capMs]) =>
+          new Promise<void>((resolve) => {
+            const started = performance.now();
+            let quietSince = started;
+            const po = new PerformanceObserver(() => {
+              quietSince = performance.now();
+            });
+            po.observe({ type: "longtask" });
+            const check = () => {
+              const now = performance.now();
+              if (now - quietSince >= quietMs || now - started >= capMs) {
+                po.disconnect();
+                resolve();
+                return;
+              }
+              setTimeout(check, 100);
+            };
+            check();
+          }),
+        [QUIET_MS, SETTLE_CAP_MS] as const,
+      );
+      return;
+    } catch (e) {
+      // A navigation destroyed the page's context: wait for the new page to load, then go again.
+      if (!String(e).includes("Execution context was destroyed")) throw e;
+    }
+  }
+}
 
 test("1,000 rows × 4 Hz holds ≥ 55 fps with no long tasks", async ({ page, request }) => {
   test.setTimeout((SECONDS + 90) * 1000);
@@ -44,30 +82,29 @@ test("1,000 rows × 4 Hz holds ≥ 55 fps with no long tasks", async ({ page, re
   const first = await ltp.textContent();
   await expect(ltp).not.toHaveText(first ?? "", { timeout: 2000 });
 
+  await settle(page);
   const result = await page.evaluate(
-    ([warmup, durationMs]) =>
+    ([durationMs]) =>
       new Promise<{ fps: number; frames: number; longTasks: number[]; seconds: number }>((resolve) => {
-        setTimeout(() => {
-          const longTasks: number[] = [];
-          const po = new PerformanceObserver((l) => {
-            for (const e of l.getEntries()) longTasks.push(Math.round(e.duration));
-          });
-          po.observe({ type: "longtask" });
-          let frames = 0;
-          const t0 = performance.now();
-          const tick = () => {
-            frames++;
-            const elapsed = performance.now() - t0;
-            if (elapsed < durationMs) requestAnimationFrame(tick);
-            else {
-              po.disconnect();
-              resolve({ fps: (frames * 1000) / elapsed, frames, longTasks, seconds: elapsed / 1000 });
-            }
-          };
-          requestAnimationFrame(tick);
-        }, warmup);
+        const longTasks: number[] = [];
+        const po = new PerformanceObserver((l) => {
+          for (const e of l.getEntries()) longTasks.push(Math.round(e.duration));
+        });
+        po.observe({ type: "longtask" });
+        let frames = 0;
+        const t0 = performance.now();
+        const tick = () => {
+          frames++;
+          const elapsed = performance.now() - t0;
+          if (elapsed < durationMs) requestAnimationFrame(tick);
+          else {
+            po.disconnect();
+            resolve({ fps: (frames * 1000) / elapsed, frames, longTasks, seconds: elapsed / 1000 });
+          }
+        };
+        requestAnimationFrame(tick);
       }),
-    [WARMUP_MS, SECONDS * 1000] as const,
+    [SECONDS * 1000] as const,
   );
   const batches = (await stats()).batches - before;
   console.log(`perf: ${result.fps.toFixed(1)} fps over ${result.seconds.toFixed(0)} s (${result.frames} frames), long tasks ${JSON.stringify(result.longTasks)}, ${batches} batches × ${ROWS} rows sent`);
