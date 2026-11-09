@@ -197,11 +197,18 @@ Current milestone: **M4.1, then M2**
   - notes: Owner, 2026-11-09. A stop with a typo'd trigger on the wrong side of the market fires immediately as a market order. The M2.4 rules reuse these buckets. Two P2s from the M2.3 review to fix here: call `drain_refused()` first in `OrderRouter::cancel`, with a test that has a refusal still in the sink, because until it's drained `cancel` returns true and records EXPIRED for a refused order (it never goes out); and add a test pinning `cancel` on a full sink (true, order stays APPROVED, never sent).
 - [x] **M2.3d** The other time checks on the monotonic clock (D-26) — 2026-11-09: done.
   - **What was built:** `Tick::recv_mono`, taken on frame arrival and never published; `GateStamp::monotonic`; approval age, queue age, the R-DUP window, LTP age and evaluation time all use it. The audited approval age is the one the decision used.
-  - **risk-reviewer:** APPROVE, no P0. Its two P1s (the audit row's wall-clock age; no test on the R-DUP prune) are fixed. Open for the owner: `steady_clock` stops while a host is suspended.
+  - **risk-reviewer:** APPROVE, no P0. Its two P1s (the audit row's wall-clock age; no test on the R-DUP prune) are fixed. The `steady_clock` suspend gap it raised is closed by M2.3e (D-34).
   - deps: M2.3b
   - needs: nothing new
   - done: Queue age, approval age and the R-DUP window use `steady_clock` through the injected clock. LTP age is measured from a monotonic receive stamp the engine takes when the tick arrives, not the exchange timestamp or wall-clock receive time; exchange time is for display and storage only. A test shows a backward and a forward wall-clock step of 10 s changes none of these decisions. The wall clock remains only for session hours, timestamps and display.
   - notes: Owner, 2026-11-09: before M2.4, whose loss and exposure rules build on these.
+- [x] **M2.3e** The monotonic clock keeps counting while the host is suspended (D-34) — 2026-11-09: done.
+  - deps: M2.3d
+  - needs: nothing new
+  - done: `IClock::monotonic` reads a clock that counts guest suspend (`CLOCK_BOOTTIME` on Linux); a simulated suspend expires queued orders, makes approvals and LTPs stale, ends R-DUP windows and returns OPS tokens; the clock id is pinned.
+  - **What was built:** `WallClock::monotonic` reads `CLOCK_BOOTTIME` on Linux and `CLOCK_MONOTONIC` on macOS, not `steady_clock`. `SimClock::suspend` simulates a suspend. Tests: a suspend expires every queued order, makes an approval and an LTP stale, ends an R-DUP window and returns OPS tokens; a short one leaves the queue alone; the clock's source is pinned by a test.
+  - **Found:** the macOS in use already counted sleep in `steady_clock` (it tracked `CLOCK_MONOTONIC_RAW`), so the gap was Linux's. A real suspend can't be made in a test.
+  - **risk-reviewer:** APPROVE, no P0. Fixed: the id is pinned at compile time (a CI runner that never suspended can't tell the clocks apart), a failed clock read aborts instead of returning 0, and D-34 no longer claims a hypervisor pause. Open for the owner: D-36 (hypervisor pauses, NTP slew). Left: `pg_order_store.cc` still times an outage on `steady_clock`, which only affects the length it reports.
 - [ ] **M2.3c** Circuit bands from broker quotes (D-22)
   - deps: M2.3
   - needs: nothing new

@@ -22,8 +22,9 @@ class IClock {
   IClock& operator=(IClock&&) = delete;
   virtual ~IClock() = default;
   [[nodiscard]] virtual Nanos now() const noexcept = 0;
-  // Nanoseconds since an arbitrary start. Never steps, so every duration a decision rests on uses it (D-25,
-  // D-26). Comparable only with other readings of this clock, so never publish or store it.
+  // Nanoseconds since an arbitrary start. Never steps, and keeps counting while the host is suspended (D-34),
+  // so every duration a decision rests on uses it (D-25, D-26). Comparable only with other readings of this
+  // clock, so never publish or store it.
   [[nodiscard]] virtual Nanos monotonic() const noexcept = 0;
 };
 
@@ -49,6 +50,9 @@ class SimClock final : public IClock {
   }
   // The wall clock alone jumps, as an NTP correction does.
   void step_wall(Nanos d) noexcept { now_.fetch_add(d, std::memory_order_acq_rel); }
+  // The host was suspended for d: both clocks count it (D-34). A monotonic clock that stops during suspend
+  // would move the wall clock alone, which is what step_wall(d) stands for.
+  void suspend(Nanos d) noexcept { advance(d); }
 
  private:
   void elapse(Nanos d) noexcept {
