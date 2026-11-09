@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -17,10 +16,10 @@ inline constexpr std::uint8_t kOpsVenueUnknown = 2;  // an instrument not in the
 // The OPS token bucket, for both R-OPS and the send queue. A token comes back exactly one second after it was
 // used, so there are never more than cap orders in any rolling second. A bucket that refills at cap per
 // second from a full start would allow nearly 2 x cap in one second, which is over the 10 OPS threshold at
-// the default cap of 8. The check doesn't change anything; take records the order. A clock that stepped back
-// gives no token. A cancel path calls clamp_future first, so a step back holds a kill up for at most a
-// second. NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index): both indexes are reduced modulo the
-// array size
+// the default cap of 8. The check doesn't change anything; take records the order. Every reading passed in
+// must come from IClock::monotonic: on the wall clock, a forward step would make recent orders look old and
+// release tokens early (D-25). NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index): both indexes
+// are reduced modulo the array size
 class OpsWindow {
  public:
   [[nodiscard]] constexpr bool has_token(Nanos now, std::uint8_t cap) const noexcept {
@@ -32,12 +31,6 @@ class OpsWindow {
       return true;
     }
     return now - cap_th_latest >= kNanosPerSecond;
-  }
-  // Treats anything recorded later than now as recorded now: the clock stepped back. The cap still holds.
-  constexpr void clamp_future(Nanos now) noexcept {
-    for (Nanos& used : used_) {
-      used = std::min(used, now);
-    }
   }
   constexpr void take(Nanos now) noexcept {
     used_[next_] = now;

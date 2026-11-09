@@ -146,7 +146,7 @@ OrderRouter::Step OrderRouter::advance(Pending& next, Nanos now, std::size_t& se
       return Step::kNext;
     }
     const OrderDetails& details = next.approved.order();
-    if (!has_token(details, now, limits_->ops_cap(details.account_id))) {
+    if (!has_token(details, oms_->clock().monotonic(), limits_->ops_cap(details.account_id))) {
       return Step::kNext;  // waits for a token, and the queue age limit above still applies to it
     }
     // The tag is rebuilt here, not stored per order; a client id is short and this is once per order.
@@ -155,7 +155,7 @@ OrderRouter::Step OrderRouter::advance(Pending& next, Nanos now, std::size_t& se
       return Step::kStop;
     }
     const Nanos handed_over = oms_->clock().now();  // when it left, not when this poll began
-    take_token(details, handed_over);
+    take_token(details, oms_->clock().monotonic());
     approval_to_send_.record(handed_over - next.approved.stamp().ts);
     next.sent = true;
     ++sent;
@@ -189,16 +189,6 @@ bool OrderRouter::has_token(const OrderDetails& details, Nanos now, std::uint8_t
   }
   return bucket(details.account_id, 0).has_token(now, cap) &&
          bucket(details.account_id, 1).has_token(now, cap);
-}
-
-void OrderRouter::clamp_future(const OrderDetails& details, Nanos now) noexcept {
-  const std::uint8_t venue = limits_->ops_venue(details.instrument_id);
-  if (venue != kOpsVenueUnknown) {
-    bucket(details.account_id, venue).clamp_future(now);
-    return;
-  }
-  bucket(details.account_id, 0).clamp_future(now);
-  bucket(details.account_id, 1).clamp_future(now);
 }
 
 void OrderRouter::take_token(const OrderDetails& details, Nanos now) noexcept {
@@ -247,10 +237,7 @@ void OrderRouter::drain_cancels(CancelAll& out) noexcept {
     }
     // A cancel must not be stopped by an account with no cap on file, so it falls back to the default.
     const std::uint8_t cap = limits_->ops_cap(order.details.account_id);
-    // Read per order: a stamp from earlier in this loop must never look like the future.
-    const Nanos now = oms_->clock().now();
-    clamp_future(order.details, now);  // a step back holds cancels up for a second at most
-    if (!has_token(order.details, now, cap == 0 ? kDefaultOpsCap : cap)) {
+    if (!has_token(order.details, oms_->clock().monotonic(), cap == 0 ? kDefaultOpsCap : cap)) {
       cancels_[kept++] = handle;
       ++out.queued;
       continue;
@@ -262,7 +249,7 @@ void OrderRouter::drain_cancels(CancelAll& out) noexcept {
       cancels_[kept++] = handle;  // the adapter sent nothing, so no token is used: the next poll retries
       continue;
     }
-    take_token(order.details, oms_->clock().now());
+    take_token(order.details, oms_->clock().monotonic());
     asked_[handle] = 1;
     if (status == OrderStatus::kOpen || status == OrderStatus::kPartiallyFilled) {
       // The broker has been asked either way. A full sink only leaves the status behind until the ack or the
@@ -284,6 +271,7 @@ void OrderRouter::drain_refused() noexcept {
 
 // NOLINTNEXTLINE(bugprone-exception-escape): both vectors are reserved, so nothing here allocates
 OrderRouter::CancelAll OrderRouter::cancel_all() noexcept {
+  drain_refused();  // a refusal still in the sink would make a refused order look cancellable
   for (Pending& p : pending_) {
     if (!p.done && !p.sent) {
       drop_unsent(p);
@@ -305,6 +293,7 @@ OrderRouter::CancelAll OrderRouter::cancel_all() noexcept {
 
 // NOLINTNEXTLINE(bugprone-exception-escape): reserved for every order, and each is queued at most once
 bool OrderRouter::cancel(OrderHandle handle) noexcept {
+  drain_refused();  // a refusal still in the sink would make a refused order look cancellable
   for (Pending& p : pending_) {
     if (p.handle == handle && !p.done && !p.sent) {
       return drop_unsent(p);

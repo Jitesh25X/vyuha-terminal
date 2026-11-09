@@ -151,6 +151,7 @@ struct Desk {
     }
     EXPECT_NE(found, nullptr);
     const GateFacts facts{.now = clock.now(),
+                          .monotonic = clock.monotonic(),
                           .opening = true,
                           .instrument = instruments.find(o.instrument_id),
                           .account = std::as_const(ctx).accounts.find(o.account_id)};
@@ -596,6 +597,56 @@ TEST(ROrderShape, RequiredFieldsPerType) {
   }
 }
 
+TEST(ROrderShape, ABuyStopLimitNeedsALimitAtOrAboveItsTrigger) {
+  const Desk d;
+  OrderDetails o = d.order();
+  o.order_type = OrderType::kSl;
+  o.trigger_price = rupees(101);
+  o.price = rupees(101);
+  EXPECT_PASS(d, kOrderShape, o);
+  o.price = rupees(102);
+  EXPECT_PASS(d, kOrderShape, o);
+  o.price = Price::from_units(1'009'500);
+  EXPECT_REJECT(d, kOrderShape, o);
+}
+
+TEST(ROrderShape, ASellStopLimitNeedsALimitAtOrBelowItsTrigger) {
+  const Desk d;
+  OrderDetails o = d.order();
+  o.side = oms::Side::kSell;
+  o.order_type = OrderType::kSl;
+  o.trigger_price = rupees(99);
+  o.price = rupees(99);
+  EXPECT_PASS(d, kOrderShape, o);
+  o.price = rupees(98);
+  EXPECT_PASS(d, kOrderShape, o);
+  o.price = Price::from_units(990'500);
+  EXPECT_REJECT(d, kOrderShape, o);
+}
+
+TEST(ROrderShape, AStopLimitRefusalReportsTheTriggerAndThePrice) {
+  const Desk d;
+  OrderDetails o = d.order();
+  o.order_type = OrderType::kSl;
+  o.trigger_price = rupees(101);
+  o.price = rupees(100);
+  const Outcome out = d.check(RuleCode::kOrderShape, o);
+  EXPECT_EQ(out.limit, rupees(101).units());
+  EXPECT_EQ(out.current, rupees(100).units());
+}
+
+TEST(ROrderShape, TheTickGridIsCheckedBeforeTheStopLimitRule) {
+  const Desk d;
+  OrderDetails o = d.order();
+  o.order_type = OrderType::kSl;
+  o.trigger_price = rupees(101);
+  o.price = Price::from_units(1'000'300);  // off the grid and short of the trigger
+  const Outcome out = d.check(RuleCode::kOrderShape, o);
+  EXPECT_EQ(out.verdict, Verdict::kReject);
+  EXPECT_EQ(out.limit, 500);
+  EXPECT_EQ(out.current, 1'000'300);
+}
+
 TEST(ROrderShape, MarketOrdersCanBeTurnedOff) {
   Desk d;
   OrderDetails o = d.order();
@@ -694,16 +745,240 @@ TEST(RFatFinger, AGateWithNoBookRefuses) {
   EXPECT_REJECT(d, kFatFinger, d.order());
 }
 
-TEST(RFatFinger, MarketAndStopMarketOrdersHaveNoPriceToCheck) {
+TEST(RFatFinger, AMarketOrderHasNoPriceToCheck) {
   Desk d;
   d.ctx.book = nullptr;
   OrderDetails o = d.order();
   o.order_type = OrderType::kMarket;
   o.price.reset();
   EXPECT_PASS(d, kFatFinger, o);
+}
+
+// A stop-market order on the equity, whose LTP is 100 and fat-finger percent 5.
+[[nodiscard]] OrderDetails stop_market(const Desk& d, oms::Side side, Price trigger) {
+  OrderDetails o = d.order();
+  o.side = side;
   o.order_type = OrderType::kSlM;
-  o.trigger_price = rupees(99);
+  o.price.reset();
+  o.trigger_price = trigger;
+  return o;
+}
+
+TEST(RTriggerSide, ABuyStopMustTriggerAboveTheLtp) {
+  const Desk d;
+  EXPECT_PASS(d, kFatFinger, stop_market(d, oms::Side::kBuy, rupees(101)));
+  for (const Price wrong : {rupees(100), rupees(99)}) {
+    const Outcome out = d.check(RuleCode::kFatFinger, stop_market(d, oms::Side::kBuy, wrong));
+    EXPECT_EQ(out.verdict, Verdict::kReject);
+    EXPECT_EQ(out.reason, RuleReason::kTriggerSide);
+  }
+}
+
+TEST(RTriggerSide, ASellStopMustTriggerBelowTheLtp) {
+  const Desk d;
+  EXPECT_PASS(d, kFatFinger, stop_market(d, oms::Side::kSell, rupees(99)));
+  for (const Price wrong : {rupees(100), rupees(101)}) {
+    const Outcome out = d.check(RuleCode::kFatFinger, stop_market(d, oms::Side::kSell, wrong));
+    EXPECT_EQ(out.verdict, Verdict::kReject);
+    EXPECT_EQ(out.reason, RuleReason::kTriggerSide);
+  }
+}
+
+TEST(RTriggerSide, AStopLimitIsCheckedToo) {
+  const Desk d;
+  OrderDetails o = stop_market(d, oms::Side::kBuy, rupees(99));
+  o.order_type = OrderType::kSl;
+  o.price = rupees(102);
+  const Outcome out = d.check(RuleCode::kFatFinger, o);
+  EXPECT_EQ(out.verdict, Verdict::kReject);
+  EXPECT_EQ(out.reason, RuleReason::kTriggerSide);
+  o.trigger_price = rupees(101);
   EXPECT_PASS(d, kFatFinger, o);
+}
+
+TEST(RTriggerSide, TheOrderIsRefusedWithItsOwnReason) {
+  Desk d;
+  const GateDecision out = d.run(stop_market(d, oms::Side::kBuy, rupees(99)));
+  ASSERT_TRUE(out.rejection.has_value());
+  EXPECT_EQ(out.rejection.value().code, RuleCode::kFatFinger);
+  EXPECT_EQ(reason_text(out.rejection.value()), "R-TRIGGER-SIDE");
+}
+
+TEST(RTriggerSide, AnOrdinaryFatFingerKeepsItsReason) {
+  Desk d;
+  OrderDetails o = d.order();
+  o.price = rupees(120);
+  const GateDecision out = d.run(o);
+  ASSERT_TRUE(out.rejection.has_value());
+  EXPECT_EQ(reason_text(out.rejection.value()), "R-FAT-FINGER");
+}
+
+// The equity with a known band, inside which the 5% fat-finger band reaches further.
+void set_band(Desk& d, Price lower, Price upper) {
+  ASSERT_TRUE(d.instruments.put(
+      kEquity,
+      {.lot_size = 1, .tick_size = Price::from_units(500), .lower_circuit = lower, .upper_circuit = upper}));
+}
+
+TEST(RTriggerBand, ABuyStopAboveTheUpperCircuitIsRefused) {
+  Desk d;
+  set_band(d, rupees(98), rupees(102));
+  const Outcome out = d.check(RuleCode::kFatFinger, stop_market(d, oms::Side::kBuy, rupees(104)));
+  EXPECT_EQ(out.verdict, Verdict::kReject);
+  EXPECT_EQ(out.reason, RuleReason::kTriggerBand);
+  EXPECT_EQ(out.limit, rupees(102).units());
+  EXPECT_EQ(out.current, rupees(104).units());
+  EXPECT_PASS(d, kFatFinger, stop_market(d, oms::Side::kBuy, rupees(102)));  // at the limit is inside
+}
+
+TEST(RTriggerBand, ASellStopBelowTheLowerCircuitIsRefused) {
+  Desk d;
+  set_band(d, rupees(98), rupees(102));
+  const Outcome out = d.check(RuleCode::kFatFinger, stop_market(d, oms::Side::kSell, rupees(96)));
+  EXPECT_EQ(out.verdict, Verdict::kReject);
+  EXPECT_EQ(out.reason, RuleReason::kTriggerBand);
+  EXPECT_EQ(out.limit, rupees(98).units());
+  EXPECT_EQ(out.current, rupees(96).units());
+  EXPECT_PASS(d, kFatFinger, stop_market(d, oms::Side::kSell, rupees(98)));
+}
+
+TEST(RTriggerBand, AStopLimitIsCheckedToo) {
+  Desk d;
+  set_band(d, rupees(98), rupees(102));
+  OrderDetails o = stop_market(d, oms::Side::kBuy, rupees(103));
+  o.order_type = OrderType::kSl;
+  o.price = rupees(102);
+  const Outcome out = d.check(RuleCode::kFatFinger, o);
+  EXPECT_EQ(out.verdict, Verdict::kReject);
+  EXPECT_EQ(out.reason, RuleReason::kTriggerBand);
+}
+
+TEST(RTriggerBand, TheWrongSideIsReportedFirst) {
+  Desk d;
+  set_band(d, rupees(98), rupees(102));
+  const Outcome out = d.check(RuleCode::kFatFinger, stop_market(d, oms::Side::kBuy, rupees(96)));
+  EXPECT_EQ(out.reason, RuleReason::kTriggerSide);
+}
+
+TEST(RTriggerBand, OutsideBothBandsIsReportedAsTheCircuit) {
+  Desk d;
+  set_band(d, rupees(98), rupees(102));
+  const Outcome out = d.check(RuleCode::kFatFinger, stop_market(d, oms::Side::kBuy, rupees(110)));
+  EXPECT_EQ(out.reason, RuleReason::kTriggerBand);
+}
+
+TEST(RTriggerBand, OneBoundIsNoBand) {
+  Desk d;
+  ASSERT_TRUE(d.instruments.put(
+      kEquity, {.lot_size = 1, .tick_size = Price::from_units(500), .upper_circuit = rupees(102)}));
+  OrderDetails buy = stop_market(d, oms::Side::kBuy, rupees(104));
+  EXPECT_PASS(d, kFatFinger, buy);
+  buy.is_paper = oms::kLiveOrder;
+  const Outcome live = d.check(RuleCode::kFatFinger, buy);
+  EXPECT_EQ(live.verdict, Verdict::kReject);
+  EXPECT_EQ(live.reason, RuleReason::kRule);
+  ASSERT_TRUE(d.instruments.put(
+      kEquity, {.lot_size = 1, .tick_size = Price::from_units(500), .lower_circuit = rupees(98)}));
+  EXPECT_PASS(d, kFatFinger, stop_market(d, oms::Side::kSell, rupees(96)));
+}
+
+TEST(RTriggerBand, NoKnownBandMeansNoCheckOnAPaperOrder) {
+  const Desk d;
+  EXPECT_PASS(d, kFatFinger, stop_market(d, oms::Side::kBuy, rupees(104)));
+}
+
+TEST(RTriggerBand, TheOrderIsRefusedWithItsOwnReason) {
+  Desk d;
+  set_band(d, rupees(98), rupees(102));
+  const GateDecision out = d.run(stop_market(d, oms::Side::kBuy, rupees(104)));
+  ASSERT_TRUE(out.rejection.has_value());
+  EXPECT_EQ(out.rejection.value().code, RuleCode::kFatFinger);
+  EXPECT_EQ(reason_text(out.rejection.value()), "R-TRIGGER-BAND");
+}
+
+TEST(RFatFingerTrigger, TheEdgesOfThePercent) {
+  const Desk d;
+  EXPECT_PASS(d, kFatFinger, stop_market(d, oms::Side::kBuy, rupees(105)));
+  EXPECT_PASS(d, kFatFinger, stop_market(d, oms::Side::kSell, rupees(95)));
+  for (const auto& [side, trigger] : {std::pair{oms::Side::kBuy, Price::from_units(1'050'500)},
+                                      std::pair{oms::Side::kSell, Price::from_units(949'500)}}) {
+    const Outcome out = d.check(RuleCode::kFatFinger, stop_market(d, side, trigger));
+    EXPECT_EQ(out.verdict, Verdict::kReject);
+    EXPECT_EQ(out.reason, RuleReason::kRule);
+  }
+}
+
+TEST(RFatFingerTrigger, OptionsUseTheirOwnPercent) {
+  const Desk d;
+  OrderDetails o = stop_market(d, oms::Side::kBuy, rupees(125));
+  o.instrument_id = kOption;
+  EXPECT_PASS(d, kFatFinger, o);
+  o.trigger_price = rupees(131);
+  EXPECT_REJECT(d, kFatFinger, o);
+}
+
+TEST(RFatFingerTrigger, ASoftLimitWarns) {
+  Desk d;
+  d.limit(LimitKey::kFatFingerPct, 2 * kFromScale, LimitScope::kDesk, false);
+  EXPECT_WARN(d, kFatFinger, stop_market(d, oms::Side::kBuy, rupees(103)));
+}
+
+TEST(RFatFingerTrigger, AWarningOnThePriceCantHideABadTrigger) {
+  Desk d;
+  d.limit(LimitKey::kFatFingerPct, 2 * kFromScale, LimitScope::kDesk, false);
+  OrderDetails o = stop_market(d, oms::Side::kBuy, rupees(106));
+  o.order_type = OrderType::kSl;
+  o.price = rupees(103);  // warns
+  EXPECT_REJECT(d, kFatFinger, o);
+}
+
+TEST(RFatFingerTrigger, ATriggerWarningCantHideABadPrice) {
+  Desk d;
+  d.limit(LimitKey::kFatFingerPct, 2 * kFromScale, LimitScope::kDesk, false);
+  OrderDetails o = stop_market(d, oms::Side::kBuy, rupees(103));
+  o.order_type = OrderType::kSl;
+  o.price = rupees(120);
+  const Outcome out = d.check(RuleCode::kFatFinger, o);
+  EXPECT_EQ(out.verdict, Verdict::kReject);
+  EXPECT_EQ(out.reason, RuleReason::kRule);
+}
+
+TEST(RFatFingerTrigger, ATriggerWarningSurvivesAPassingPrice) {
+  Desk d;
+  d.limit(LimitKey::kFatFingerPct, 2 * kFromScale, LimitScope::kDesk, false);
+  OrderDetails o = stop_market(d, oms::Side::kBuy, rupees(103));
+  o.order_type = OrderType::kSl;
+  o.price = rupees(101);
+  EXPECT_WARN(d, kFatFinger, o);
+}
+
+TEST(RFatFingerTrigger, ABadPriceIsRefusedThoughTheTriggerIsFine) {
+  const Desk d;
+  OrderDetails o = stop_market(d, oms::Side::kBuy, rupees(101));
+  o.order_type = OrderType::kSl;
+  o.price = rupees(120);
+  EXPECT_REJECT(d, kFatFinger, o);
+}
+
+TEST(RFatFingerTrigger, NoLtpRefusesAStop) {
+  Desk d;
+  d.ctx.book = nullptr;
+  EXPECT_REJECT(d, kFatFinger, stop_market(d, oms::Side::kBuy, rupees(101)));
+}
+
+TEST(RFatFingerTrigger, AStaleLtpRefusesAStop) {
+  Desk d;
+  d.clock.advance(kLtpMaxAge);
+  EXPECT_PASS(d, kFatFinger, stop_market(d, oms::Side::kBuy, rupees(101)));
+  d.clock.advance(1);
+  EXPECT_REJECT(d, kFatFinger, stop_market(d, oms::Side::kBuy, rupees(101)));
+}
+
+TEST(RFatFingerTrigger, AStopWithNoTriggerIsRefused) {
+  const Desk d;
+  OrderDetails o = stop_market(d, oms::Side::kBuy, rupees(101));
+  o.trigger_price.reset();
+  EXPECT_REJECT(d, kFatFinger, o);
 }
 
 TEST(RFatFinger, ALiveOrderOfAnyTypeNeedsABand) {
@@ -714,7 +989,7 @@ TEST(RFatFinger, ALiveOrderOfAnyTypeNeedsABand) {
   EXPECT_REJECT(d, kFatFinger, market);
   OrderDetails stop = market;
   stop.order_type = OrderType::kSlM;
-  stop.trigger_price = rupees(99);
+  stop.trigger_price = rupees(101);
   EXPECT_REJECT(d, kFatFinger, stop);
   ASSERT_TRUE(d.instruments.put(kEquity, {.lot_size = 1,
                                           .tick_size = Price::from_units(500),
@@ -910,11 +1185,11 @@ TEST(RDup, ADifferentTriggerIsADifferentOrder) {
   OrderDetails first = d.order();
   first.order_type = OrderType::kSlM;
   first.price.reset();
-  first.trigger_price = rupees(99);
+  first.trigger_price = rupees(101);
   ASSERT_TRUE(d.run(first).approved.has_value());
   EXPECT_REJECT(d, kDup, first);
   OrderDetails other = first;
-  other.trigger_price = rupees(98);
+  other.trigger_price = rupees(102);
   EXPECT_PASS(d, kDup, other);
 }
 
@@ -1068,6 +1343,54 @@ TEST(ROps, ATokenComesBackAfterAFullSecond) {
   d.clock.advance(kNanosPerSecond - 1);
   EXPECT_REJECT(d, kOps, nth(d, 8));
   d.clock.advance(1);
+  EXPECT_PASS(d, kOps, nth(d, 8));
+}
+
+TEST(ROps, ATenSecondForwardClockStepReleasesNoToken) {
+  Desk d;
+  for (int i = 0; i < 8; ++i) {
+    ASSERT_TRUE(d.run(nth(d, i)).approved.has_value());
+  }
+  d.clock.step_wall(10 * kNanosPerSecond);
+  EXPECT_REJECT(d, kOps, nth(d, 8));
+  d.clock.advance(kNanosPerSecond);
+  EXPECT_PASS(d, kOps, nth(d, 8));
+}
+
+// Through the gate, with the wall clock stepped before the tokens are taken: the only way to catch the gate
+// reading or stamping the wrong clock.
+TEST(ROps, TheGateUsesTheMonotonicClockAcrossSteps) {
+  Desk d;
+  d.clock.step_wall(10 * kNanosPerSecond);
+  d.tick(kEquity, rupees(100), d.clock.now());
+  for (int i = 0; i < 8; ++i) {
+    ASSERT_TRUE(d.run(nth(d, i)).approved.has_value()) << i;
+  }
+  d.clock.step_wall(10 * kNanosPerSecond);
+  d.tick(kEquity, rupees(100), d.clock.now());
+  const GateDecision stepped = d.run(nth(d, 8));
+  ASSERT_TRUE(stepped.rejection.has_value());
+  EXPECT_EQ(stepped.rejection.value().code, RuleCode::kOps);
+  d.clock.advance(kNanosPerSecond);
+  d.tick(kEquity, rupees(100), d.clock.now());
+  EXPECT_TRUE(d.run(nth(d, 8)).approved.has_value());
+}
+
+TEST(ROps, AForwardClockStepDoesntClearASoftCapWarning) {
+  Desk d;
+  d.limit(LimitKey::kOpsCap, 1 * kFromScale, LimitScope::kDesk, false);
+  ASSERT_TRUE(d.run(nth(d, 0)).approved.has_value());
+  d.clock.step_wall(10 * kNanosPerSecond);
+  EXPECT_WARN(d, kOps, nth(d, 1));
+}
+
+TEST(ROps, AWallClockStepBackHoldsNoTokenBack) {
+  Desk d;
+  for (int i = 0; i < 8; ++i) {
+    ASSERT_TRUE(d.run(nth(d, i)).approved.has_value());
+  }
+  d.clock.advance(kNanosPerSecond);
+  d.clock.step_wall(-3'600 * kNanosPerSecond);
   EXPECT_PASS(d, kOps, nth(d, 8));
 }
 
