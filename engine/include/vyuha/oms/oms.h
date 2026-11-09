@@ -243,6 +243,9 @@ inline constexpr std::string_view kDuplicateFill = "DUPLICATE_FILL";
 inline constexpr std::string_view kApprovalStale = "R-APPROVAL-STALE";
 // A queued order (APPROVED, not sent) older than the queue limit (ADR-027): never sent, EXPIRED instead.
 inline constexpr std::string_view kExpiredInQueue = "EXPIRED_IN_QUEUE";
+// A queued order when the wall clock moved over 2 s past the monotonic one (D-36): the host was paused, or
+// the clock stepped forward. Never sent; audited and alerted, like the queue age limit.
+inline constexpr std::string_view kExpiredAfterPause = "EXPIRED_AFTER_PAUSE";
 // R-DUP's table had no room, so the order was refused (D-24): audited and alerted, because duplicates can't
 // be checked while it lasts.
 inline constexpr std::string_view kDupTableFull = "R-DUP-TABLE-FULL";

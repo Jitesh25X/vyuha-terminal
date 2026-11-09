@@ -695,7 +695,9 @@ TEST(PgOrderStore, AStaleApprovalIsRejectedAuditedAndAlertedTogether) {
     [[nodiscard]] Nanos monotonic() const noexcept override { return kMonotonic; }
   };
   const SteppedWall clock;
-  const SimClock gate_clock(clock.monotonic() - kDefaultApprovalMaxAge - 1'000);
+  SimClock gate_clock(clock.monotonic() - kDefaultApprovalMaxAge - 1'000);
+  gate_clock.step_wall(
+      10 * kNanosPerSecond);  // its wall clock agrees with the OMS clock's, so only the age is stale
   RecordingBroker broker;
   {
     PgOrderEventWriter writer(db.url(), nullptr);
@@ -813,6 +815,44 @@ TEST(PgOrderStore, AnOrderCancelledWhileQueuedIsAuditedWithNoAlert) {
   EXPECT_EQ(order[1].as<std::string>(), "CANCELLED_IN_QUEUE");
   EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM audit_event WHERE action = 'order.expire'"), 1);
   EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM alert_event WHERE title LIKE 'ORDER_EXPIRED%'"), 0);
+}
+
+// D-36: a pause expires what is queued, and that is audited and alerted too, in one transaction with the
+// status.
+TEST(PgOrderStore, AnOrderExpiredAfterAPauseIsAuditedAndAlertedTogether) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  SimClock clock(1'767'000'000'000'000'000);
+  RecordingBroker broker;
+  {
+    PgOrderEventWriter writer(db.url(), nullptr);
+    Oms oms(writer, clock, 2);
+    OrderRouter router(oms, writer, broker, Venue::kPaper, {.tag_limit = 20, .capacity = 8},
+                       testing::open_limits());
+    EXPECT_EQ(router.poll(), 0U);  // records the clocks
+    const OrderHandle h = oms.create(details(s, 1, 10)).value();
+    ASSERT_TRUE(router.submit(h, testing::approve(oms.order(h).details, clock)));
+    clock.step_wall(kPauseGap + 1);
+    wait_written(writer, 2);
+    EXPECT_EQ(router.poll(), 0U);
+    EXPECT_EQ(oms.order(h).status, kExpired);
+    wait_written(writer, 3);
+  }
+  EXPECT_TRUE(broker.sent.empty());
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  const auto order = tx.exec("SELECT status::text, reject_code FROM \"order\"").one_row();
+  EXPECT_EQ(order[0].as<std::string>(), "EXPIRED");
+  EXPECT_EQ(order[1].as<std::string>(), "EXPIRED_AFTER_PAUSE");
+  EXPECT_EQ(tx.query_value<std::string>(
+                "SELECT payload->>'reason_code' FROM audit_event WHERE action = 'order.expire'"),
+            "EXPIRED_AFTER_PAUSE");
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM alert_event WHERE title = 'ORDER_EXPIRED_AFTER_PAUSE'"),
+            1);
 }
 
 // ADR-027: a queued order past the age limit is expired, never sent, and the expiry, its audit row and the

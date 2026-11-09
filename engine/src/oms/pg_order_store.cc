@@ -26,6 +26,9 @@ namespace {
   if (reason == kExpiredOnRestart) {
     return "ORDER_EXPIRED_ON_RESTART";
   }
+  if (reason == kExpiredAfterPause) {
+    return "ORDER_EXPIRED_AFTER_PAUSE";
+  }
   return "ORDER_EXPIRED";
 }
 
@@ -328,8 +331,9 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
   record_dup_table_full(tx, id, e);
   // The restart rule (ADR-025) and the queue age limit (ADR-027): one transaction with the status, so an
   // expiry is never unaudited or unalerted. The alert title is fixed per reason
-  // (expiry_alert_title): ORDER_EXPIRED_ON_RESTART, ORDER_EXPIRED_IN_QUEUE, else ORDER_EXPIRED. The
-  // transition, not the status: a late fill on an expired order is also recorded with to = EXPIRED.
+  // (expiry_alert_title): ORDER_EXPIRED_ON_RESTART, ORDER_EXPIRED_IN_QUEUE, ORDER_EXPIRED_AFTER_PAUSE, else
+  // ORDER_EXPIRED. The transition, not the status: a late fill on an expired order is also recorded with to =
+  // EXPIRED.
   if (e.to == OrderStatus::kExpired && e.from != e.to) {
     tx.exec(
         R"(INSERT INTO audit_event (actor_kind, action, entity, entity_id, payload)

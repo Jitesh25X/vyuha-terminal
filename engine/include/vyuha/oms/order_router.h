@@ -11,6 +11,7 @@
 
 #include "vyuha/core/error.h"
 #include "vyuha/core/latency_histogram.h"
+#include "vyuha/core/pause_watch.h"
 #include "vyuha/core/price.h"
 #include "vyuha/oms/oms.h"
 #include "vyuha/oms/ops_window.h"
@@ -153,6 +154,7 @@ class OrderRouter {
   [[nodiscard]] const LatencyHistogram& approval_to_send() const noexcept { return approval_to_send_; }
   [[nodiscard]] std::uint64_t stale_approvals() const noexcept { return stale_approvals_; }
   [[nodiscard]] std::uint64_t expired_in_queue() const noexcept { return expired_in_queue_; }
+  [[nodiscard]] std::uint64_t expired_after_pause() const noexcept { return expired_after_pause_; }
 
   // Cancels everything the broker may hold, for the kill switch (M2.7). Nothing here waits on or is refused
   // by the order log: a cancel only reduces risk, so an outage, a full ring or a refused order can't stop
@@ -182,9 +184,10 @@ class OrderRouter {
  private:
   struct Pending {
     OrderHandle handle{0};
-    std::uint64_t ticket{0};  // durable() must reach this
-    bool sent{false};         // the adapter has it; only recording is left
-    bool done{false};         // nothing left to do: poll removes it
+    std::uint64_t ticket{0};         // durable() must reach this
+    bool sent{false};                // the adapter has it; only recording is left
+    bool done{false};                // nothing left to do: poll removes it
+    bool expire_after_pause{false};  // a pause was seen while it waited (D-36): expire it, never send it
     risk::ApprovedOrder approved;
   };
   struct SendBucket {
@@ -203,6 +206,7 @@ class OrderRouter {
   void drain_refused() noexcept;
   enum class Step : std::uint8_t { kNext, kStop };
   [[nodiscard]] Step advance(Pending& next, Nanos now, std::size_t& sent) noexcept;
+  [[nodiscard]] bool paused_since(const risk::GateStamp& stamp) const noexcept;
   bool drop_unsent(Pending& pending) noexcept;  // false if the order had nothing left to end
   [[nodiscard]] OpsWindow& bucket(const Uuid& account, std::uint8_t venue) noexcept;
   [[nodiscard]] bool has_token(const OrderDetails& details, Nanos now, std::uint8_t cap) noexcept;
@@ -226,6 +230,8 @@ class OrderRouter {
   LatencyHistogram approval_to_send_;
   std::uint64_t stale_approvals_{0};
   std::uint64_t expired_in_queue_{0};
+  std::uint64_t expired_after_pause_{0};
+  PauseWatch pause_;
 };
 
 }  // namespace vyuha::oms

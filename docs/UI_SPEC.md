@@ -20,7 +20,7 @@ must not copy Bloomberg's name, logo, trademarked function codes or screens.
 │ OPEN ● KITE ZR1234 ● UPSTOX UP5678 ● data 42ms │ engine OK │ P&L −₹3,240 (6% of limit) │ │  ← status bar (22px)
 └──────────────────────────────────────────────────────────────────────────────────────┘
 ```
-Sticky status-bar warnings stay until their cause clears, for every user: `ORDER LOG DOWN: new orders blocked` (ADR-027) and `Greeks stale — new option positions blocked` (D-28).
+Sticky status-bar warnings stay until their cause clears, for every user: `ORDER LOG DOWN: new orders blocked` (ADR-027) and `Greeks stale — new option positions blocked` (D-28) and `Positions not loaded — trading blocked. Exit via your broker app if needed.` (D-27).
 
 ## 2. Command grammar
 ```

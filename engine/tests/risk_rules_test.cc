@@ -1345,7 +1345,7 @@ TEST(RDup, AWallClockStepInEitherDirectionKeepsTheWindow) {
 TEST(RDup, AForwardClockStepDoesntPruneALiveEntry) {
   Desk d;
   ASSERT_TRUE(d.run(d.order()).approved.has_value());
-  d.clock.step_wall(Nanos{10} * kNanosPerSecond);
+  d.clock.step_wall(Nanos{19} * kNanosPerSecond / 10);  // past the 1.5 s window, inside the pause gap
   OrderDetails other = d.order();
   other.qty = 11;
   ASSERT_TRUE(d.run(other).approved.has_value());
@@ -1498,7 +1498,7 @@ TEST(ROps, TheGateUsesTheMonotonicClockAcrossSteps) {
   for (int i = 0; i < 8; ++i) {
     ASSERT_TRUE(d.run(nth(d, i)).approved.has_value()) << i;
   }
-  d.clock.step_wall(10 * kNanosPerSecond);
+  d.clock.step_wall(Nanos{3} * kNanosPerSecond / 2);  // past the 1 s window, inside the pause gap
   d.tick(kEquity, rupees(100), d.clock.monotonic());
   const GateDecision stepped = d.run(nth(d, 8));
   ASSERT_TRUE(stepped.rejection.has_value());
@@ -1524,6 +1524,40 @@ TEST(ROps, ASuspendReturnsTheTokens) {  // D-34
   EXPECT_REJECT(d, kOps, nth(d, 8));
   d.clock.suspend(kNanosPerSecond);
   EXPECT_PASS(d, kOps, nth(d, 8));
+}
+
+// D-36. The gate's first evaluation only records the clocks.
+TEST(PauseCheck, AForwardStepOverTwoSecondsMakesEveryLtpStaleUntilANewTickArrives) {
+  Desk d;
+  ASSERT_TRUE(d.run(nth(d, 0)).approved.has_value());
+  d.clock.step_wall(kPauseGap + 1);
+  const GateDecision stale = d.run(nth(d, 1));
+  ASSERT_TRUE(stale.rejection.has_value());
+  EXPECT_EQ(stale.rejection.value().code,
+            RuleCode::kFatFinger);  // the tick looks young but predates the pause
+  d.clock.advance(1);
+  d.tick(kEquity, rupees(100), d.clock.monotonic());
+  EXPECT_TRUE(d.run(nth(d, 1)).approved.has_value());
+}
+
+TEST(PauseCheck, ABackwardStepOrOneAtTheGapLeavesTheDataFresh) {
+  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, kPauseGap}) {
+    Desk d;
+    ASSERT_TRUE(d.run(nth(d, 0)).approved.has_value());
+    d.clock.step_wall(step);
+    EXPECT_TRUE(d.run(nth(d, 1)).approved.has_value());
+  }
+}
+
+TEST(PauseCheck, TheWatermarkIsTheMonotonicReadingAtTheLook) {
+  Desk d;
+  ASSERT_TRUE(d.run(nth(d, 0)).approved.has_value());
+  EXPECT_EQ(d.ctx.stale_before, 0);
+  d.clock.step_wall(kPauseGap + 1);
+  (void)d.run(nth(d, 1));
+  EXPECT_EQ(d.ctx.stale_before, d.clock.monotonic());
+  EXPECT_FALSE(d.ctx.fresh(d.clock.monotonic()));
+  EXPECT_TRUE(d.ctx.fresh(d.clock.monotonic() + 1));
 }
 
 TEST(ROps, AWallClockStepBackHoldsNoTokenBack) {

@@ -64,6 +64,9 @@ GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order
   GateDecision out;
   const Nanos start = clock_->now();
   const Nanos started = clock_->monotonic();
+  if (ctx.pause.observe(start, started)) {
+    ctx.stale_before = started;  // D-36: the host was paused, so cached data that looks young is minutes old
+  }
   out.stamp.ruleset_version = ctx.limits.version;
   out.stamp.ts = start;
   out.stamp.monotonic = started;

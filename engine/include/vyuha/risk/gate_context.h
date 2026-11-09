@@ -8,6 +8,7 @@
 #include <span>
 
 #include "vyuha/core/clock.h"
+#include "vyuha/core/pause_watch.h"
 #include "vyuha/core/price.h"
 #include "vyuha/md/id_map.h"
 #include "vyuha/md/last_value.h"
@@ -382,6 +383,14 @@ struct GateContext {
   EntitlementTable entitlements{};
   LiveStrategies live_strategies{};
   DupTable dup{};
+  // D-36. Data that arrived at or before this monotonic reading (LTPs; M2.4's Greeks and margin) is stale:
+  // set when the gate sees a pause. Any order that prices off an LTP, reducing ones included, then waits for
+  // a tick newer than the pause. Core thread only.
+  PauseWatch pause{};
+  Nanos stale_before{0};
+  [[nodiscard]] bool fresh(Nanos received_monotonic) const noexcept {
+    return received_monotonic > stale_before;
+  }
 };
 
 // NOLINTEND(readability-redundant-member-init,cppcoreguidelines-pro-bounds-constant-array-index)
