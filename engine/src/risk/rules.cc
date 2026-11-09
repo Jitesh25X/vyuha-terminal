@@ -36,7 +36,7 @@ std::optional<Price> fresh_ltp(const GateContext& ctx, std::int64_t instrument_i
     return std::nullopt;
   }
   const md::Tick* tick = ctx.book->find(static_cast<md::InstrumentId>(instrument_id));
-  if (tick == nullptr || tick->ltp <= Price{} || tick->recv_mono <= 0) {
+  if (tick == nullptr || tick->ltp <= Price{} || tick->recv_mono <= 0 || !ctx.fresh(tick->recv_mono)) {
     return std::nullopt;
   }
   const Nanos age =

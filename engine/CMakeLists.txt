@@ -38,6 +38,7 @@ add_library(vyuha_core_lib
   src/core/core_loop.cc
   src/core/price.cc
   src/core/version.cc
+  src/core/slew_check.cc
   src/core/wall_clock.cc
   src/md/bar_builder.cc
   src/md/last_value.cc

@@ -792,9 +792,10 @@ TEST(OrderRouter, RecordsApprovalToSendTime) {
   const OrderHandle h = r.fresh();
   SimClock approved_at(1'000 - 30'000);                 // 30 µs before the OMS clock's 1'000
   approved_at.step_wall(Nanos{-10} * kNanosPerSecond);  // so the stamp's two clocks differ
+  r.clock.step_wall(Nanos{-10} * kNanosPerSecond);      // and the OMS clock's wall time agrees: no pause
   ASSERT_TRUE(r.router.submit(h, testing::approve(r.oms.order(h).details, approved_at)));
   EXPECT_EQ(r.router.approval_to_send().count(), 0U);  // not sent yet
-  r.clock.step_wall(Nanos{10} * kNanosPerSecond);      // measured on the monotonic clock
+  r.clock.step_wall(kNanosPerSecond);                  // measured on the monotonic clock, not this one
   r.sink.durable_count = r.sink.events.size();
   ASSERT_EQ(r.router.poll(), 1U);
   const LatencyHistogram& m = r.router.approval_to_send();
@@ -971,9 +972,12 @@ TEST(QueueAge, AnOrderExactlyAtTheLimitIsSent) {
 }
 
 // D-26. The wall clock steps before the stamp too, so a stamp from the wrong clock can't go unnoticed.
-TEST(QueueAge, AWallClockStepInEitherDirectionLeavesAQueuedOrderAlone) {
-  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, Nanos{10} * kNanosPerSecond}) {
+TEST(QueueAge, AWallClockStepBackOrWithinTheGapLeavesAQueuedOrderAlone) {
+  // (A forward step past the gap is a pause, which expires the queue: PauseCheck below. The step is taken
+  // twice, so half the gap each time keeps the total at it.)
+  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, kPauseGap / 2}) {
     Rig r;
+    EXPECT_EQ(r.router.poll(), 0U);  // the first poll only records the clocks
     const OrderHandle h = r.fresh();
     r.clock.step_wall(step);
     ASSERT_TRUE(r.submit(h));
@@ -983,6 +987,117 @@ TEST(QueueAge, AWallClockStepInEitherDirectionLeavesAQueuedOrderAlone) {
     EXPECT_EQ(r.oms.order(h).status, kSent);
     EXPECT_EQ(r.router.expired_in_queue(), 0U);
   }
+}
+
+// D-36. The router's first poll only records the clocks, so each test polls once before it steps one.
+TEST(PauseCheck, AForwardStepOverTwoSecondsExpiresEveryQueuedOrder) {
+  Rig r;
+  EXPECT_EQ(r.router.poll(), 0U);
+  std::vector<OrderHandle> handles;
+  for (std::int32_t i = 0; i < 3; ++i) {
+    handles.push_back(r.oms.create(order_of(10, "client-" + std::to_string(i))).value());
+    ASSERT_TRUE(r.submit(handles.back()));
+  }
+  r.clock.step_wall(kPauseGap + 1);
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_TRUE(r.broker.tags.empty());
+  for (const OrderHandle h : handles) {
+    EXPECT_EQ(r.oms.order(h).status, kExpired);
+  }
+  EXPECT_EQ(r.sink.events.back().reason_code.view(), kExpiredAfterPause);
+  EXPECT_EQ(r.router.expired_after_pause(), 3U);
+  EXPECT_EQ(r.router.expired_in_queue(), 0U);
+  // What is approved after the pause goes out as usual.
+  const OrderHandle later = r.oms.create(order_of(10, "client-later")).value();
+  ASSERT_TRUE(r.submit(later));
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 1U);
+  EXPECT_EQ(r.oms.order(later).status, kSent);
+}
+
+// The stateless check needs no earlier look, so it holds when the first poll comes after the pause.
+TEST(PauseCheck, AnOrderApprovedBeforeTheFirstPollIsStillExpired) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
+  r.clock.step_wall(kPauseGap + 1);
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_EQ(r.oms.order(h).status, kExpired);
+  EXPECT_EQ(r.sink.events.back().reason_code.view(), kExpiredAfterPause);
+  EXPECT_TRUE(r.broker.tags.empty());
+}
+
+TEST(PauseCheck, AnApprovalThatPredatesAPauseIsRefusedAtSubmit) {
+  Rig r;
+  const OrderHandle h = r.fresh();
+  auto approved = testing::approve(r.oms.order(h).details, r.clock);
+  r.clock.step_wall(kPauseGap + 1);
+  EXPECT_EQ(r.router.submit(h, std::move(approved)).error().code, ErrorCode::kApprovalStale);
+  EXPECT_EQ(r.oms.order(h).status, kRiskRejected);
+}
+
+// The watch flags the queue when it sees the pause, so a step back before the order's turn can't undo it.
+TEST(PauseCheck, AStepBackAfterThePauseDoesntSaveAnOrderTheWatchFlagged) {
+  Rig r;
+  EXPECT_EQ(r.router.poll(), 0U);
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
+  r.clock.step_wall(3 * kNanosPerSecond);
+  EXPECT_EQ(r.router.poll(),
+            0U);  // the event isn't durable yet, so the order waits; the watch sees the pause
+  r.clock.step_wall(-3 * kNanosPerSecond);
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_EQ(r.oms.order(h).status, kExpired);
+  EXPECT_EQ(r.sink.events.back().reason_code.view(), kExpiredAfterPause);
+  EXPECT_TRUE(r.broker.tags.empty());
+}
+
+TEST(PauseCheck, ABackwardStepOrOneAtTheGapLeavesTheQueueAlone) {
+  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, kPauseGap}) {
+    Rig r;
+    EXPECT_EQ(r.router.poll(), 0U);
+    const OrderHandle h = r.fresh();
+    ASSERT_TRUE(r.submit(h));
+    r.clock.step_wall(step);
+    r.sink.durable_count = r.sink.events.size();
+    EXPECT_EQ(r.router.poll(), 1U);
+    EXPECT_EQ(r.oms.order(h).status, kSent);
+    EXPECT_EQ(r.router.expired_after_pause(), 0U);
+  }
+}
+
+TEST(PauseCheck, AClockThatCountedASuspendIsLeftToTheQueueAgeLimit) {
+  Rig r;
+  EXPECT_EQ(r.router.poll(), 0U);
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
+  r.clock.suspend(kDefaultQueueMaxAge + 1);  // both clocks moved: no gap
+  r.sink.durable_count = r.sink.events.size();
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_EQ(r.oms.order(h).status, kExpired);
+  EXPECT_EQ(r.router.expired_after_pause(), 0U);
+  EXPECT_EQ(r.router.expired_in_queue(), 1U);
+}
+
+TEST(PauseCheck, AnExpiryTheSinkCouldntTakeIsRetriedAndTheOrderIsNeverSent) {
+  Rig r;
+  EXPECT_EQ(r.router.poll(), 0U);
+  const OrderHandle h = r.fresh();
+  ASSERT_TRUE(r.submit(h));
+  r.clock.step_wall(kPauseGap + 1);
+  r.sink.durable_count = r.sink.events.size();
+  r.sink.full = true;
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_EQ(r.oms.order(h).status, kApproved);  // the expiry couldn't be recorded yet
+  EXPECT_TRUE(r.broker.tags.empty());
+  r.sink.full = false;
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_EQ(r.oms.order(h).status, kExpired);
+  EXPECT_EQ(r.router.expired_after_pause(), 1U);
+  EXPECT_TRUE(r.broker.tags.empty());
 }
 
 TEST(QueueAge, AWallClockStepInEitherDirectionCantSaveAnOldOrder) {
@@ -997,7 +1112,8 @@ TEST(QueueAge, AWallClockStepInEitherDirectionCantSaveAnOldOrder) {
     EXPECT_EQ(r.router.poll(), 0U);
     EXPECT_TRUE(r.broker.tags.empty());
     EXPECT_EQ(r.oms.order(h).status, kExpired);
-    EXPECT_EQ(r.router.expired_in_queue(), 1U);
+    // Over the age limit either way; a forward step is also a pause, which gets there first.
+    EXPECT_EQ(r.router.expired_in_queue() + r.router.expired_after_pause(), 1U);
   }
 }
 
@@ -1038,8 +1154,9 @@ TEST(OrderRouter, ASuspendMakesAnApprovalStale) {
   EXPECT_EQ(r.router.submit(h, std::move(approved)).error().code, ErrorCode::kApprovalStale);
 }
 
-TEST(OrderRouter, AWallClockStepInEitherDirectionDoesntMakeAnApprovalStale) {
-  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, Nanos{10} * kNanosPerSecond}) {
+TEST(OrderRouter, AWallClockStepBackOrAtTheGapDoesntMakeAnApprovalStale) {
+  // (A forward step past the gap between the approval and the submit is a pause: PauseCheck below.)
+  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, kPauseGap}) {
     Rig r;
     const OrderHandle h = r.fresh();
     r.clock.step_wall(step);

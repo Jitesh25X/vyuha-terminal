@@ -25,11 +25,15 @@ stays off (`LIVE_TRADING_ENABLED=false` is fixed in the compose file; there is n
     `https://<PUBLIC_HOST>/api/v1/brokers/callback/upstox` (must match exactly).
 - **DNS:** `PUBLIC_HOST` resolves to the VM. Ports 80/443 open for Caddy's certificate; restrict access
   to the desk (Tailscale or a cloud firewall allowlist).
-- **Time:** `chrony` running (the engine refuses large clock skew; latency figures rely on it).
+- **Time:** `chrony` running (the engine refuses large clock skew; latency figures rely on it), with `maxslewrate 500` and `makestep 1 -1` (D-36): chrony's default slew limit of 83,333 ppm can make a clock-second about 0.92 s of real time during a large correction, and the 1 s orders-per-second window with it; and stepping at once, not slewing, is what lets the engine see the clock jump after a host pause. The engine logs a warning at startup if either is missing.
 
 ## 1. Prepare the VM
 ```sh
 sudo apt-get update && sudo apt-get install -y git make chrony
+sudo sed -i 's/^makestep /#&/' /etc/chrony/chrony.conf   # Ubuntu's own `makestep 1 3` would override the drop-in
+printf 'maxslewrate 500\nmakestep 1 -1\n' | sudo tee /etc/chrony/conf.d/vyuha.conf && sudo systemctl restart chrony   # D-36
+grep -rn '^confdir' /etc/chrony/chrony.conf     # must list /etc/chrony/conf.d; if not, append the two lines to chrony.conf instead
+grep -rn '^\(makestep\|maxslewrate\)' /etc/chrony/   # only vyuha.conf should show; the engine warns at startup if not
 # Docker Engine + compose plugin: https://docs.docker.com/engine/install/ubuntu/
 sudo cp deploy/netplan-static-ips.example.yaml /etc/netplan/60-vyuha.yaml   # edit interface + addresses
 sudo netplan apply && ip -4 addr        # both private IPs must be listed

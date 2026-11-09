@@ -93,7 +93,7 @@ std::expected<void, Error> OrderRouter::submit(OrderHandle handle, risk::Approve
     return std::unexpected(Error{ErrorCode::kInvalidArgument, "router: paper and live don't mix"});
   }
   if (const Nanos age = oms_->clock().monotonic() - approved.stamp().monotonic;
-      age < 0 || age > approval_max_age_) {
+      age < 0 || age > approval_max_age_ || paused_since(approved.stamp())) {
     const auto rejected =
         oms_->apply(handle, OrderEvent::kRiskReject,
                     {.reason_code = kApprovalStale, .gate = approved.stamp(), .approval_age = age});
@@ -114,6 +114,13 @@ std::expected<void, Error> OrderRouter::submit(OrderHandle handle, risk::Approve
 std::size_t OrderRouter::poll() noexcept {
   std::size_t sent = 0;
   drain_refused();
+  if (pause_.observe(oms_->clock())) {
+    // D-36: the host was paused or the wall clock stepped forward. What waited through it is expired when its
+    // turn comes (it may have to wait for its event to be durable), and never sent.
+    for (Pending& p : pending_) {
+      p.expire_after_pause = !p.sent && !p.done;
+    }
+  }
   const Nanos now = oms_->clock().monotonic();
   CancelAll ignored;
   drain_cancels(ignored);  // ahead of new orders: they take the tokens first (D-20)
@@ -134,6 +141,14 @@ OrderRouter::Step OrderRouter::advance(Pending& next, Nanos now, std::size_t& se
     }
     drain_refused();  // after durable(): a refused order's events count as durable, and it must not go out
     if (!oms_->can_send(next.handle)) {  // cancelled or otherwise moved on while it waited
+      next.done = true;
+      return Step::kNext;
+    }
+    if (next.expire_after_pause || paused_since(next.approved.stamp())) {
+      if (!oms_->apply(next.handle, OrderEvent::kExpire, {.reason_code = kExpiredAfterPause}).has_value()) {
+        return Step::kStop;  // the sink is full: the next poll tries again, and it is never sent
+      }
+      ++expired_after_pause_;
       next.done = true;
       return Step::kNext;
     }
@@ -201,6 +216,14 @@ void OrderRouter::take_token(const OrderDetails& details, Nanos now) noexcept {
   }
   bucket(details.account_id, 0).take(now);
   bucket(details.account_id, 1).take(now);
+}
+
+// A pause since the gate approved: the wall clock moved more than kPauseGap past the monotonic one between
+// the stamp and now (D-36). Unlike PauseWatch it needs no earlier look, so it holds for an order approved
+// before the first poll, and when no poll fell between the gate and now.
+bool OrderRouter::paused_since(const risk::GateStamp& stamp) const noexcept {
+  const IClock& clock = oms_->clock();
+  return (clock.now() - stamp.ts) - (clock.monotonic() - stamp.monotonic) > kPauseGap;
 }
 
 // NOLINTNEXTLINE(bugprone-exception-escape): a failure here only logs static text

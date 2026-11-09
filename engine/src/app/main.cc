@@ -8,9 +8,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <stop_token>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -21,6 +25,7 @@
 #include "vyuha/bus/md_publisher.h"
 #include "vyuha/core/clock.h"
 #include "vyuha/core/core_loop.h"
+#include "vyuha/core/slew_check.h"
 #include "vyuha/core/version.h"
 #include "vyuha/md/tick.h"
 #include "vyuha/session/instrument_directory.h"
@@ -47,6 +52,56 @@ class CountingSink final : public vyuha::md::IMdSink {
   std::atomic<std::uint64_t> bars{0};
 };
 
+#if defined(__linux__)
+// D-36: warns when the host's NTP slew limit is missing or above what the 1 s OPS window assumes. Startup
+// only.
+void warn_if_slew_unsafe(quill::Logger* log) {
+  namespace fs = std::filesystem;
+  std::string conf;
+  bool found = false;
+  const auto add = [&conf, &found](const fs::path& path) {
+    std::ifstream in(path);
+    if (!in) {
+      return;
+    }
+    conf.append(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    conf.push_back('\n');
+    found = true;
+  };
+  add("/etc/chrony/chrony.conf");
+  add("/etc/chrony.conf");
+  for (const char* dir : {"/etc/chrony/conf.d", "/etc/chrony/chrony.d"}) {
+    std::error_code ec;
+    for (fs::directory_iterator it(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+      if (it->path().extension() == ".conf") {
+        add(it->path());
+      }
+    }
+  }
+  if (!found) {
+    LOG_WARNING(log,
+                "clock: no chrony config found, so the NTP slew limit is unknown (the OPS window assumes at "
+                "most {} ppm)",
+                vyuha::kMaxSlewPpm);
+    return;
+  }
+  const vyuha::SlewCheck check = vyuha::check_chrony_slew(conf);
+  if (!check.ok) {
+    const char* why = check.unreadable ? " (a maxslewrate line can't be read)"
+                                       : (check.configured ? "" : " (its default: none is set)");
+    LOG_WARNING(log,
+                "clock: chrony's maxslewrate is {} ppm{}; set it to {} or less (D-36), or a clock-second can "
+                "be shorter than a real one during a correction",
+                check.ppm, why, vyuha::kMaxSlewPpm);
+  }
+  if (!check.steps) {
+    LOG_WARNING(log,
+                "clock: chrony isn't set to `makestep 1 -1` (D-36): after a host pause it would slew the "
+                "clock instead of stepping it, and the pause check would not see it");
+  }
+}
+#endif
+
 std::string env_or(const char* name, const char* def) {
   const char* v = std::getenv(name);  // NOLINT(concurrency-mt-unsafe): read at startup, single-threaded
   return v != nullptr && *v != '\0' ? v : def;
@@ -55,6 +110,9 @@ std::string env_or(const char* name, const char* def) {
 int run() {
   vyuha::log::init();
   quill::Logger* log = vyuha::log::engine();
+#if defined(__linux__)
+  warn_if_slew_unsafe(log);
+#endif
   const std::string addr = env_or("ENGINE_GRPC_ADDR", "127.0.0.1:7443");
 
   const vyuha::WallClock clock;
