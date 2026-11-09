@@ -126,6 +126,16 @@ Claude Code: you may add **Proposed** entries. Only the owner moves them to Acce
 
 ---
 
+### ADR-028 — A kill's cancels go at the maximum compliant rate — Accepted (owner) — 2026-11-09
+**Context:** The PRD said a desk kill sends all cancels within 2 s. D-20 makes cancels count toward the per-second limit, so a kill burst stays compliant. At the default cap of 8, 20 open orders on one account can't all go inside 2 s without breaking invariant 7.
+**Decision:**
+- New orders are blocked instantly, before any cancel is sent.
+- Cancels are sent at the maximum compliant rate, i.e. within ⌈N/cap⌉ s per account, accounts in parallel. They go ahead of new orders and never exceed the cap.
+- The kill dialog shows progress, e.g. `cancelling 12/20`.
+- PRD F-RK-2 and the kill NFR now say this; the 2 s figure is gone.
+
+**Consequences:** Exposure stops growing at once, but resting orders on a busy account can stay open for a few seconds: 20 orders at cap 8 take up to 3 s. The desk sees that in the dialog rather than assuming the kill has finished.
+
 ## Open (owner to decide) — mirrored from PRD §13
 | # | Topic | Default in code until decided |
 |---|---|---|
@@ -147,3 +157,9 @@ Claude Code: you may add **Proposed** entries. Only the owner moves them to Acce
 | D-17 | Extra OMS transitions | **Resolved** (ADR-024) |
 | D-18 | Persist before send | **Resolved** (ADR-025) |
 | D-19 | Outage alert delivery (ADR-027) | **Resolved** (owner, 2026-11-08): NATS `sys.alert` → toast and sticky banner at outage start, summary alert persisted after recovery |
+| D-20 | OPS at send | **Resolved (owner, 2026-11-09):** keep the R-OPS gate token and add a send budget in `OrderRouter` at `ops_cap`, per account per exchange. Excess new orders wait in the queue under the queue age limit. Cancels and `cancel_all` go ahead of new orders but still count toward the limit, so a kill burst stays compliant. A token comes back one second after it was used, so no rolling second holds more than the cap. NSE and NFO share one budget, BSE and BFO another; a cancel for an instrument not in the master uses both. A cancel that catches an order still waiting to be sent drops it, ending it EXPIRED (`CANCELLED_IN_QUEUE`, audited, no alert) |
+| D-21 | R-OPS wait | **Resolved (owner, 2026-11-09):** the gate rejects at once when no token is free. The only waiting is D-20's send queue |
+| D-22 | Fat-finger data | **Resolved (owner, 2026-11-09):** the LTP check is built. No LTP, or one older than 3 s (the UI's stale threshold), rejects priced orders. A known circuit band is enforced; a live order on an instrument with no band is refused until M2.3c supplies them, from broker quotes rather than exchange files |
+| D-23 | R-KILL exemption | **Resolved (owner, 2026-11-09):** a kill-generated order has its own source, which only `risk::KillSwitch` can name or build (private member and constructor, `compile_fail.KILL_SOURCE_*`). The switch marks an order only while a kill covers it. It is the only source exempt from R-KILL. Stored as `kill_flatten` (migration 000010); a row read back from Postgres never regains the exemption |
+| D-24 | R-DUP and slices | **Resolved (owner, 2026-11-09):** siblings are exempt only when `FreezeSlicer` itself made them in the same intent (`SliceIntent`, private constructor). A `parent_id` from a caller doesn't count. A full duplicate table rejects with `R-DUP-TABLE-FULL`, and the writer audits it and sends admins a critical `DUP_TABLE_FULL` alert |
+| D-25 | OPS budget clock | **Resolved (owner, 2026-11-09):** the OPS budgets (R-OPS and the send queue) move to a monotonic clock (`steady_clock`, through the injected clock interface), in M2.3b. The wall clock stays for timestamps and session times only. Found in the M2.3 risk review: on the wall clock, a forward step makes recent sends look old and can release one extra cap per step, 16 in one second at cap 8, over the 10 OPS threshold |

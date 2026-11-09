@@ -59,7 +59,7 @@ std::expected<Nanos, Error> parse_queue_max_age_ms(std::string_view text) noexce
 }
 
 OrderRouter::OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, Venue venue,
-                         const RouterConfig& config)
+                         const RouterConfig& config, const ISendLimits& limits)
     : oms_(&oms),
       sink_(&sink),
       sender_(&sender),
@@ -67,13 +67,16 @@ OrderRouter::OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, 
       tag_limit_(config.tag_limit),
       capacity_(config.capacity),
       approval_max_age_(config.approval_max_age),
-      queue_max_age_(config.queue_max_age) {
+      queue_max_age_(config.queue_max_age),
+      limits_(&limits),
+      asked_(oms.capacity(), 0) {
   pending_.reserve(config.capacity);
+  cancels_.reserve(oms.capacity());
 }
 
 // NOLINTNEXTLINE(bugprone-exception-escape): within the reserved capacity, so push_back can't allocate
 std::expected<void, Error> OrderRouter::submit(OrderHandle handle, risk::ApprovedOrder approved) noexcept {
-  if (pending() >= capacity_ || pending_.size() >= capacity_) {
+  if (pending_.size() >= capacity_) {
     return std::unexpected(Error{ErrorCode::kCapacityExceeded, "router: queue full"});
   }
   if (handle >= oms_->size() || oms_->order(handle).status != OrderStatus::kNew ||
@@ -102,56 +105,174 @@ std::expected<void, Error> OrderRouter::submit(OrderHandle handle, risk::Approve
   if (!recorded.has_value()) {
     return std::unexpected(recorded.error());
   }
-  pending_.push_back(
-      Pending{.handle = handle, .ticket = sink_->pushed(), .sent = false, .approved = std::move(approved)});
+  pending_.push_back(Pending{.handle = handle, .ticket = sink_->pushed(), .approved = std::move(approved)});
   return {};
 }
 
-// NOLINTNEXTLINE(bugprone-exception-escape): the tag fits small-string storage or the engine stops
 std::size_t OrderRouter::poll() noexcept {
   std::size_t sent = 0;
   drain_refused();
-  while (head_ < pending_.size()) {
-    Pending& next = pending_[head_];
-    if (!next.sent) {
-      if (sink_->durable() < next.ticket || !sink_->healthy()) {
-        break;
-      }
-      drain_refused();  // after durable(): a refused order's events count as durable, and it must not go out
-      if (!oms_->can_send(next.handle)) {  // cancelled or otherwise moved on while it waited
-        ++head_;
-        continue;
-      }
-      // ADR-027. A negative age (the clock stepped back) expires too, as submit() treats it: fail closed.
-      const Nanos queued_for = oms_->clock().now() - next.approved.stamp().ts;
-      if (queued_for > queue_max_age_ || queued_for < 0) {
-        if (!oms_->apply(next.handle, OrderEvent::kExpire, {.reason_code = kExpiredInQueue}).has_value()) {
-          break;  // the sink is full: the next poll tries again, and it is never sent
-        }
-        ++expired_in_queue_;
-        ++head_;
-        continue;
-      }
-      // The tag is rebuilt here, not stored per order; a client id is short and this is once per order.
-      const std::string tag = broker_tag(next.approved.order().client_order_id.view(), tag_limit_);
-      if (!sender_->send(next.approved, tag)) {
-        break;
-      }
-      approval_to_send_.record(oms_->clock().now() - next.approved.stamp().ts);
-      next.sent = true;
-      ++sent;
+  const Nanos now = oms_->clock().now();
+  CancelAll ignored;
+  drain_cancels(ignored);  // ahead of new orders: they take the tokens first (D-20)
+  for (Pending& next : pending_) {
+    if (!next.done && advance(next, now, sent) == Step::kStop) {
+      break;
     }
-    const auto recorded = oms_->record_sent(next.handle);
-    if (!recorded.has_value() && recorded.error().code == ErrorCode::kCapacityExceeded) {
-      break;  // the sink is full: try again on the next poll, and never send again
-    }
-    ++head_;  // anything else won't change by retrying, and mustn't hold up the orders behind it
   }
-  if (head_ == pending_.size()) {
-    pending_.clear();
-    head_ = 0;
-  }
+  std::erase_if(pending_, [](const Pending& p) { return p.done; });
   return sent;
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape): the tag fits small-string storage or the engine stops
+OrderRouter::Step OrderRouter::advance(Pending& next, Nanos now, std::size_t& sent) noexcept {
+  if (!next.sent) {
+    if (sink_->durable() < next.ticket || !sink_->healthy()) {
+      return Step::kStop;
+    }
+    drain_refused();  // after durable(): a refused order's events count as durable, and it must not go out
+    if (!oms_->can_send(next.handle)) {  // cancelled or otherwise moved on while it waited
+      next.done = true;
+      return Step::kNext;
+    }
+    // ADR-027. A negative age (the clock stepped back) expires too, as submit() treats it: fail closed.
+    const Nanos queued_for = now - next.approved.stamp().ts;
+    if (queued_for > queue_max_age_ || queued_for < 0) {
+      if (!oms_->apply(next.handle, OrderEvent::kExpire, {.reason_code = kExpiredInQueue}).has_value()) {
+        return Step::kStop;  // the sink is full: the next poll tries again, and it is never sent
+      }
+      ++expired_in_queue_;
+      next.done = true;
+      return Step::kNext;
+    }
+    const OrderDetails& details = next.approved.order();
+    if (!has_token(details, now, limits_->ops_cap(details.account_id))) {
+      return Step::kNext;  // waits for a token, and the queue age limit above still applies to it
+    }
+    // The tag is rebuilt here, not stored per order; a client id is short and this is once per order.
+    const std::string tag = broker_tag(details.client_order_id.view(), tag_limit_);
+    if (!sender_->send(next.approved, tag)) {
+      return Step::kStop;
+    }
+    const Nanos handed_over = oms_->clock().now();  // when it left, not when this poll began
+    take_token(details, handed_over);
+    approval_to_send_.record(handed_over - next.approved.stamp().ts);
+    next.sent = true;
+    ++sent;
+  }
+  const auto recorded = oms_->record_sent(next.handle);
+  if (!recorded.has_value() && recorded.error().code == ErrorCode::kCapacityExceeded) {
+    return Step::kStop;  // the sink is full: try again on the next poll, and never send again
+  }
+  next.done = true;  // anything else won't change by retrying, and mustn't hold up the orders behind it
+  return Step::kNext;
+}
+
+OpsWindow& OrderRouter::bucket(const Uuid& account, std::uint8_t venue) noexcept {
+  for (SendBucket& b : buckets_) {
+    if (!b.used) {
+      b = SendBucket{.account = account, .venue = venue, .used = true};
+      return b.window;
+    }
+    if (b.account == account && b.venue == venue) {
+      return b.window;
+    }
+  }
+  return buckets_.back().window;  // more accounts than expected: they share a budget, which is only stricter
+}
+
+// An instrument not in the master could be on either exchange, so it needs a token from both and uses both.
+bool OrderRouter::has_token(const OrderDetails& details, Nanos now, std::uint8_t cap) noexcept {
+  const std::uint8_t venue = limits_->ops_venue(details.instrument_id);
+  if (venue != kOpsVenueUnknown) {
+    return bucket(details.account_id, venue).has_token(now, cap);
+  }
+  return bucket(details.account_id, 0).has_token(now, cap) &&
+         bucket(details.account_id, 1).has_token(now, cap);
+}
+
+void OrderRouter::clamp_future(const OrderDetails& details, Nanos now) noexcept {
+  const std::uint8_t venue = limits_->ops_venue(details.instrument_id);
+  if (venue != kOpsVenueUnknown) {
+    bucket(details.account_id, venue).clamp_future(now);
+    return;
+  }
+  bucket(details.account_id, 0).clamp_future(now);
+  bucket(details.account_id, 1).clamp_future(now);
+}
+
+void OrderRouter::take_token(const OrderDetails& details, Nanos now) noexcept {
+  const std::uint8_t venue = limits_->ops_venue(details.instrument_id);
+  if (venue != kOpsVenueUnknown) {
+    bucket(details.account_id, venue).take(now);
+    return;
+  }
+  bucket(details.account_id, 0).take(now);
+  bucket(details.account_id, 1).take(now);
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape): a failure here only logs static text
+bool OrderRouter::drop_unsent(Pending& pending) noexcept {
+  pending.done = true;
+  const Order& order = oms_->order(pending.handle);
+  if (order.status != OrderStatus::kApproved || order.needs_reconcile) {
+    return false;  // storage refused it, or it has moved on: nothing to end
+  }
+  // A full sink leaves the order APPROVED until the restart rule expires it. Either way it never goes out.
+  if (!oms_->apply(pending.handle, OrderEvent::kExpire, {.reason_code = kCancelledInQueue}).has_value()) {
+    if (quill::Logger* logger = log::engine(); logger != nullptr) {
+      LOG_ERROR(logger, "a cancelled order's expiry couldn't be recorded: the event sink is full");
+    }
+  }
+  return true;
+}
+
+bool OrderRouter::may_be_at_broker(OrderHandle handle) const noexcept {
+  const Order& order = oms_->order(handle);
+  if (order.status == OrderStatus::kNew || is_terminal(order.status)) {
+    return false;
+  }
+  // APPROVED means "maybe" (ADR-025): handed over with SENT not recorded yet, or restored and not reconciled.
+  return order.status != OrderStatus::kApproved || order.needs_reconcile ||
+         std::ranges::any_of(pending_, [handle](const Pending& p) { return p.sent && p.handle == handle; });
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape): resize only shrinks, so nothing here can throw
+void OrderRouter::drain_cancels(CancelAll& out) noexcept {
+  std::size_t kept = 0;
+  for (const OrderHandle handle : cancels_) {
+    const Order& order = oms_->order(handle);
+    if (!may_be_at_broker(handle)) {
+      continue;  // it finished while it waited
+    }
+    // A cancel must not be stopped by an account with no cap on file, so it falls back to the default.
+    const std::uint8_t cap = limits_->ops_cap(order.details.account_id);
+    // Read per order: a stamp from earlier in this loop must never look like the future.
+    const Nanos now = oms_->clock().now();
+    clamp_future(order.details, now);  // a step back holds cancels up for a second at most
+    if (!has_token(order.details, now, cap == 0 ? kDefaultOpsCap : cap)) {
+      cancels_[kept++] = handle;
+      ++out.queued;
+      continue;
+    }
+    ++out.asked;
+    const OrderStatus status = order.status;
+    if (!sender_->cancel(order)) {
+      ++out.failed;
+      cancels_[kept++] = handle;  // the adapter sent nothing, so no token is used: the next poll retries
+      continue;
+    }
+    take_token(order.details, oms_->clock().now());
+    asked_[handle] = 1;
+    if (status == OrderStatus::kOpen || status == OrderStatus::kPartiallyFilled) {
+      // The broker has been asked either way. A full sink only leaves the status behind until the ack or the
+      // next call: it never holds up the cancel itself.
+      if (!oms_->apply(handle, OrderEvent::kCancelRequest).has_value()) {
+        ++out.unrecorded;
+      }
+    }
+  }
+  cancels_.resize(kept);
 }
 
 void OrderRouter::drain_refused() noexcept {
@@ -161,40 +282,43 @@ void OrderRouter::drain_refused() noexcept {
   }
 }
 
-// NOLINTNEXTLINE(bugprone-exception-escape): erasing from a reserved vector doesn't allocate
+// NOLINTNEXTLINE(bugprone-exception-escape): both vectors are reserved, so nothing here allocates
 OrderRouter::CancelAll OrderRouter::cancel_all() noexcept {
-  CancelAll out;
-  pending_.erase(pending_.begin(),
-                 pending_.begin() + static_cast<std::ptrdiff_t>(head_));  // already finished
-  head_ = 0;
-  std::erase_if(pending_, [](const Pending& p) { return !p.sent; });  // those never reach the broker
-  for (OrderHandle handle = 0; handle < oms_->size(); ++handle) {
-    const Order& order = oms_->order(handle);
-    const OrderStatus status = order.status;
-    // APPROVED means "maybe" (ADR-025): handed over with SENT not recorded yet, or restored and not
-    // reconciled.
-    const bool maybe_at_broker =
-        status == OrderStatus::kApproved &&
-        (order.needs_reconcile ||
-         std::ranges::any_of(pending_, [handle](const Pending& p) { return p.sent && p.handle == handle; }));
-    if (status == OrderStatus::kNew || (status == OrderStatus::kApproved && !maybe_at_broker) ||
-        is_terminal(status)) {
-      continue;
+  for (Pending& p : pending_) {
+    if (!p.done && !p.sent) {
+      drop_unsent(p);
     }
-    ++out.asked;
-    if (!sender_->cancel(order)) {
-      ++out.failed;
-      continue;
-    }
-    if (status == OrderStatus::kOpen || status == OrderStatus::kPartiallyFilled) {
-      // The broker has been asked either way. A full sink only leaves the status behind until the ack or the
-      // next call: it never holds up the cancel itself.
-      if (!oms_->apply(handle, OrderEvent::kCancelRequest).has_value()) {
-        ++out.unrecorded;
+  }
+  std::erase_if(pending_, [](const Pending& p) { return p.done; });
+  cancels_.clear();  // built again: every order once, and the ones not asked yet at the front
+  for (const std::uint8_t already_asked : {std::uint8_t{0}, std::uint8_t{1}}) {
+    for (OrderHandle handle = 0; handle < oms_->size(); ++handle) {
+      if (asked_[handle] == already_asked && may_be_at_broker(handle)) {
+        cancels_.push_back(handle);
       }
     }
   }
+  CancelAll out;
+  drain_cancels(out);
   return out;
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape): reserved for every order, and each is queued at most once
+bool OrderRouter::cancel(OrderHandle handle) noexcept {
+  for (Pending& p : pending_) {
+    if (p.handle == handle && !p.done && !p.sent) {
+      return drop_unsent(p);
+    }
+  }
+  if (handle >= oms_->size() || !may_be_at_broker(handle)) {
+    return false;
+  }
+  if (std::ranges::find(cancels_, handle) == cancels_.end()) {
+    cancels_.push_back(handle);
+  }
+  CancelAll ignored;
+  drain_cancels(ignored);
+  return true;
 }
 
 OrderRouter::Recovery OrderRouter::unresolved(OrderHandle handle) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -12,6 +13,7 @@
 #include "vyuha/core/latency_histogram.h"
 #include "vyuha/core/price.h"
 #include "vyuha/oms/oms.h"
+#include "vyuha/oms/ops_window.h"
 #include "vyuha/risk/approved_order.h"
 
 namespace vyuha::oms {
@@ -88,6 +90,21 @@ inline constexpr std::int64_t kMaxQueueMaxAgeMs = 60'000;
 // ORDER_QUEUE_MAX_AGE_MS: the same rules, 1 to 60,000.
 [[nodiscard]] std::expected<Nanos, Error> parse_queue_max_age_ms(std::string_view text) noexcept;
 
+// What the send queue needs to pace orders (D-20). Core thread.
+class ISendLimits {
+ public:
+  ISendLimits() = default;
+  ISendLimits(const ISendLimits&) = delete;
+  ISendLimits& operator=(const ISendLimits&) = delete;
+  ISendLimits(ISendLimits&&) = delete;
+  ISendLimits& operator=(ISendLimits&&) = delete;
+  virtual ~ISendLimits() = default;
+  // Orders per second for this account on one exchange, at most kMaxOpsCap. 0: no new order may go.
+  [[nodiscard]] virtual std::uint8_t ops_cap(const Uuid& account) const noexcept = 0;
+  // Which exchange's budget the instrument uses: below kOpsVenues, or kOpsVenueUnknown.
+  [[nodiscard]] virtual std::uint8_t ops_venue(std::int64_t instrument_id) const noexcept = 0;
+};
+
 struct RouterConfig {
   std::size_t tag_limit{0};
   std::size_t capacity{0};
@@ -105,8 +122,11 @@ class OrderRouter {
     kUnresolved,  // a mismatch is raised or the sink is full, and the order stays blocked until retried
   };
 
-  // The venue is a separate argument so no default can choose it.
-  OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, Venue venue, const RouterConfig& config);
+  // The venue is a separate argument so no default can choose it. limits is borrowed and must outlive this.
+  OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, Venue venue, const RouterConfig& config,
+              const ISendLimits& limits);
+  OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, Venue venue, const RouterConfig& config,
+              const ISendLimits&& limits) = delete;
 
   // Records APPROVED, with the gate's stamp, and queues the order to send what the gate approved. The order
   // must be NEW, and the approval must be for exactly its details, for this router's venue and unspent:
@@ -119,11 +139,14 @@ class OrderRouter {
   // A full sink is kCapacityExceeded and the order stays NEW. Only this queue reaches the adapter, so an
   // order marked APPROVED some other way (Oms::apply, recovery) is never sent.
   [[nodiscard]] std::expected<void, Error> submit(OrderHandle handle, risk::ApprovedOrder approved) noexcept;
-  // Sends what's durable, in order; returns how many it handed to the adapter. Never blocks. An order whose
-  // turn comes after queue_max_age from its gate stamp is expired instead; if that can't be recorded (a
-  // full sink) the queue waits, and it is never sent.
+  // Sends queued cancels first, then what's durable, in order; returns how many new orders it handed to the
+  // adapter. Never blocks. Everything sent uses the account's per-exchange budget, so at most its cap go in
+  // any rolling second (D-20). An order with no token waits, and orders of other accounts or exchanges go
+  // past it. An order whose turn comes after queue_max_age from its gate stamp is expired instead; if that
+  // can't be recorded (a full sink) the queue waits, and it is never sent.
   std::size_t poll() noexcept;
-  [[nodiscard]] std::size_t pending() const noexcept { return pending_.size() - head_; }
+  [[nodiscard]] std::size_t pending() const noexcept { return pending_.size(); }
+  [[nodiscard]] std::size_t cancels_queued() const noexcept { return cancels_.size(); }
   // Gate stamp to handing over to the adapter, per order sent: vyuha_engine_approval_to_send_seconds. It
   // includes waiting for the APPROVED event to be durable, so it shows how close real latency gets to
   // the approval limit.
@@ -133,15 +156,23 @@ class OrderRouter {
 
   // Cancels everything the broker may hold, for the kill switch (M2.7). Nothing here waits on or is refused
   // by the order log: a cancel only reduces risk, so an outage, a full ring or a refused order can't stop
-  // one. Unsent orders leave the queue. An APPROVED order is asked too if it may be at the broker. false from
-  // the adapter is counted in `failed`: call again, repeats are harmless.
+  // one. Unsent orders leave the queue. An APPROVED order is asked too if it may be at the broker.
+  //
+  // Cancels go ahead of new orders but count toward the per-second limit, so a kill burst stays compliant
+  // (D-20): what the budget allows goes now, the rest waits in `queued` and poll sends it. false from the
+  // adapter is counted in `failed` and poll retries it. Calling again is harmless: orders not yet asked go
+  // first, so repeats can't starve them. An unsent order leaves the queue as EXPIRED (CANCELLED_IN_QUEUE).
   struct CancelAll {
     std::size_t asked{0};
     std::size_t failed{0};
     std::size_t unrecorded{
-        0};  // asked, but the ring was full: the status catches up on the ack or the next call
+        0};                 // asked, but the ring was full: the status catches up on the ack or the next call
+    std::size_t queued{0};  // waiting for a token
   };
   CancelAll cancel_all() noexcept;
+  // One order's cancel, under the same rules. An order still waiting to be sent is dropped and never goes
+  // out. False if there is nothing to cancel.
+  bool cancel(OrderHandle handle) noexcept;
 
   // After a restart, for each restored order: find it at the broker by tag and settle it. Never sends or
   // queues anything (the owner's restart rule, ADR-025): an order the broker has is adopted, and an APPROVED
@@ -153,8 +184,16 @@ class OrderRouter {
     OrderHandle handle{0};
     std::uint64_t ticket{0};  // durable() must reach this
     bool sent{false};         // the adapter has it; only recording is left
+    bool done{false};         // nothing left to do: poll removes it
     risk::ApprovedOrder approved;
   };
+  struct SendBucket {
+    Uuid account{};
+    std::uint8_t venue{0};
+    bool used{false};
+    OpsWindow window{};
+  };
+  static constexpr std::size_t kSendBuckets = 128;
 
   [[nodiscard]] Recovery reconcile_unknown(OrderHandle handle, const BrokerOrderView& broker);
   [[nodiscard]] Recovery catch_up(OrderHandle handle, const BrokerOrderView& broker);
@@ -162,6 +201,15 @@ class OrderRouter {
                                 const BrokerOrderView* broker);  // nullptr: not at the broker
   [[nodiscard]] Recovery unresolved(OrderHandle handle);
   void drain_refused() noexcept;
+  enum class Step : std::uint8_t { kNext, kStop };
+  [[nodiscard]] Step advance(Pending& next, Nanos now, std::size_t& sent) noexcept;
+  bool drop_unsent(Pending& pending) noexcept;  // false if the order had nothing left to end
+  [[nodiscard]] OpsWindow& bucket(const Uuid& account, std::uint8_t venue) noexcept;
+  [[nodiscard]] bool has_token(const OrderDetails& details, Nanos now, std::uint8_t cap) noexcept;
+  void take_token(const OrderDetails& details, Nanos now) noexcept;
+  [[nodiscard]] bool may_be_at_broker(OrderHandle handle) const noexcept;
+  void drain_cancels(CancelAll& out) noexcept;
+  void clamp_future(const OrderDetails& details, Nanos now) noexcept;
 
   Oms* oms_;
   IOrderEventSink* sink_;
@@ -171,8 +219,11 @@ class OrderRouter {
   std::size_t capacity_;
   Nanos approval_max_age_;
   Nanos queue_max_age_;
+  const ISendLimits* limits_;
   std::vector<Pending> pending_;
-  std::size_t head_{0};
+  std::vector<OrderHandle> cancels_;  // each order at most once, so reserved at the OMS's capacity
+  std::vector<std::uint8_t> asked_;   // per handle: the broker has been asked to cancel it
+  std::array<SendBucket, kSendBuckets> buckets_{};
   LatencyHistogram approval_to_send_;
   std::uint64_t stale_approvals_{0};
   std::uint64_t expired_in_queue_{0};

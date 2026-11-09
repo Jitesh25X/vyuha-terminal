@@ -58,7 +58,7 @@ args      := key=value ...                           e.g.  CH interval=5m  OC ex
 | `FAC` | Factors | no | Factor exposures, VaR contribution, specific risk |
 | `EXP` | Exposure | no | Sector/underlying/beta-delta exposure treemap |
 | `LIM` | Limits | no | View (trader) / edit (risk manager) limits |
-| `KILL` | Kill switch | no | Same as Ctrl+Shift+K |
+| `KILL` | Kill switch | no | Same as Ctrl+Shift+K. The dialog shows progress while cancels go out, e.g. `cancelling 12/20` (ADR-028) |
 | `N` | News | optional | Stories; "affects me" filter; extraction tags; sentiment |
 | `CTX` | Context graph | yes or "mine" | Graph centred on a security/position with impact paths (Cytoscape) |
 | `CAL` | Events calendar | optional | Results, dividends, policy dates, expiries, holidays |

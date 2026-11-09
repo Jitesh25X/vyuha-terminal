@@ -13,6 +13,7 @@
 #include "vyuha/core/error.h"
 #include "vyuha/oms/oms.h"
 #include "vyuha/risk/approved_order.h"
+#include "vyuha/risk/gate_context.h"
 #include "vyuha/risk/gate_stamp.h"
 
 namespace vyuha::risk {
@@ -66,6 +67,7 @@ struct Outcome {
   Verdict verdict{Verdict::kPass};
   std::int64_t limit{0};
   std::int64_t current{0};
+  bool alert{false};  // the desk must hear about this rejection (R-DUP's table being full)
 };
 
 // An outcome with the code of the rule that gave it. The gate fills in the code, so a rule can't misreport.
@@ -74,32 +76,33 @@ struct RuleResult {
   Verdict verdict{Verdict::kPass};
   std::int64_t limit{0};
   std::int64_t current{0};
+  bool alert{false};
 };
 
-// Limit values arrive with the rules that read them (M2.3, M2.4). Versioned; hot-reloaded by ReloadLimits.
-struct LimitSet {
-  std::uint64_t version{0};
-};
+// The order's reason code when it is refused. It's the rule's code, except when the rejection needs its own
+// alert.
+[[nodiscard]] std::string_view reason_text(const RuleResult& result) noexcept;
 
-// Engine-local state the rules read. The core thread owns it and updates it incrementally on fills, marks
-// and limit reloads; a rule never iterates all positions. Rules add the fields they need (M2.3, M2.4).
-struct GateContext {
-  LimitSet limits;
-};
-
-// Worked out once per evaluation.
+// Worked out once per evaluation. instrument and account are null when the context doesn't know them.
 struct GateFacts {
   Nanos now{0};
   bool opening{true};
+  const InstrumentRef* instrument{nullptr};
+  const AccountState* account{nullptr};
 };
 
 // A rule: a plain function, called through a fixed table with no virtual dispatch. It must be noexcept, must
 // not allocate, and must depend only on its arguments, so the gate is pure given the context.
 using RuleFn = Outcome (*)(const GateContext&, const oms::OrderDetails&, const GateFacts&) noexcept;
 
+// A stateful rule's second phase (R-DUP, R-OPS): records the approved order, such as taking an OPS token.
+// Called only once the whole chain has passed, so a rejected order never uses up state (owner, 2026-11-08).
+using OnApprovedFn = void (*)(GateContext&, const oms::OrderDetails&, const GateFacts&) noexcept;
+
 struct Rule {
   RuleCode code{RuleCode::kKill};
   RuleFn eval{nullptr};
+  OnApprovedFn on_approved{nullptr};  // only a stateful rule has one
 };
 
 struct GateDecision {
@@ -123,10 +126,12 @@ class RiskGate {
                                                              const IClock& clock) noexcept;
   static std::expected<RiskGate, Error> create(std::span<const Rule> rules, const IClock&& clock) = delete;
 
-  // Runs the chain; the first hard failure stops it. Pure given ctx and order, apart from the stamp's
-  // timing. A live order (is_paper false) is refused with R-LIVE-DISABLED unless the table holds every rule
-  // of the chain: a gate missing rules must not approve real orders.
-  [[nodiscard]] GateDecision evaluate(const GateContext& ctx, const oms::OrderDetails& order) const noexcept;
+  // Runs every rule's check, and the first hard failure stops it. The checks are pure given ctx and order,
+  // apart from the stamp's timing. Only when the whole chain has passed does each stateful rule's on_approved
+  // run, in chain order; that is the only change the gate makes to ctx. A live order (is_paper false) is
+  // refused with R-LIVE-DISABLED unless the table holds every rule of the chain: a gate missing rules must
+  // not approve real orders.
+  [[nodiscard]] GateDecision evaluate(GateContext& ctx, const oms::OrderDetails& order) const noexcept;
 
   // Every rule of §3 is in the table.
   [[nodiscard]] bool complete() const noexcept { return count_ == kRuleCount; }

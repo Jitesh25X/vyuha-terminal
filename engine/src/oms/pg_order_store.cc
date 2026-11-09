@@ -56,15 +56,17 @@ namespace {
 }
 [[nodiscard]] std::string_view name(Validity v) noexcept { return v == Validity::kDay ? "DAY" : "IOC"; }
 [[nodiscard]] std::string_view name(Source v) noexcept {
-  switch (v) {
-    case Source::kManual:
+  switch (v.kind()) {
+    case Source::Kind::kManual:
       return "manual";
-    case Source::kStrategy:
+    case Source::Kind::kStrategy:
       return "strategy";
-    case Source::kAiDraft:
+    case Source::Kind::kAiDraft:
       return "ai_draft";
-    case Source::kSystem:
+    case Source::Kind::kSystem:
       return "system";
+    case Source::Kind::kKillFlatten:
+      return "kill_flatten";
   }
   return "";
 }
@@ -102,6 +104,12 @@ namespace {
   return std::nullopt;
 }
 [[nodiscard]] std::optional<Source> parse_source(std::string_view s) noexcept {
+  // A stored kill order comes back as `system`: only the kill-switch code can make the exempt value (D-23),
+  // so a row can't grant the exemption. A restored order is never re-gated, and Postgres keeps the true
+  // source.
+  if (s == "kill_flatten") {
+    return Source::kSystem;
+  }
   for (const Source v : {Source::kManual, Source::kStrategy, Source::kAiDraft, Source::kSystem}) {
     if (name(v) == s) {
       return v;
@@ -174,6 +182,30 @@ void record_approval_stale(pqxx::work& tx, const std::string& id, const OrderEve
          FROM "order" o CROSS JOIN app_user u
          WHERE o.id = $1::uuid AND u.role = 'admin' AND u.is_active)",
       pqxx::params{id, age});
+}
+
+// R-DUP couldn't check for duplicates because its table was full (D-24), so the order was refused. Audited
+// and alerted in the status's transaction, as a stale approval is.
+void record_dup_table_full(pqxx::work& tx, const std::string& id, const OrderEventRecord& e) {
+  if (e.to != OrderStatus::kRiskRejected || e.from == e.to || e.reason_code.view() != kDupTableFull) {
+    return;
+  }
+  tx.exec(
+      R"(INSERT INTO audit_event (actor_kind, action, entity, entity_id, payload)
+         SELECT 'engine', 'order.dup_table_full', 'order', o.id::text,
+                jsonb_build_object('reason_code', $2::text, 'seq', $3::int,
+                                   'client_order_id', o.client_order_id, 'account_id', o.account_id,
+                                   'instrument_id', o.instrument_id, 'is_paper', o.is_paper)
+         FROM "order" o WHERE o.id = $1::uuid)",
+      pqxx::params{id, std::string(e.reason_code.view()), e.seq});
+  tx.exec(
+      R"(INSERT INTO alert_event (user_id, severity, title, body)
+         SELECT u.id, 'critical', 'DUP_TABLE_FULL',
+                jsonb_build_object('order_id', o.id, 'client_order_id', o.client_order_id,
+                                   'account_id', o.account_id, 'is_paper', o.is_paper)
+         FROM "order" o CROSS JOIN app_user u
+         WHERE o.id = $1::uuid AND u.role = 'admin' AND u.is_active)",
+      pqxx::params{id});
 }
 
 // Integers and exact decimal text, so building JSON by hand is safe. The broker order id is left out: it's
@@ -294,6 +326,7 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
         pqxx::params{body});
   }
   record_approval_stale(tx, id, e);
+  record_dup_table_full(tx, id, e);
   // The restart rule (ADR-025) and the queue age limit (ADR-027): one transaction with the status, so an
   // expiry is never unaudited or unalerted. The alert title is fixed per reason
   // (expiry_alert_title): ORDER_EXPIRED_ON_RESTART, ORDER_EXPIRED_IN_QUEUE, else ORDER_EXPIRED. The
@@ -308,6 +341,9 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
                                      'is_paper', o.is_paper)
            FROM "order" o WHERE o.id = $1::uuid)",
         pqxx::params{id, std::string(e.reason_code.view()), e.seq});
+    if (e.reason_code.view() == kCancelledInQueue) {
+      return;  // someone asked for this: audited, no alert
+    }
     tx.exec(
         R"(INSERT INTO alert_event (user_id, severity, title, body)
            SELECT u.id, 'critical', $2::text,

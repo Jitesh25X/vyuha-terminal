@@ -28,15 +28,16 @@ Limits are versioned (`LimitSet.version`). Changes hot-reload via gRPC `ReloadLi
 | `max_drawdown_from_peak` | ₹ | 75,000 | Intraday peak P&L − current |
 | `max_open_orders` | count | 50 | |
 | `ops_cap` | orders/s | 8 | Per account per exchange (hard ceiling 10, from SEBI/NSE threshold) |
-| `fat_finger_pct` | % | 5 (EQ/FUT), 30 (OPT) | Limit price vs LTP deviation |
+| `fat_finger_pct` | % | 5 | Limit price vs LTP deviation, EQ and FUT |
+| `fat_finger_pct_opt` | % | 30 | The same, for options |
 | `dup_window_ms` | ms | 1,500 | Same account/instrument/side/qty/price within window → reject |
 | `margin_buffer_pct` | % | 10 | Required margin × (1 + buffer) ≤ available |
 | `min_reward_risk` | ratio | 0 (off) | When > 0, bracket orders need (target−entry)/(entry−stop) ≥ value |
 | `loss_streak_lockout_days` | trading days | 0 (off) | After N consecutive losing trading days, block new opening orders for `lockout_length_days` |
 | `lockout_length_days` | trading days | 1 | |
 | `allow_market_orders` | bool | 1 | |
-| `allow_mis_after` | HH:MM IST | 15:10 | Block new MIS opening orders after this time |
-| `trading_window_start` / `_end` | HH:MM IST | 09:15 / 15:30 | Outside window: only closing orders (and AMO post-MVP) |
+| `allow_mis_after` | HHMM IST, stored as a number such as 1510 | 15:10 | Block new MIS opening orders after this time |
+| `trading_window_start` / `_end` | HHMM IST, stored as a number such as 915 | 09:15 / 15:30 | Outside window: only closing orders (and AMO post-MVP) |
 
 Desk defaults are **seed values for a staging desk**. The owner sets real values in the admin console before going live.
 
@@ -52,10 +53,10 @@ Desk defaults are **seed values for a staging desk**. The owner sets real values
 | 7 | `R-INSTR-RESTRICTED` | Desk restricted list | all |
 | 8 | `R-INSTR-EXPIRED` | Contract expired / invalid lot multiple | all |
 | 9 | `R-ORDER-SHAPE` | Qty multiple of lot; price on tick grid; required fields per type; MARKET allowed | all |
-| 10 | `R-FAT-FINGER` | Price within `fat_finger_pct` of LTP and within circuit band | priced orders |
+| 10 | `R-FAT-FINGER` | Price within `fat_finger_pct` of a fresh LTP (at most 3 s old) and within the circuit band. A live order needs a known band (D-22) | priced orders |
 | 11 | `R-ORDER-VALUE` | `max_order_value`, `max_order_qty_lots` | all |
-| 12 | `R-DUP` | Duplicate within `dup_window_ms` | all |
-| 13 | `R-OPS` | Token bucket at `ops_cap` (rejects; never queues indefinitely, max wait 200 ms) | all |
+| 12 | `R-DUP` | Duplicate within `dup_window_ms`: same account, instrument, side, qty, price and trigger. Slices of one intent are exempt from each other (D-24). A full table rejects with `R-DUP-TABLE-FULL` and alerts | all |
+| 13 | `R-OPS` | Token at `ops_cap`, per account per exchange. No free token rejects at once (D-21) | all |
 | 14 | `R-OPEN-ORDERS` | `max_open_orders` | opening |
 | 15 | `R-POSITION` | Post-trade projected position within `max_position_lots/notional` | opening |
 | 16 | `R-EXPOSURE` | Projected gross/net exposure within limits | opening |
@@ -66,14 +67,19 @@ Desk defaults are **seed values for a staging desk**. The owner sets real values
 | 21 | `R-MARGIN` | Margin cache: required × (1+buffer) ≤ available; for orders > ₹10 lakh notional, preview calls the broker margin API (async, before submit) | opening |
 | 22 | `R-DISCIPLINE` | Loss-streak lockout active; bracket reward:risk below `min_reward_risk` | opening |
 
-"Opening" = increases absolute position. Position-reducing orders skip rules 14–22, so limits never stop a trader getting flat. They still pass 1–13, except rule 1 when the action is a kill-generated cancel or flatten. The exception is a Postgres outage: no new order goes out while events aren't durable, including reducing and flatten orders, while cancels still go (ADR-025). Nothing that adds risk is taken in then either: new orders, qty-raising modifies and price or trigger modifies are refused with `ORDER_LOG_UNAVAILABLE`. A queued order whose turn comes more than `ORDER_QUEUE_MAX_AGE_MS` (5 s) after its gate stamp is `EXPIRED_IN_QUEUE`, never sent (ADR-027).
+"Opening" = increases absolute position. Position-reducing orders skip rules 14–22, so limits never stop a trader getting flat. They still pass 1–13, except rule 1 when the action is a kill-generated cancel or flatten, and rule 2 for a flatten, which runs under a system identity so that it works after a trader's mapping is gone (M2.7). The exception is a Postgres outage: no new order goes out while events aren't durable, including reducing and flatten orders, while cancels still go (ADR-025). Nothing that adds risk is taken in then either: new orders, qty-raising modifies and price or trigger modifies are refused with `ORDER_LOG_UNAVAILABLE`. A queued order whose turn comes more than `ORDER_QUEUE_MAX_AGE_MS` (5 s) after its gate stamp is `EXPIRED_IN_QUEUE`, never sent (ADR-027).
 
 **Projected state** uses current net position + open orders on the same side (worst case) + this intent.
 
 **Implementation notes**
+- **Rules 1–13** are in `engine/src/risk/rules.cc` (M2.3), and what they read is in `risk/gate_context.h`. Anything not loaded refuses the order: no limit row for a key, no calendar for today, an unknown account or instrument. An unknown instrument is `R-INSTR-EXPIRED`'s to refuse, and so is a master row with no usable lot or tick size. A wrong lot multiple on the order is `R-ORDER-SHAPE`'s.
+- **Limits:** the strictest hard limit rejects and the strictest soft limit warns. "Strictest" depends on the key: the longest duplicate window, the latest window start and the earliest window end.
+- **The OPS budget:** a token comes back one second after it was used, so no rolling second holds more than the cap. A bucket refilling at `cap`/s from full would allow nearly twice the cap in one second, over the 10 OPS threshold. The gate and the send queue each keep one. NSE and NFO share a budget, as do BSE and BFO: counting a venue's segments together can only be stricter. The budgets run on the wall clock: a step back holds tokens back, which is safe, but a forward step makes recent sends look old and can release one extra cap per step. M2.3b moves them to a monotonic clock (D-25).
+- **Send queue (D-20):** `OrderRouter` holds an order with no token, up to the queue age limit. Other accounts' orders go past it. Cancels go first and use tokens too, so cancelling many orders takes `orders / cap` seconds.
 - Rules are plain functions, `Outcome (*)(const GateContext&, const OrderDetails&, const GateFacts&) noexcept`, registered in a fixed table of `{RuleCode, fn}` in the order above (`engine/include/vyuha/risk/risk_gate.h`, M2.2). There is no virtual dispatch in the inner loop. `RiskGate::create` refuses a table that's out of order, repeats a code or has an empty slot. The gate attaches the code to each outcome, so a rule can't misreport. A verdict that is neither pass nor warn counts as a reject (fail closed).
 - **Incomplete chain:** a gate whose table lacks any of the 22 rules refuses every live order (`is_paper` false) with `R-LIVE-DISABLED`, before any rule runs. Paper orders still go through the rules it has. So until M2.4 finishes the chain, nothing the gate approves can be live.
 - **Opening vs reducing:** the gate works this out itself (`GateFacts::opening`); callers don't supply it. Until positions exist (M2.6), every order counts as opening, so every rule runs (fail closed). Property (a) below can only be tested from M2.6.
+- **A router refusal after the gate** (owner, 2026-11-09): the gate commits an approved order's OPS token and duplicate entry before `submit`, so an order the router then refuses has still used them. This fails closed, and it stays.
 - **Stateful rules are two-phase** (owner, 2026-11-08; built in M2.3). Each stateful rule (`R-DUP`, `R-OPS`) has a pure `check()` and a separate `on_approved()`. The gate runs every `check()` first, and only when the whole chain passes does it call `on_approved()` on each. A rejected order never uses up an OPS token or creates a duplicate-window entry. The core thread is the only writer, so there is no race.
 - `ApprovedOrder` (`risk/approved_order.h`) holds exactly the `OrderDetails` the gate evaluated and its `GateStamp`. It is `final` and move-only, with a private constructor whose only friend is `RiskGate`. Its move is user-provided and empties the source (`spent()`), which also makes it not trivially copyable, so `std::bit_cast` can't forge one. `IOrderSender::send` takes nothing else. `OrderRouter::submit(handle, ApprovedOrder)` refuses an approval that:
   - is spent;
