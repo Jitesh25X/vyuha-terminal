@@ -63,11 +63,13 @@ bool RiskGate::is_opening(const GateContext& /*ctx*/, const oms::OrderDetails& /
 GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order) const noexcept {
   GateDecision out;
   const Nanos start = clock_->now();
+  const Nanos started = clock_->monotonic();
   out.stamp.ruleset_version = ctx.limits.version;
   out.stamp.ts = start;
+  out.stamp.monotonic = started;
   const GateFacts facts{
       .now = start,
-      .monotonic = clock_->monotonic(),
+      .monotonic = started,
       .opening = is_opening(ctx, order),
       .instrument = ctx.instruments != nullptr ? ctx.instruments->find(order.instrument_id) : nullptr,
       .account = std::as_const(ctx).accounts.find(order.account_id)};
@@ -103,7 +105,7 @@ GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order
       }
     }
   }
-  out.stamp.eval_ns = clock_->now() - start;
+  out.stamp.eval_ns = clock_->monotonic() - started;
   if (!out.rejection.has_value()) {
     out.approved = ApprovedOrder(order, out.stamp);
   }

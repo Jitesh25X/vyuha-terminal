@@ -111,14 +111,16 @@ struct UpstoxFeed::Impl final : FeedProtocol {
 
   [[nodiscard]] bool binary_requests() const noexcept override { return true; }  // Upstox requires binary
 
-  void on_frame(std::size_t /*shard*/, bool binary, std::span<const std::uint8_t> bytes, Nanos now) override {
+  void on_frame(std::size_t /*shard*/, bool binary, std::span<const std::uint8_t> bytes, Nanos now,
+                Nanos recv_mono) override {
     if (!binary) {
       return;  // the feed is protobuf only
     }
     const DecodeStats before = ds;
-    decode_frame(bytes, keys, now, ds, [this](const md::Tick& t) noexcept {
+    decode_frame(bytes, keys, now, ds, [this, recv_mono](const md::Tick& t) noexcept {
       md::Tick stamped = t;
       stamped.feed_id = cfg.feed_id;
+      stamped.recv_mono = recv_mono;
       if (!out.try_push(stamped)) {
         ring_full.fetch_add(1, std::memory_order_relaxed);
       }

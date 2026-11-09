@@ -163,7 +163,6 @@ void record_approval_stale(pqxx::work& tx, const std::string& id, const OrderEve
   if (e.to != OrderStatus::kRiskRejected || e.from == e.to || e.reason_code.view() != kApprovalStale) {
     return;
   }
-  const Nanos age = e.gate.has_value() ? e.ts - e.gate->ts : 0;
   tx.exec(
       R"(INSERT INTO audit_event (actor_kind, action, entity, entity_id, payload)
          SELECT 'engine', 'order.approval_stale', 'order', o.id::text,
@@ -172,7 +171,7 @@ void record_approval_stale(pqxx::work& tx, const std::string& id, const OrderEve
                                    'instrument_id', o.instrument_id, 'side', o.side, 'qty', o.qty,
                                    'is_paper', o.is_paper)
          FROM "order" o WHERE o.id = $1::uuid)",
-      pqxx::params{id, std::string(e.reason_code.view()), e.seq, age});
+      pqxx::params{id, std::string(e.reason_code.view()), e.seq, e.approval_age});
   tx.exec(
       R"(INSERT INTO alert_event (user_id, severity, title, body)
          SELECT u.id, 'warn', 'APPROVAL_STALE',
@@ -181,7 +180,7 @@ void record_approval_stale(pqxx::work& tx, const std::string& id, const OrderEve
                                    'is_paper', o.is_paper)
          FROM "order" o CROSS JOIN app_user u
          WHERE o.id = $1::uuid AND u.role = 'admin' AND u.is_active)",
-      pqxx::params{id, age});
+      pqxx::params{id, e.approval_age});
 }
 
 // R-DUP couldn't check for duplicates because its table was full (D-24), so the order was refused. Audited

@@ -790,9 +790,11 @@ TEST(OrderRouter, TheApprovalAgeLimitIsConfigurable) {
 TEST(OrderRouter, RecordsApprovalToSendTime) {
   Rig r;
   const OrderHandle h = r.fresh();
-  const SimClock approved_at(1'000 - 30'000);  // 30 µs before the OMS clock's 1'000
+  SimClock approved_at(1'000 - 30'000);                 // 30 µs before the OMS clock's 1'000
+  approved_at.step_wall(Nanos{-10} * kNanosPerSecond);  // so the stamp's two clocks differ
   ASSERT_TRUE(r.router.submit(h, testing::approve(r.oms.order(h).details, approved_at)));
   EXPECT_EQ(r.router.approval_to_send().count(), 0U);  // not sent yet
+  r.clock.step_wall(Nanos{10} * kNanosPerSecond);      // measured on the monotonic clock
   r.sink.durable_count = r.sink.events.size();
   ASSERT_EQ(r.router.poll(), 1U);
   const LatencyHistogram& m = r.router.approval_to_send();
@@ -968,17 +970,59 @@ TEST(QueueAge, AnOrderExactlyAtTheLimitIsSent) {
   EXPECT_EQ(r.router.expired_in_queue(), 0U);
 }
 
-// A clock stepped back gives a negative age: expired, never sent (fail closed, as submit() does).
-TEST(QueueAge, AClockSteppedBackExpiresTheOrder) {
-  Rig r;
-  const OrderHandle h = r.fresh();
-  ASSERT_TRUE(r.submit(h));  // stamped at 1'000
-  r.clock.set(500);
-  r.sink.durable_count = r.sink.events.size();
-  EXPECT_EQ(r.router.poll(), 0U);
-  EXPECT_TRUE(r.broker.tags.empty());
-  EXPECT_EQ(r.oms.order(h).status, kExpired);
-  EXPECT_EQ(r.router.expired_in_queue(), 1U);
+// D-26. The wall clock steps before the stamp too, so a stamp from the wrong clock can't go unnoticed.
+TEST(QueueAge, AWallClockStepInEitherDirectionLeavesAQueuedOrderAlone) {
+  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, Nanos{10} * kNanosPerSecond}) {
+    Rig r;
+    const OrderHandle h = r.fresh();
+    r.clock.step_wall(step);
+    ASSERT_TRUE(r.submit(h));
+    r.clock.step_wall(step);
+    r.sink.durable_count = r.sink.events.size();
+    EXPECT_EQ(r.router.poll(), 1U);
+    EXPECT_EQ(r.oms.order(h).status, kSent);
+    EXPECT_EQ(r.router.expired_in_queue(), 0U);
+  }
+}
+
+TEST(QueueAge, AWallClockStepInEitherDirectionCantSaveAnOldOrder) {
+  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, Nanos{10} * kNanosPerSecond}) {
+    Rig r;
+    const OrderHandle h = r.fresh();
+    r.clock.step_wall(step);
+    ASSERT_TRUE(r.submit(h));
+    r.clock.advance(kDefaultQueueMaxAge + 1);
+    r.clock.step_wall(step);
+    r.sink.durable_count = r.sink.events.size();
+    EXPECT_EQ(r.router.poll(), 0U);
+    EXPECT_TRUE(r.broker.tags.empty());
+    EXPECT_EQ(r.oms.order(h).status, kExpired);
+    EXPECT_EQ(r.router.expired_in_queue(), 1U);
+  }
+}
+
+TEST(OrderRouter, AWallClockStepInEitherDirectionDoesntMakeAnApprovalStale) {
+  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, Nanos{10} * kNanosPerSecond}) {
+    Rig r;
+    const OrderHandle h = r.fresh();
+    r.clock.step_wall(step);
+    auto approved = testing::approve(r.oms.order(h).details, r.clock);
+    r.clock.step_wall(step);
+    EXPECT_TRUE(r.router.submit(h, std::move(approved)).has_value());
+  }
+}
+
+TEST(OrderRouter, AWallClockStepInEitherDirectionCantFreshenAnApproval) {
+  for (const Nanos step : {Nanos{-10} * kNanosPerSecond, Nanos{10} * kNanosPerSecond}) {
+    Rig r;
+    const OrderHandle h = r.fresh();
+    r.clock.step_wall(step);
+    auto approved = testing::approve(r.oms.order(h).details, r.clock);
+    r.clock.advance(kDefaultApprovalMaxAge + 1);
+    r.clock.step_wall(step);
+    EXPECT_EQ(r.router.submit(h, std::move(approved)).error().code, ErrorCode::kApprovalStale);
+    EXPECT_EQ(r.sink.events.back().approval_age, kDefaultApprovalMaxAge + 1);  // what the audit row records
+  }
 }
 
 // The point of the limit: orders queued before an outage don't fire when it ends.

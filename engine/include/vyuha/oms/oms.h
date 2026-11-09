@@ -199,6 +199,7 @@ struct OrderEventRecord {
   ModifyRecord modify{};
   Nanos ts{0};
   std::optional<risk::GateStamp> gate{};  // on APPROVED, and on RISK_REJECTED for R-APPROVAL-STALE
+  Nanos approval_age{0};                  // the age R-APPROVAL-STALE decided on, for the audit row
   std::optional<OrderDetails> details{};  // on the first event (`from` is nullopt), which inserts the order
 };
 // NOLINTEND(readability-redundant-member-init)
@@ -272,6 +273,7 @@ struct EventDetails {
   // kRiskApprove, and kRiskReject for R-APPROVAL-STALE: the gate's stamp, stored in the event's payload.
   // OrderRouter::submit sets it. Recording a gate rejection with its stamp and R-code comes with M2.8.
   std::optional<risk::GateStamp> gate{};  // NOLINT(readability-redundant-member-init)
+  Nanos approval_age{0};                  // kRiskReject for R-APPROVAL-STALE: on the monotonic clock
 };
 
 // What recovery reads back from Postgres.

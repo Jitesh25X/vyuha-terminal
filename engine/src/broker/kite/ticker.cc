@@ -80,12 +80,14 @@ struct KiteTicker::Impl final : FeedProtocol {
 
   [[nodiscard]] bool binary_requests() const noexcept override { return false; }
 
-  void on_frame(std::size_t shard, bool binary, std::span<const std::uint8_t> bytes, Nanos now) override {
+  void on_frame(std::size_t shard, bool binary, std::span<const std::uint8_t> bytes, Nanos now,
+                Nanos recv_mono) override {
     if (binary) {
       const ParseStats before = ps;
-      parse_frame(bytes, tokens, now, ps, [this](const md::Tick& t) noexcept {
+      parse_frame(bytes, tokens, now, ps, [this, recv_mono](const md::Tick& t) noexcept {
         md::Tick stamped = t;
         stamped.feed_id = cfg.feed_id;
+        stamped.recv_mono = recv_mono;
         if (!out.try_push(stamped)) {
           ring_full.fetch_add(1, std::memory_order_relaxed);
         }

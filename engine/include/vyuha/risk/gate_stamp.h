@@ -12,6 +12,7 @@ struct GateStamp {
   std::uint64_t ruleset_version{0};  // LimitSet::version
   std::int64_t eval_ns{0};
   Nanos ts{0};
+  Nanos monotonic{0};  // IClock::monotonic at evaluation, for the approval and queue ages; never persisted
   bool operator==(const GateStamp&) const = default;
 };
 

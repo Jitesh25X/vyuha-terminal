@@ -111,6 +111,7 @@ struct BenchDesk {
       tick.instrument_id = static_cast<vyuha::md::InstrumentId>(id);
       tick.ltp = vyuha::Price::from_units(1'000'000);
       tick.recv_ts = kNow;
+      tick.recv_mono = kNow;
       static_cast<void>(book.update(tick));
     }
     static_cast<void>(ctx->accounts.put({.id = account,

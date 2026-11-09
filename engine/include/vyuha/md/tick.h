@@ -28,6 +28,9 @@ struct Tick {
   InstrumentId instrument_id{0};
   Nanos exchange_ts{0};
   Nanos recv_ts{0};
+  // IClock::monotonic when the frame arrived: the only stamp LTP age is measured from (D-26). Meaningless
+  // outside this process, so it is never published or stored.
+  Nanos recv_mono{0};
   // When this feed last saw the instrument trade; 0 = unknown. Decoders set it when the broker sends
   // one (Upstox ltt, Kite full mode); the core's last-value book infers it otherwise and carries it forward.
   Nanos last_trade_ts{0};

@@ -92,9 +92,11 @@ std::expected<void, Error> OrderRouter::submit(OrderHandle handle, risk::Approve
   if (approved.order().is_paper.paper() != (venue_ == Venue::kPaper)) {
     return std::unexpected(Error{ErrorCode::kInvalidArgument, "router: paper and live don't mix"});
   }
-  if (const Nanos age = oms_->clock().now() - approved.stamp().ts; age < 0 || age > approval_max_age_) {
-    const auto rejected = oms_->apply(handle, OrderEvent::kRiskReject,
-                                      {.reason_code = kApprovalStale, .gate = approved.stamp()});
+  if (const Nanos age = oms_->clock().monotonic() - approved.stamp().monotonic;
+      age < 0 || age > approval_max_age_) {
+    const auto rejected =
+        oms_->apply(handle, OrderEvent::kRiskReject,
+                    {.reason_code = kApprovalStale, .gate = approved.stamp(), .approval_age = age});
     if (!rejected.has_value()) {
       return std::unexpected(rejected.error());  // the sink is full: the order stays NEW
     }
@@ -112,7 +114,7 @@ std::expected<void, Error> OrderRouter::submit(OrderHandle handle, risk::Approve
 std::size_t OrderRouter::poll() noexcept {
   std::size_t sent = 0;
   drain_refused();
-  const Nanos now = oms_->clock().now();
+  const Nanos now = oms_->clock().monotonic();
   CancelAll ignored;
   drain_cancels(ignored);  // ahead of new orders: they take the tokens first (D-20)
   for (Pending& next : pending_) {
@@ -135,8 +137,8 @@ OrderRouter::Step OrderRouter::advance(Pending& next, Nanos now, std::size_t& se
       next.done = true;
       return Step::kNext;
     }
-    // ADR-027. A negative age (the clock stepped back) expires too, as submit() treats it: fail closed.
-    const Nanos queued_for = now - next.approved.stamp().ts;
+    // ADR-027, on the monotonic clock (D-26). A negative age can't happen, and would expire: fail closed.
+    const Nanos queued_for = now - next.approved.stamp().monotonic;
     if (queued_for > queue_max_age_ || queued_for < 0) {
       if (!oms_->apply(next.handle, OrderEvent::kExpire, {.reason_code = kExpiredInQueue}).has_value()) {
         return Step::kStop;  // the sink is full: the next poll tries again, and it is never sent
@@ -154,9 +156,9 @@ OrderRouter::Step OrderRouter::advance(Pending& next, Nanos now, std::size_t& se
     if (!sender_->send(next.approved, tag)) {
       return Step::kStop;
     }
-    const Nanos handed_over = oms_->clock().now();  // when it left, not when this poll began
-    take_token(details, oms_->clock().monotonic());
-    approval_to_send_.record(handed_over - next.approved.stamp().ts);
+    const Nanos handed_over = oms_->clock().monotonic();  // when it left, not when this poll began
+    take_token(details, handed_over);
+    approval_to_send_.record(handed_over - next.approved.stamp().monotonic);
     next.sent = true;
     ++sent;
   }

@@ -94,7 +94,7 @@ inline constexpr std::string_view kTriggerBandReason = "R-TRIGGER-BAND";
 // Worked out once per evaluation. instrument and account are null when the context doesn't know them.
 struct GateFacts {
   Nanos now{0};
-  Nanos monotonic{0};  // for the OPS budget only (D-25): a wall-clock step must not release tokens
+  Nanos monotonic{0};  // for every duration (D-25, D-26): now is for session hours and absolute times only
   bool opening{true};
   const InstrumentRef* instrument{nullptr};
   const AccountState* account{nullptr};

@@ -36,6 +36,8 @@ class TickingClock final : public IClock {
   [[nodiscard]] Nanos monotonic() const noexcept override { return now(); }
 };
 
+constexpr Nanos kMonotonic = 1'767'000'000'000'000'000;
+
 struct Seeded {
   std::string account;
   std::string user;
@@ -686,8 +688,14 @@ TEST(PgOrderStore, AStaleApprovalIsRejectedAuditedAndAlertedTogether) {
   }
   const TempDb db(admin);
   const Seeded s = seed(db.url());
-  const TickingClock clock;
-  const SimClock gate_clock(clock.now() - kDefaultApprovalMaxAge - 1'000);
+  // The wall clock has stepped: the audited age must still be the monotonic one the decision used.
+  class SteppedWall final : public IClock {
+   public:
+    [[nodiscard]] Nanos now() const noexcept override { return kMonotonic + (10 * kNanosPerSecond); }
+    [[nodiscard]] Nanos monotonic() const noexcept override { return kMonotonic; }
+  };
+  const SteppedWall clock;
+  const SimClock gate_clock(clock.monotonic() - kDefaultApprovalMaxAge - 1'000);
   RecordingBroker broker;
   {
     PgOrderEventWriter writer(db.url(), nullptr);
@@ -713,6 +721,10 @@ TEST(PgOrderStore, AStaleApprovalIsRejectedAuditedAndAlertedTogether) {
   EXPECT_EQ(audit[0].as<std::string>(), "R-APPROVAL-STALE");
   EXPECT_EQ(audit[1].as<std::int64_t>(), kDefaultApprovalMaxAge + 1'000);
   EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM alert_event WHERE title = 'APPROVAL_STALE'"), 1);
+  EXPECT_EQ(
+      tx.query_value<std::int64_t>(
+          "SELECT (body::jsonb->>'approval_age_ns')::bigint FROM alert_event WHERE title = 'APPROVAL_STALE'"),
+      kDefaultApprovalMaxAge + 1'000);
   EXPECT_EQ(tx.query_value<std::string>("SELECT payload->'gate'->>'ts_ns' FROM order_event WHERE seq = 2"),
             std::to_string(gate_clock.now()));
 }
