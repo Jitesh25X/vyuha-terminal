@@ -11,4 +11,10 @@ Nanos WallClock::now() const noexcept {
       .count();
 }
 
+Nanos WallClock::monotonic() const noexcept {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
 }  // namespace vyuha

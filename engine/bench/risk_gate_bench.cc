@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -200,6 +201,34 @@ BENCHMARK_CAPTURE(BM_RiskRule, fat_finger, RuleCode::kFatFinger);
 BENCHMARK_CAPTURE(BM_RiskRule, order_value, RuleCode::kOrderValue);
 BENCHMARK_CAPTURE(BM_RiskRule, dup, RuleCode::kDup);
 BENCHMARK_CAPTURE(BM_RiskRule, ops, RuleCode::kOps);
+
+// A rule on a stop with a known circuit band, which takes the branches a plain LIMIT order skips (M2.3b).
+void BM_RiskRuleStop(benchmark::State& state, RuleCode code, vyuha::oms::OrderType type) {
+  BenchDesk desk;
+  vyuha::risk::InstrumentRef banded = *desk.instruments.find(42);
+  banded.lower_circuit = vyuha::Price::from_units(900'000);
+  banded.upper_circuit = vyuha::Price::from_units(1'100'000);
+  static_cast<void>(desk.instruments.put(42, banded));
+  const Rule* found = nullptr;
+  for (const Rule& r : vyuha::risk::pre_trade_rules()) {
+    if (r.code == code) {
+      found = &r;
+    }
+  }
+  const std::array<Rule, 1> one{*found};
+  const auto gate = vyuha::risk::RiskGate::create(one, desk.clock).value();
+  vyuha::oms::OrderDetails order = desk.order();
+  order.order_type = type;
+  order.price =
+      type == vyuha::oms::OrderType::kSl ? std::optional{vyuha::Price::from_units(1'020'000)} : std::nullopt;
+  order.trigger_price = vyuha::Price::from_units(1'010'000);
+  for (auto _ : state) {
+    auto decision = gate.evaluate(*desk.ctx, order);
+    benchmark::DoNotOptimize(decision);
+  }
+}
+BENCHMARK_CAPTURE(BM_RiskRuleStop, fat_finger_stop_market, RuleCode::kFatFinger, vyuha::oms::OrderType::kSlM);
+BENCHMARK_CAPTURE(BM_RiskRuleStop, order_shape_stop_limit, RuleCode::kOrderShape, vyuha::oms::OrderType::kSl);
 
 // The 13 real rules, approving every order, followed by 9 rules that only pass in M2.4's place.
 void BM_RiskGateRealRulesPercentiles(benchmark::State& state, bool full_duplicate_table) {

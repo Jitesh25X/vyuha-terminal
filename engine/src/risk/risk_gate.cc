@@ -28,7 +28,18 @@ std::string_view code_text(RuleCode code) noexcept {
 }
 
 std::string_view reason_text(const RuleResult& result) noexcept {
-  return result.code == RuleCode::kDup && result.alert ? oms::kDupTableFull : code_text(result.code);
+  if (result.code == RuleCode::kDup && result.alert) {
+    return oms::kDupTableFull;
+  }
+  switch (result.reason) {
+    case RuleReason::kTriggerSide:
+      return kTriggerSideReason;
+    case RuleReason::kTriggerBand:
+      return kTriggerBandReason;
+    case RuleReason::kRule:
+      break;
+  }
+  return code_text(result.code);
 }
 
 std::expected<RiskGate, Error> RiskGate::create(std::span<const Rule> rules, const IClock& clock) noexcept {
@@ -56,6 +67,7 @@ GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order
   out.stamp.ts = start;
   const GateFacts facts{
       .now = start,
+      .monotonic = clock_->monotonic(),
       .opening = is_opening(ctx, order),
       .instrument = ctx.instruments != nullptr ? ctx.instruments->find(order.instrument_id) : nullptr,
       .account = std::as_const(ctx).accounts.find(order.account_id)};
@@ -71,8 +83,12 @@ GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order
       continue;
     }
     const Outcome o = rule.eval(std::as_const(ctx), order, facts);  // pure: the check can't change ctx
-    const RuleResult result{
-        .code = rule.code, .verdict = o.verdict, .limit = o.limit, .current = o.current, .alert = o.alert};
+    const RuleResult result{.code = rule.code,
+                            .verdict = o.verdict,
+                            .limit = o.limit,
+                            .current = o.current,
+                            .alert = o.alert,
+                            .reason = o.reason};
     if (o.verdict == Verdict::kWarn) {
       out.warnings.at(out.warning_count++) = result;  // at most one per rule, so it always fits
     } else if (o.verdict != Verdict::kPass) {

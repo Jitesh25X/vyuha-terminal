@@ -199,6 +199,12 @@ Outcome instr_expired(const GateContext& /*ctx*/, const OrderDetails& /*o*/, con
 
 constexpr bool on_grid(Price p, Price tick) noexcept { return p > Price{} && p.units() % tick.units() == 0; }
 
+// A stop-limit's limit must be at or beyond its trigger, in the direction it trades.
+[[nodiscard]] bool limit_short_of_trigger(const OrderDetails& o) noexcept {
+  return o.price.has_value() && o.trigger_price.has_value() &&
+         (o.side == oms::Side::kBuy ? *o.price < *o.trigger_price : *o.price > *o.trigger_price);
+}
+
 Outcome order_shape(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
   const InstrumentRef* i = f.instrument;
   if (i == nullptr || i->lot_size <= 0 || i->tick_size <= Price{}) {
@@ -218,6 +224,9 @@ Outcome order_shape(const GateContext& ctx, const OrderDetails& o, const GateFac
   if (o.trigger_price.has_value() && !on_grid(*o.trigger_price, i->tick_size)) {
     return reject(i->tick_size.units(), o.trigger_price->units());
   }
+  if (limit_short_of_trigger(o)) {
+    return reject(o.trigger_price->units(), o.price->units());  // NOLINT(bugprone-unchecked-optional-access)
+  }
   if (o.order_type == OrderType::kMarket) {
     return judge(ctx.limits.resolve(LimitKey::kAllowMarketOrders, o, Tightest::kSmallest), 1,
                  [](std::int64_t allowed) noexcept { return allowed <= 0; });
@@ -227,6 +236,38 @@ Outcome order_shape(const GateContext& ctx, const OrderDetails& o, const GateFac
 
 // ---- rules 10 and 11: price and size ----
 
+// Within the fat-finger percent of the LTP: |value - ltp| * 100 * scale compared with ltp * pct.
+Outcome percent_of_ltp(const GateContext& ctx, const OrderDetails& o, const InstrumentRef& i, Price value,
+                       Price ltp) noexcept {
+  const LimitKey key = i.segment == Segment::kOpt ? LimitKey::kFatFingerPctOpt : LimitKey::kFatFingerPct;
+  const Wide deviation = Wide{std::llabs(value.units() - ltp.units())} * 100 * kLimitScale;
+  const Wide base = ltp.units();
+  return judge(ctx.limits.resolve(key, o, Tightest::kSmallest), saturate(deviation / base),
+               [deviation, base](std::int64_t pct) noexcept { return deviation > base * pct; });
+}
+
+// A stop with its trigger on the wrong side of the market fires at once, as a market order.
+Outcome stop_trigger(const GateContext& ctx, const OrderDetails& o, const InstrumentRef& i,
+                     Price ltp) noexcept {
+  if (!o.trigger_price.has_value()) {
+    return reject();
+  }
+  const Price trigger = *o.trigger_price;
+  if (o.side == oms::Side::kBuy ? trigger <= ltp : trigger >= ltp) {
+    Outcome wrong_side = reject(ltp.units(), trigger.units());
+    wrong_side.reason = RuleReason::kTriggerSide;
+    return wrong_side;
+  }
+  if (i.lower_circuit.has_value() && i.upper_circuit.has_value() &&
+      (trigger < *i.lower_circuit || trigger > *i.upper_circuit)) {
+    Outcome outside =
+        reject((trigger < *i.lower_circuit ? *i.lower_circuit : *i.upper_circuit).units(), trigger.units());
+    outside.reason = RuleReason::kTriggerBand;
+    return outside;
+  }
+  return percent_of_ltp(ctx, o, i, trigger, ltp);
+}
+
 Outcome fat_finger(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
   const InstrumentRef* known = f.instrument;
   const bool has_band =
@@ -234,7 +275,8 @@ Outcome fat_finger(const GateContext& ctx, const OrderDetails& o, const GateFact
   if (o.is_paper.live() && !has_band) {
     return reject();  // no live order of any type without a known band (D-22)
   }
-  if (!o.price.has_value()) {
+  const bool is_stop = o.order_type == OrderType::kSl || o.order_type == OrderType::kSlM;
+  if (!o.price.has_value() && !is_stop) {
     return {};
   }
   if (known == nullptr) {
@@ -245,6 +287,10 @@ Outcome fat_finger(const GateContext& ctx, const OrderDetails& o, const GateFact
     return reject();  // no LTP or a stale one (D-22)
   }
   const InstrumentRef& i = *known;
+  const Outcome trigger = is_stop ? stop_trigger(ctx, o, i, *ltp) : Outcome{};
+  if (trigger.verdict == Verdict::kReject || !o.price.has_value()) {
+    return trigger;
+  }
   if (has_band) {
     if (*o.price < *i.lower_circuit) {
       return reject(i.lower_circuit->units(), o.price->units());
@@ -253,12 +299,9 @@ Outcome fat_finger(const GateContext& ctx, const OrderDetails& o, const GateFact
       return reject(i.upper_circuit->units(), o.price->units());
     }
   }
-  const LimitKey key = i.segment == Segment::kOpt ? LimitKey::kFatFingerPctOpt : LimitKey::kFatFingerPct;
-  // Percent at limit scale: |price - ltp| * 100 * scale compared with ltp * pct.
-  const Wide deviation = Wide{std::llabs(o.price->units() - ltp->units())} * 100 * kLimitScale;
-  const Wide base = ltp->units();
-  return judge(ctx.limits.resolve(key, o, Tightest::kSmallest), saturate(deviation / base),
-               [deviation, base](std::int64_t pct) noexcept { return deviation > base * pct; });
+  const Outcome price = percent_of_ltp(ctx, o, i, *o.price, *ltp);
+  // A hard refusal wins over any warning; a stop whose price passes still reports its trigger's warning.
+  return price.verdict == Verdict::kPass && trigger.verdict == Verdict::kWarn ? trigger : price;
 }
 
 Outcome order_value(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
@@ -378,12 +421,12 @@ Outcome ops_check(const GateContext& ctx, const OrderDetails& o, const GateFacts
   }
   const std::uint8_t cap = effective_ops_cap(ctx, o.account_id);
   const oms::OpsWindow& window = f.account->ops[ops_venue(f.instrument->exchange)];
-  if (!window.has_token(f.now, cap)) {
+  if (!window.has_token(f.monotonic, cap)) {
     return reject(cap, cap);  // refused at once: the core thread can't wait (D-21)
   }
   const ResolvedLimit limit =
       ctx.limits.resolve_account(LimitKey::kOpsCap, o.account_id, Tightest::kSmallest);
-  if (limit.soft.has_value() && !window.has_token(f.now, soft_cap(*limit.soft))) {
+  if (limit.soft.has_value() && !window.has_token(f.monotonic, soft_cap(*limit.soft))) {
     return warn(*limit.soft / kLimitScale, 0);
   }
   return {};
@@ -392,7 +435,7 @@ Outcome ops_check(const GateContext& ctx, const OrderDetails& o, const GateFacts
 void ops_commit(GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
   AccountState* account = ctx.accounts.find(o.account_id);
   if (account != nullptr && f.instrument != nullptr) {  // check() required both
-    account->ops[ops_venue(f.instrument->exchange)].take(f.now);
+    account->ops[ops_venue(f.instrument->exchange)].take(f.monotonic);
   }
 }
 

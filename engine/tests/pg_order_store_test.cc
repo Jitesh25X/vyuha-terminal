@@ -33,6 +33,7 @@ using E = OrderEvent;
 class TickingClock final : public IClock {
  public:
   [[nodiscard]] Nanos now() const noexcept override { return 1'767'000'000'000'000'000; }
+  [[nodiscard]] Nanos monotonic() const noexcept override { return now(); }
 };
 
 struct Seeded {

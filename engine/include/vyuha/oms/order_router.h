@@ -209,7 +209,6 @@ class OrderRouter {
   void take_token(const OrderDetails& details, Nanos now) noexcept;
   [[nodiscard]] bool may_be_at_broker(OrderHandle handle) const noexcept;
   void drain_cancels(CancelAll& out) noexcept;
-  void clamp_future(const OrderDetails& details, Nanos now) noexcept;
 
   Oms* oms_;
   IOrderEventSink* sink_;

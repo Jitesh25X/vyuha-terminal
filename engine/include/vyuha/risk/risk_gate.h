@@ -61,6 +61,9 @@ enum class Verdict : std::uint8_t {
   kReject,  // a hard limit: the chain stops here
 };
 
+// Why a rule refused, when the rule's own code isn't specific enough. Only R-FAT-FINGER uses it.
+enum class RuleReason : std::uint8_t { kRule, kTriggerSide, kTriggerBand };
+
 // What a rule returns. limit and current are in the rule's own unit (price units, lots, a count); messages
 // are rendered later, off the core thread.
 struct Outcome {
@@ -68,6 +71,7 @@ struct Outcome {
   std::int64_t limit{0};
   std::int64_t current{0};
   bool alert{false};  // the desk must hear about this rejection (R-DUP's table being full)
+  RuleReason reason{RuleReason::kRule};
 };
 
 // An outcome with the code of the rule that gave it. The gate fills in the code, so a rule can't misreport.
@@ -77,15 +81,20 @@ struct RuleResult {
   std::int64_t limit{0};
   std::int64_t current{0};
   bool alert{false};
+  RuleReason reason{RuleReason::kRule};
 };
 
-// The order's reason code when it is refused. It's the rule's code, except when the rejection needs its own
-// alert.
+inline constexpr std::string_view kTriggerSideReason = "R-TRIGGER-SIDE";
+inline constexpr std::string_view kTriggerBandReason = "R-TRIGGER-BAND";
+
+// The order's reason code when it is refused. It's the rule's code, except for a rejection with a reason of
+// its own: R-DUP's full table, which needs an alert, and R-FAT-FINGER's stop triggers.
 [[nodiscard]] std::string_view reason_text(const RuleResult& result) noexcept;
 
 // Worked out once per evaluation. instrument and account are null when the context doesn't know them.
 struct GateFacts {
   Nanos now{0};
+  Nanos monotonic{0};  // for the OPS budget only (D-25): a wall-clock step must not release tokens
   bool opening{true};
   const InstrumentRef* instrument{nullptr};
   const AccountState* account{nullptr};

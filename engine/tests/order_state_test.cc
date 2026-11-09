@@ -90,6 +90,7 @@ std::vector<OrderEvent> all_events() {
 class FixedClock final : public IClock {
  public:
   [[nodiscard]] Nanos now() const noexcept override { return 1'000; }
+  [[nodiscard]] Nanos monotonic() const noexcept override { return 1'000; }
 };
 
 class RecordingSink final : public IOrderEventSink {

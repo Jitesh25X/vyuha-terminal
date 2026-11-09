@@ -36,6 +36,7 @@ using risk::Outcome;
 class FixedClock final : public IClock {
  public:
   [[nodiscard]] Nanos now() const noexcept override { return 1'000; }
+  [[nodiscard]] Nanos monotonic() const noexcept override { return 1'000; }
 };
 
 class LaggingSink final : public IOrderEventSink {
@@ -1291,7 +1292,7 @@ TEST(SendBudget, CancelAllEndsTheOrdersItDrops) {
   EXPECT_EQ(r.sink.events.back().reason_code.view(), kCancelledInQueue);
 }
 
-TEST(SendBudget, AClockThatSteppedBackHoldsCancelsUpForASecondAtMost) {
+TEST(SendBudget, AWallClockStepBackDoesNotHoldCancelsUp) {
   PacedRig r;
   for (int i = 0; i < 12; ++i) {
     r.clock.advance(kNanosPerSecond);
@@ -1299,7 +1300,7 @@ TEST(SendBudget, AClockThatSteppedBackHoldsCancelsUpForASecondAtMost) {
   }
   r.clock.advance(kNanosPerSecond);
   EXPECT_EQ(r.router.cancel_all().asked, 8U);
-  r.clock.set(1'000);  // an hour's step back looks the same: every stamp is now in the future
+  r.clock.set(1'000);  // an hour's step back: the budget doesn't read this clock
   r.router.poll();
   EXPECT_EQ(r.broker.cancels.size(), 8U);  // the cap still holds
   r.clock.advance(kNanosPerSecond);
@@ -1307,10 +1308,98 @@ TEST(SendBudget, AClockThatSteppedBackHoldsCancelsUpForASecondAtMost) {
   EXPECT_EQ(r.broker.cancels.size(), 12U);  // and it doesn't wait for the clock to catch up
 }
 
+TEST(SendBudget, ATenSecondForwardClockStepReleasesNoExtraCancels) {
+  PacedRig r;
+  for (int i = 0; i < 12; ++i) {
+    r.clock.advance(kNanosPerSecond);
+    (void)r.open_order(i);
+  }
+  r.clock.advance(kNanosPerSecond);
+  EXPECT_EQ(r.router.cancel_all().asked, 8U);
+  r.clock.step_wall(10 * kNanosPerSecond);
+  r.router.poll();
+  EXPECT_EQ(r.broker.cancels.size(), 8U);  // no time has really passed
+  r.clock.advance(kNanosPerSecond);
+  r.router.poll();
+  EXPECT_EQ(r.broker.cancels.size(), 12U);
+}
+
+TEST(SendBudget, AForwardClockStepReleasesNoExtraNewOrders) {
+  PacedRig r;
+  for (int i = 0; i < 12; ++i) {
+    r.queue(r.add(i));
+  }
+  r.mark_durable();
+  EXPECT_EQ(r.router.poll(), 8U);
+  r.clock.step_wall(kNanosPerSecond);  // inside the queue age limit, so only a token could hold these back
+  EXPECT_EQ(r.router.poll(), 0U);
+  r.clock.advance(kNanosPerSecond);
+  EXPECT_EQ(r.router.poll(), 4U);
+}
+
+TEST(SendBudget, ACancelSeesARefusalStillInTheSink) {
+  PacedRig r;
+  const OrderHandle h = r.add(0);
+  r.queue(h);
+  r.sink.refused.push_back(r.oms.order(h).details.id);
+  EXPECT_FALSE(r.router.cancel(h));
+  EXPECT_EQ(r.oms.order(h).status, OrderStatus::kRiskRejected);
+}
+
+TEST(SendBudget, CancelAllSeesARefusalStillInTheSink) {
+  PacedRig r;
+  const OrderHandle h = r.add(0);
+  r.queue(h);
+  r.sink.refused.push_back(r.oms.order(h).details.id);
+  (void)r.router.cancel_all();
+  EXPECT_EQ(r.oms.order(h).status, OrderStatus::kRiskRejected);
+}
+
+// The wall clock has stepped before these send, so a token stamped from it would look like the future.
+TEST(SendBudget, ASendIsStampedOnTheMonotonicClock) {
+  PacedRig r;
+  r.clock.step_wall(10 * kNanosPerSecond);
+  for (int i = 0; i < 9; ++i) {
+    r.queue(r.add(i));
+  }
+  r.mark_durable();
+  EXPECT_EQ(r.router.poll(), 8U);
+  r.clock.advance(kNanosPerSecond);
+  EXPECT_EQ(r.router.poll(), 1U);
+}
+
+TEST(SendBudget, ACancelIsStampedOnTheMonotonicClock) {
+  PacedRig r;
+  for (int i = 0; i < 12; ++i) {
+    r.clock.advance(kNanosPerSecond);
+    (void)r.open_order(i);
+  }
+  r.clock.advance(kNanosPerSecond);
+  r.clock.step_wall(10 * kNanosPerSecond);
+  EXPECT_EQ(r.router.cancel_all().asked, 8U);
+  r.clock.advance(kNanosPerSecond);
+  r.router.poll();
+  EXPECT_EQ(r.broker.cancels.size(), 12U);
+}
+
+TEST(SendBudget, ACancelOnAFullSinkStillDropsTheOrder) {
+  PacedRig r;
+  const OrderHandle h = r.add(0);
+  r.queue(h);
+  r.mark_durable();
+  r.sink.full = true;
+  EXPECT_TRUE(r.router.cancel(h));
+  EXPECT_EQ(r.oms.order(h).status, OrderStatus::kApproved);  // the expiry couldn't be recorded
+  EXPECT_EQ(r.router.poll(), 0U);
+  EXPECT_FALSE(r.router.cancel(h));  // it never reached the broker, so there's nothing to ask
+  EXPECT_TRUE(r.broker.cancels.empty());
+}
+
 // The clock moves between reads, as a real one does. A frozen clock hides a stamp that looks like the future.
 class AdvancingClock final : public IClock {
  public:
   [[nodiscard]] Nanos now() const noexcept override { return now_.fetch_add(1, std::memory_order_relaxed); }
+  [[nodiscard]] Nanos monotonic() const noexcept override { return now(); }
 
  private:
   mutable std::atomic<Nanos> now_{1'000};
@@ -1398,14 +1487,6 @@ TEST(OpsWindow, RefusesAZeroOrOverLimitCapAndAClockThatSteppedBack) {
   EXPECT_FALSE(w.has_token(1, kMaxOpsCap + 1));
   w.take(5'000);
   EXPECT_FALSE(w.has_token(4'000, 1));
-}
-
-TEST(OpsWindow, ClampingTreatsAFutureStampAsNowAndKeepsTheCap) {
-  OpsWindow w;
-  w.take(5'000);
-  w.clamp_future(4'000);
-  EXPECT_FALSE(w.has_token(4'000, 1));
-  EXPECT_TRUE(w.has_token(4'000 + kNanosPerSecond, 1));
 }
 
 TEST(OpsWindow, ALowerCapAppliesToOrdersAlreadyInTheWindow) {
