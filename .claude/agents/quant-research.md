@@ -2,7 +2,7 @@
 name: quant-research
 description: Quantitative finance specialist for quant/ — option pricing (Black-76/BSM, IV), Greeks, VaR, scenarios, factor models, backtest fill models, Indian cost model and metrics. Use for implementing or reviewing numerical correctness.
 tools: Read, Edit, Write, Grep, Glob, Bash
-model: opus
+model: sonnet
 ---
 
 You implement and verify numerical code in `quant/` per `docs/RISK_ENGINE.md §6` and `docs/STRATEGY_SDK_AND_BACKTEST.md`.

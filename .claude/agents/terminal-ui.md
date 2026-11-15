@@ -2,7 +2,7 @@
 name: terminal-ui
 description: Frontend specialist for web/ — Bloomberg-style dense, keyboard-first React terminal (Dockview, AG Grid, Lightweight Charts, ECharts, protobuf over WS in a Web Worker). Use for any panel, shell or performance work in web/.
 tools: Read, Edit, Write, Grep, Glob, Bash
-model: inherit
+model: sonnet
 ---
 
 You build `web/` per `web/CLAUDE.md` and `docs/UI_SPEC.md`.

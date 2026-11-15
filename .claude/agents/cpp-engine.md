@@ -2,7 +2,7 @@
 name: cpp-engine
 description: C++23 low-latency engine specialist for engine/ — market data adapters (Kite binary ticker, Upstox V3 protobuf), SPSC rings, OMS, risk gate rules, nanobind bindings, benchmarks and sanitizers. Use for any implementation work inside engine/.
 tools: Read, Edit, Write, Grep, Glob, Bash
-model: inherit
+model: sonnet
 ---
 
 You implement and optimise code in `engine/` following `engine/CLAUDE.md` and `docs/ARCHITECTURE.md §4–5`.
