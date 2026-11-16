@@ -10,88 +10,14 @@
 #include <gtest/gtest.h>
 
 #include "desk_fixture.h"
+#include "scope_desk.h"
 #include "vyuha/risk/scope_book.h"
 
 // NOLINTBEGIN(bugprone-unchecked-optional-access): every test does ASSERT_TRUE(has_value()) first
 namespace vyuha::risk {
 namespace {
 
-constexpr std::int64_t kFuture = 4;
-constexpr std::int64_t kOption2 = 5;
-constexpr std::int64_t kRupee = Price::kUnitsPerRupee;
-
-// The fixture desk with a scope book that holds positions and P&L, every limit loose, and an option and a
-// future on the equity.
-struct ScopeDesk : Desk {
-  std::unique_ptr<ScopeBook> owned_book;
-  ScopeBook& sb;
-  std::vector<Rule> all_rules;
-
-  ScopeDesk() : owned_book(std::make_unique<ScopeBook>(instruments, 512)), sb(*owned_book) {
-    ctx.scopes = &sb;
-    sb.set_positions_loaded(true);
-    sb.set_pnl_loaded(true);
-    InstrumentRef option = *instruments.find(kOption);
-    option.underlying_id = kEquity;
-    EXPECT_TRUE(instruments.put(kOption, option));
-    EXPECT_TRUE(instruments.put(kFuture, {.lot_size = 1,
-                                          .tick_size = Price::from_units(500),
-                                          .exchange = Exchange::kNfo,
-                                          .segment = Segment::kFut,
-                                          .underlying_id = kEquity}));
-    EXPECT_TRUE(instruments.put(kOption2, option));
-    tick(kFuture, rupees(100));
-    EXPECT_TRUE(sb.set_mark(kEquity, rupees(100)));
-    limit(LimitKey::kMaxOpenOrders, 50 * kFromScale);
-    limit(LimitKey::kMaxPositionLots, 1'000 * kFromScale);
-    limit(LimitKey::kMaxPositionNotional, rupees(1'000'000).units());
-    limit(LimitKey::kMaxGrossExposure, rupees(1'000'000).units());
-    limit(LimitKey::kMaxNetDeltaInr, rupees(1'000'000).units());
-    limit(LimitKey::kMaxNetVegaInr, rupees(1'000'000).units());
-    limit(LimitKey::kMaxDailyLoss, rupees(50'000).units());
-    limit(LimitKey::kMaxDrawdownFromPeak, rupees(75'000).units());
-    all_rules.assign(pre_trade_rules().begin(), pre_trade_rules().end());
-    all_rules.insert(all_rules.end(), scope_rules().begin(), scope_rules().end());
-  }
-
-  [[nodiscard]] GateDecision run_all(const OrderDetails& o) { return run(o, all_rules); }
-  [[nodiscard]] static Attribution who() { return {.account = kAccount, .trader = kUser}; }
-  void fill(oms::Side side, std::int64_t qty, Price price, std::int64_t instrument = kEquity,
-            const Attribution& by = who()) {
-    ASSERT_TRUE(
-        sb.apply_fill({.who = by, .instrument_id = instrument, .side = side, .qty = qty, .price = price}));
-  }
-  [[nodiscard]] OrderDetails sell(std::int32_t qty) const {
-    OrderDetails o = order();
-    o.side = Side::kSell;
-    o.qty = qty;
-    return o;
-  }
-  [[nodiscard]] OrderDetails buy(std::int32_t qty) const {
-    OrderDetails o = order();
-    o.qty = qty;
-    return o;
-  }
-  // An option order with fresh Greeks for the option: delta 50 and vega 2 rupees per unit.
-  void fresh_greeks() {
-    ASSERT_TRUE(
-        sb.set_greeks(kOption, {.delta = 50 * kRupee, .vega = 2 * kRupee, .as_of = clock.monotonic()}));
-  }
-  [[nodiscard]] OrderDetails option_order(Side side, std::int32_t qty, bool live) const {
-    OrderDetails o = live ? live_order() : order();
-    o.instrument_id = kOption;
-    o.side = side;
-    o.qty = qty;
-    o.price = rupees(100);
-    return o;
-  }
-};
-
-[[nodiscard]] bool names(const Outcome& out, DataSource source) {
-  return out.verdict == Verdict::kReject && out.reason == RuleReason::kDataMissing && out.source == source;
-}
-
-TEST(ScopeRules, TheTableIsRules14To17And19And20InOrderAndLeavesTheGateIncomplete) {
+TEST(ScopeRules, TheTableIsRules14To17And19And20InOrder) {
   const auto rules = scope_rules();
   ASSERT_EQ(rules.size(), 6U);
   std::vector<RuleCode> codes;
@@ -103,8 +29,8 @@ TEST(ScopeRules, TheTableIsRules14To17And19And20InOrderAndLeavesTheGateIncomplet
   EXPECT_EQ(codes, expected);
   ScopeDesk d;
   const SimClock clock{1};
-  EXPECT_TRUE(RiskGate::create(d.all_rules, clock).has_value());
-  EXPECT_FALSE(RiskGate::create(d.all_rules, clock).value().complete());  // 18, 21 and 22 come in M2.4b
+  EXPECT_FALSE(RiskGate::create(pre_trade_rules(), clock).value().complete());
+  EXPECT_TRUE(RiskGate::create(d.chain, clock).value().complete());  // 18, 21 and 22 are in M2.4b
 }
 
 // ---- R-OPEN-ORDERS ----
@@ -241,7 +167,7 @@ TEST(RPosition, NotionalIsPerUnderlyingAcrossItsFuturesAndShares) {
   d.limit(LimitKey::kMaxPositionNotional, rupees(2'000).units());
   d.fill(Side::kBuy, 10, rupees(100), kEquity);
   d.fill(Side::kBuy, 8, rupees(100), kFuture);
-  ASSERT_TRUE(d.sb.set_mark(kFuture, rupees(100)));
+  d.mark(kFuture, rupees(100));
   EXPECT_PASS(d, kPosition, d.buy(2));  // 1800 held and 200 more
   const Outcome out = d.check(RuleCode::kPosition, d.buy(3));
   EXPECT_EQ(out.verdict, Verdict::kReject);
@@ -359,6 +285,7 @@ TEST(RGreeks, NetDeltaIncludesTheOptionsHeld) {
   ScopeDesk d;
   d.fresh_greeks();
   d.fill(Side::kSell, 65, rupees(10), kOption);  // delta -3,250
+  d.mark(kOption, rupees(10));
   d.limit(LimitKey::kMaxNetDeltaInr, rupees(4'000).units());
   EXPECT_PASS(d, kGreeks, d.option_order(Side::kSell, 14, true));
   EXPECT_REJECT(d, kGreeks, d.option_order(Side::kSell, 16, true));
@@ -387,9 +314,11 @@ TEST(RGreeks, GreeksAreStaleAfterTheConfiguredAge) {
 TEST(RGreeks, AHeldOptionWithStaleGreeksBlocksALiveOptionOrderButNotAnEquityOne) {
   ScopeDesk d;
   d.fill(Side::kSell, 65, rupees(10), kOption);
+  d.mark(kOption, rupees(10));
   ASSERT_TRUE(
       d.sb.set_greeks(kOption, {.delta = 50 * kRupee, .vega = 2 * kRupee, .as_of = d.clock.monotonic()}));
   d.clock.advance(20 * kNanosPerSecond);  // past the 15 s default
+  d.restamp_marks();                      // the marks are young: it is the Greeks that are old
   ASSERT_TRUE(
       d.sb.set_greeks(kOption2, {.delta = 50 * kRupee, .vega = 2 * kRupee, .as_of = d.clock.monotonic()}));
   OrderDetails second = d.option_order(Side::kSell, 65, true);
@@ -404,9 +333,11 @@ TEST(RGreeks, AHeldOptionWithStaleGreeksBlocksALiveOptionOrderButNotAnEquityOne)
 TEST(RGreeks, HeldGreeksThatPredateAPauseBlockALiveOptionOrder) {
   ScopeDesk d;
   d.fill(Side::kSell, 65, rupees(10), kOption);
+  d.mark(kOption, rupees(10));
   d.fresh_greeks();
   d.ctx.stale_before = d.clock.monotonic();
   d.clock.advance(1);
+  d.restamp_marks();
   ASSERT_TRUE(d.sb.set_greeks(kOption2, {.delta = kRupee, .vega = kRupee, .as_of = d.clock.monotonic()}));
   OrderDetails second = d.option_order(Side::kSell, 65, true);
   second.instrument_id = kOption2;
@@ -418,9 +349,11 @@ TEST(RGreeks, OffsettingAccountsDontHideAStaleHeldOption) {
   ScopeDesk d;
   d.fill(Side::kBuy, 65, rupees(10), kOption);
   d.fill(Side::kSell, 65, rupees(10), kOption, {.account = kOtherAccount});
+  d.mark(kOption, rupees(10));
   ASSERT_TRUE(
       d.sb.set_greeks(kOption, {.delta = 50 * kRupee, .vega = 2 * kRupee, .as_of = d.clock.monotonic()}));
   d.clock.advance(600 * kNanosPerSecond);
+  d.restamp_marks();
   ASSERT_TRUE(
       d.sb.set_greeks(kOption2, {.delta = 50 * kRupee, .vega = 2 * kRupee, .as_of = d.clock.monotonic()}));
   OrderDetails second = d.option_order(Side::kSell, 65, true);
@@ -452,7 +385,7 @@ TEST(RGreeks, APaperOptionOrderSkipsGreeksAndCountsNothingForThem) {
 
 TEST(RGreeks, AnOptionHeldWithoutGreeksMakesTheAggregatesUntrustworthyForLiveOrders) {
   ScopeDesk d;
-  ASSERT_TRUE(d.sb.set_mark(kOption, rupees(10)));
+  d.mark(kOption, rupees(10));
   d.fill(Side::kSell, 65, rupees(10), kOption);  // no Greeks have arrived for it
   EXPECT_TRUE(names(d.check(RuleCode::kGreeks, d.live_order()), DataSource::kGreeks));
   EXPECT_TRUE(names(d.check(RuleCode::kExposure, d.live_order()), DataSource::kGreeks));
@@ -470,9 +403,9 @@ TEST(RLossDaily, ALossThatHasReachedTheLimitBlocksAndOneUnderItDoesNot) {
   d.clear_limits(LimitKey::kMaxDailyLoss);
   d.limit(LimitKey::kMaxDailyLoss, rupees(100).units());
   d.fill(Side::kBuy, 10, rupees(100));
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(91)));  // -90
+  d.mark(kEquity, rupees(91));  // -90
   EXPECT_PASS(d, kLossDaily, d.order());
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(90)));  // -100: reached
+  d.mark(kEquity, rupees(90));  // -100: reached
   const Outcome out = d.check(RuleCode::kLossDaily, d.order());
   EXPECT_EQ(out.verdict, Verdict::kReject);
   EXPECT_EQ(out.limit, rupees(100).units());
@@ -489,7 +422,7 @@ TEST(RLossDaily, PnlIsRealisedPlusMarkToMarketMinusCosts) {
                                .qty = 10,
                                .price = rupees(100),
                                .cost = rupees(60).units()}));
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(100)));
+  d.mark(kEquity, rupees(100));
   EXPECT_PASS(d, kLossDaily, d.order());  // -60 of costs
   d.fill(Side::kSell, 10, rupees(96));    // -40 realised: -100 in all
   EXPECT_REJECT(d, kLossDaily, d.order());
@@ -501,7 +434,7 @@ TEST(RLossDaily, AProfitAndAnEmptyBookPass) {
   d.limit(LimitKey::kMaxDailyLoss, rupees(100).units());
   EXPECT_PASS(d, kLossDaily, d.order());
   d.fill(Side::kBuy, 10, rupees(100));
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(150)));
+  d.mark(kEquity, rupees(150));
   EXPECT_PASS(d, kLossDaily, d.order());
 }
 
@@ -509,8 +442,8 @@ TEST(RLossDaily, EachScopeIsJudgedOnItsOwnLoss) {
   ScopeDesk d;
   d.limit(LimitKey::kMaxDailyLoss, rupees(100).units(), LimitScope::kTrader, true, kUser);
   d.fill(Side::kBuy, 10, rupees(100), kEquity, {.account = kOtherAccount, .trader = id_of(7)});
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(80)));  // another trader loses 200 on it
-  EXPECT_PASS(d, kLossDaily, d.order());            // this trader has none
+  d.mark(kEquity, rupees(80));            // another trader loses 200 on it
+  EXPECT_PASS(d, kLossDaily, d.order());  // this trader has none
   d.fill(Side::kBuy, 10, rupees(100));
   EXPECT_REJECT(d, kLossDaily, d.order());
 }
@@ -521,10 +454,10 @@ TEST(RDrawdown, ThePeakMinusNowAtTheLimitBlocks) {
   d.clear_limits(LimitKey::kMaxDrawdownFromPeak);
   d.limit(LimitKey::kMaxDrawdownFromPeak, rupees(50).units());
   d.fill(Side::kBuy, 10, rupees(100));
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(110)));  // peak +100
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(106)));  // down 40
+  d.mark(kEquity, rupees(110));  // peak +100
+  d.mark(kEquity, rupees(106));  // down 40
   EXPECT_PASS(d, kDrawdown, d.order());
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(105)));  // down 50
+  d.mark(kEquity, rupees(105));  // down 50
   const Outcome out = d.check(RuleCode::kDrawdown, d.order());
   EXPECT_EQ(out.verdict, Verdict::kReject);
   EXPECT_EQ(out.current, rupees(50).units());
@@ -536,10 +469,10 @@ TEST(RLossDaily, YesterdaysProfitDoesNotHideTodaysLoss) {
   d.clear_limits(LimitKey::kMaxDailyLoss);
   d.limit(LimitKey::kMaxDailyLoss, rupees(100).units());
   d.fill(Side::kBuy, 10, rupees(100));
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(200)));  // +1,000 carried in
+  d.mark(kEquity, rupees(200));  // +1,000 carried in
   d.sb.begin_session();
   EXPECT_PASS(d, kLossDaily, d.order());
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(190)));  // -100 today, +900 in all
+  d.mark(kEquity, rupees(190));  // -100 today, +900 in all
   EXPECT_REJECT(d, kLossDaily, d.order());
 }
 
@@ -548,11 +481,11 @@ TEST(RLossDaily, AGainBeforeTheSessionDoesntCountAgainstTheDrawdownEither) {
   d.clear_limits(LimitKey::kMaxDrawdownFromPeak);
   d.limit(LimitKey::kMaxDrawdownFromPeak, rupees(50).units());
   d.fill(Side::kBuy, 10, rupees(100));
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(200)));
+  d.mark(kEquity, rupees(200));
   d.sb.begin_session();
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(197)));  // down 30 from today's peak of nothing
+  d.mark(kEquity, rupees(197));  // down 30 from today's peak of nothing
   EXPECT_PASS(d, kDrawdown, d.order());
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(195)));  // down 50
+  d.mark(kEquity, rupees(195));  // down 50
   EXPECT_REJECT(d, kDrawdown, d.order());
 }
 
@@ -561,8 +494,8 @@ TEST(RDrawdown, ANewDayStartsFromTheCurrentPnl) {
   d.clear_limits(LimitKey::kMaxDrawdownFromPeak);
   d.limit(LimitKey::kMaxDrawdownFromPeak, rupees(50).units());
   d.fill(Side::kBuy, 10, rupees(100));
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(110)));
-  ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(100)));
+  d.mark(kEquity, rupees(110));
+  d.mark(kEquity, rupees(100));
   EXPECT_REJECT(d, kDrawdown, d.order());  // down 100 from the peak
   d.sb.begin_session();
   EXPECT_PASS(d, kDrawdown, d.order());
@@ -603,7 +536,7 @@ TEST(DataMissing, PnlNotLoadedOrAPositionWithNoMarkNamesThePnlForPaperAndLive) {
   EXPECT_PASS(d, kLossDaily, d.order());
   d.fill(Side::kBuy, 5, rupees(100), kFuture);  // no mark for the future
   EXPECT_TRUE(names(d.check(RuleCode::kLossDaily, d.order()), DataSource::kPnl));
-  ASSERT_TRUE(d.sb.set_mark(kFuture, rupees(100)));
+  d.mark(kFuture, rupees(100));
   EXPECT_PASS(d, kLossDaily, d.order());
 }
 
@@ -633,6 +566,7 @@ TEST(DataMissing, ALiveOpeningOrderIsRefusedNamingTheSourceAndAReducingOrderStil
   {
     ScopeDesk d;  // Greeks
     d.fill(Side::kBuy, 130, rupees(10), kOption);
+    d.mark(kOption, rupees(10));
     EXPECT_TRUE(names(d.check(RuleCode::kGreeks, d.option_order(Side::kBuy, 65, true)), DataSource::kGreeks));
     EXPECT_TRUE(d.run_all(d.option_order(Side::kSell, 65, false)).approved.has_value());  // reducing, paper
   }
@@ -641,11 +575,12 @@ TEST(DataMissing, ALiveOpeningOrderIsRefusedNamingTheSourceAndAReducingOrderStil
 TEST(DataMissing, TheReasonTextNamesTheSource) {
   RuleResult result{
       .code = RuleCode::kGreeks, .verdict = Verdict::kReject, .reason = RuleReason::kDataMissing};
-  const std::array<std::pair<DataSource, std::string_view>, 5> names_of{{
+  const std::array<std::pair<DataSource, std::string_view>, 6> names_of{{
       {DataSource::kPositions, "R-DATA-MISSING:positions"},
       {DataSource::kPnl, "R-DATA-MISSING:pnl"},
       {DataSource::kMargin, "R-DATA-MISSING:margin"},
       {DataSource::kGreeks, "R-DATA-MISSING:greeks"},
+      {DataSource::kMark, "R-DATA-MISSING:mark"},
       {DataSource::kNone, "R-DATA-MISSING"},
   }};
   for (const auto& [source, text] : names_of) {
@@ -741,6 +676,210 @@ TEST(Opening, ARejectedOrderLeavesNoWorkingState) {
   Opening d;
   EXPECT_TRUE(d.opening(d.buy(1)));
   EXPECT_EQ(d.sb.position(LimitScope::kAccount, kAccount, kEquity), nullptr);  // the gate only reads the book
+}
+
+// ---- marks have an age (owner, 2026-11-15) ----
+
+// The five rules that read marks, each on its own.
+constexpr std::array<RuleCode, 5> kMarkRules{RuleCode::kPosition, RuleCode::kExposure, RuleCode::kGreeks,
+                                             RuleCode::kLossDaily, RuleCode::kDrawdown};
+
+TEST(MarkAge, ALiveOpeningOrderIsRefusedWhenAHeldMarkIsOverThreeSecondsOldAndPassesAtExactlyThree) {
+  for (const RuleCode code : kMarkRules) {
+    ScopeDesk d;
+    d.fill(Side::kBuy, 10, rupees(100));  // held; its mark arrived now
+    d.clock.advance(3 * kNanosPerSecond);
+    EXPECT_FALSE(names(d.check(code, d.live_order()), DataSource::kMark))
+        << static_cast<int>(code);  // at 3 s
+    EXPECT_EQ(d.verdict(code, d.live_order()), Verdict::kPass) << static_cast<int>(code);
+    d.clock.advance(1);
+    const Outcome out = d.check(code, d.live_order());
+    EXPECT_TRUE(names(out, DataSource::kMark)) << static_cast<int>(code);  // 3 s and 1 ns
+    d.restamp_marks();
+    EXPECT_EQ(d.verdict(code, d.live_order()), Verdict::kPass) << static_cast<int>(code);
+  }
+}
+
+TEST(MarkAge, TheMaximumAgeIsTheLtpsThreeSeconds) {
+  EXPECT_EQ(kMarkMaxAge, kLtpMaxAge);
+  EXPECT_EQ(kMarkMaxAge, 3 * kNanosPerSecond);
+}
+
+TEST(MarkAge, AMarkFromBeforeAPauseIsStaleHoweverYoungItLooks) {
+  for (const RuleCode code : kMarkRules) {
+    ScopeDesk d;
+    d.fill(Side::kBuy, 10, rupees(100));
+    d.ctx.stale_before = d.clock.monotonic();  // the mark arrived at the pause: not after it
+    EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kMark)) << static_cast<int>(code);
+    d.clock.advance(1);
+    d.restamp_marks();
+    EXPECT_EQ(d.verdict(code, d.live_order()), Verdict::kPass) << static_cast<int>(code);
+  }
+}
+
+TEST(MarkAge, AMarkStampedInTheFutureIsStale) {
+  for (const RuleCode code : kMarkRules) {
+    ScopeDesk d;
+    d.fill(Side::kBuy, 10, rupees(100));
+    ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(100), d.clock.monotonic() + 1));
+    EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kMark)) << static_cast<int>(code);
+  }
+}
+
+TEST(MarkAge, APaperOrderGoesOnTheMarksThereAre) {
+  for (const RuleCode code : kMarkRules) {
+    ScopeDesk d;
+    d.fill(Side::kBuy, 10, rupees(100));
+    d.clock.advance(60 * kNanosPerSecond);
+    EXPECT_EQ(d.verdict(code, d.order()), Verdict::kPass) << static_cast<int>(code);
+    d.ctx.stale_before = d.clock.monotonic();
+    EXPECT_EQ(d.verdict(code, d.order()), Verdict::kPass) << static_cast<int>(code);
+  }
+}
+
+TEST(MarkAge, WithNothingHeldNoMarkIsNeeded) {
+  for (const RuleCode code : kMarkRules) {
+    ScopeDesk d;
+    d.clock.advance(600 * kNanosPerSecond);  // the one mark there is, for the equity, is ten minutes old
+    EXPECT_EQ(d.verdict(code, d.live_order()), Verdict::kPass) << static_cast<int>(code);
+  }
+}
+
+TEST(MarkAge, AStaleMarkOnAPositionHeldOnlyByAnotherAccountStillBlocks) {
+  for (const RuleCode code : kMarkRules) {
+    ScopeDesk d;
+    d.fill(Side::kBuy, 5, rupees(100), kFuture, {.account = kOtherAccount});
+    d.mark(kFuture, rupees(100));
+    d.clock.advance(4 * kNanosPerSecond);
+    ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(100), d.clock.monotonic()));  // this order's own mark is fresh
+    EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kMark)) << static_cast<int>(code);
+  }
+}
+
+TEST(MarkAge, AnInstrumentThatWentFlatInEveryScopeNoLongerCounts) {
+  for (const RuleCode code : kMarkRules) {
+    ScopeDesk d;
+    d.fill(Side::kBuy, 5, rupees(100), kFuture);
+    d.fill(Side::kBuy, 5, rupees(100), kFuture, {.account = kOtherAccount});
+    d.mark(kFuture, rupees(100));
+    d.clock.advance(4 * kNanosPerSecond);
+    ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(100), d.clock.monotonic()));
+    EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kMark)) << static_cast<int>(code);
+    d.fill(Side::kSell, 5, rupees(100), kFuture);
+    EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kMark))
+        << static_cast<int>(code);  // the other holds
+    d.fill(Side::kSell, 5, rupees(100), kFuture, {.account = kOtherAccount});
+    EXPECT_EQ(d.verdict(code, d.live_order()), Verdict::kPass) << static_cast<int>(code);
+  }
+}
+
+TEST(MarkAge, AHeldPositionWithNoMarkAtAllIsRefusedByRules15To17AsMissingAndByRules19And20AsMissingPnl) {
+  for (const RuleCode code : {RuleCode::kPosition, RuleCode::kExposure, RuleCode::kGreeks}) {
+    ScopeDesk d;
+    d.fill(Side::kBuy, 5, rupees(100), kFuture);  // nothing has marked the future
+    EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kMark)) << static_cast<int>(code);
+  }
+  for (const RuleCode code : {RuleCode::kLossDaily, RuleCode::kDrawdown}) {
+    ScopeDesk d;
+    d.fill(Side::kBuy, 5, rupees(100), kFuture);
+    EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kPnl))
+        << static_cast<int>(code);  // as built
+    EXPECT_TRUE(names(d.check(code, d.order()), DataSource::kPnl)) << static_cast<int>(code);
+  }
+}
+
+TEST(MarkAge, NotLoadedPositionsAndPnlAreNamedBeforeAStaleMark) {
+  for (const RuleCode code : {RuleCode::kPosition, RuleCode::kExposure, RuleCode::kGreeks}) {
+    ScopeDesk d;
+    d.fill(Side::kBuy, 10, rupees(100));
+    d.clock.advance(10 * kNanosPerSecond);
+    d.sb.set_positions_loaded(false);
+    EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kPositions)) << static_cast<int>(code);
+  }
+  for (const RuleCode code : {RuleCode::kLossDaily, RuleCode::kDrawdown}) {
+    ScopeDesk d;
+    d.fill(Side::kBuy, 10, rupees(100));
+    d.clock.advance(10 * kNanosPerSecond);
+    d.sb.set_pnl_loaded(false);
+    EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kPnl)) << static_cast<int>(code);
+  }
+}
+
+TEST(MarkAge, RulesThatDontReadMarksAreNotRefusedForOne) {
+  ScopeDesk d;
+  d.fill(Side::kBuy, 10, rupees(100));
+  d.clock.advance(10 * kNanosPerSecond);
+  EXPECT_PASS(d, kOpenOrders, d.live_order());
+  EXPECT_PASS(d, kShortOpt, d.live_order());
+  EXPECT_PASS(d, kDiscipline, d.live_order());
+}
+
+TEST(MarkAge, TheReasonTextIsRDataMissingMark) {
+  ScopeDesk d;
+  d.fill(Side::kBuy, 10, rupees(100));
+  d.clock.advance(4 * kNanosPerSecond);
+  d.tick(kEquity, rupees(100), d.clock.monotonic());
+  d.refresh_margin();
+  const GateDecision refused = d.run_all(d.live_order());
+  ASSERT_TRUE(refused.rejection.has_value());
+  EXPECT_EQ(refused.rejection->code, RuleCode::kPosition);
+  EXPECT_EQ(refused.rejection->reason, RuleReason::kDataMissing);
+  EXPECT_EQ(refused.rejection->source, DataSource::kMark);
+  EXPECT_EQ(reason_text(refused.rejection.value()), "R-DATA-MISSING:mark");
+}
+
+// Only an opening order reaches rules 14 to 22, so a reducing one needs no mark, and may be the way out.
+TEST(MarkAge, AReducingLiveOrderPassesTheWholeChainWithStaleMarks) {
+  ScopeDesk d;
+  d.fill(Side::kBuy, 10, rupees(100));
+  d.clock.advance(60 * kNanosPerSecond);
+  d.tick(kEquity, rupees(100), d.clock.monotonic());
+  d.refresh_margin();
+  OrderDetails closing = d.live_order();
+  closing.side = Side::kSell;
+  closing.qty = 4;
+  const GateDecision out = d.run_all(closing);
+  EXPECT_TRUE(out.approved.has_value());
+  OrderDetails opening = d.live_order();
+  opening.qty = 1;
+  const GateDecision refused = d.run_all(opening);  // while an opening one is refused for the same marks
+  ASSERT_TRUE(refused.rejection.has_value());
+  EXPECT_EQ(reason_text(refused.rejection.value()), "R-DATA-MISSING:mark");
+}
+
+// ---- Greeks of held options, by the kind of order (D-28; owner, 2026-11-15) ----
+
+TEST(GreeksByOrder, AShareOrAFutureOrderIsNotRefusedForStaleGreeksOfHeldOptions) {
+  ScopeDesk d;
+  d.fill(Side::kSell, 65, rupees(10), kOption);
+  d.mark(kOption, rupees(10));
+  d.fresh_greeks();
+  d.clock.advance(20 * kNanosPerSecond);  // past the 15 s default
+  d.restamp_marks();
+  OrderDetails future = d.live_order();
+  future.instrument_id = kFuture;
+  future.qty = 5;
+  for (const RuleCode code : {RuleCode::kPosition, RuleCode::kExposure, RuleCode::kGreeks}) {
+    EXPECT_EQ(d.verdict(code, d.live_order()), Verdict::kPass) << static_cast<int>(code);
+    EXPECT_EQ(d.verdict(code, future), Verdict::kPass) << static_cast<int>(code);
+    // while an option order is
+    EXPECT_TRUE(names(d.check(code, d.option_order(Side::kSell, 65, true)), DataSource::kGreeks))
+        << static_cast<int>(code);
+  }
+}
+
+TEST(GreeksByOrder, AnyLiveOrderIsRefusedWhileAHeldOptionHasNoGreeksAtAll) {
+  ScopeDesk d;
+  d.fill(Side::kSell, 65, rupees(10), kOption);
+  d.mark(kOption, rupees(10));  // a mark, but no Greeks have ever arrived
+  OrderDetails future = d.live_order();
+  future.instrument_id = kFuture;
+  future.qty = 5;
+  for (const RuleCode code : {RuleCode::kPosition, RuleCode::kExposure, RuleCode::kGreeks}) {
+    EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kGreeks)) << static_cast<int>(code);
+    EXPECT_TRUE(names(d.check(code, future), DataSource::kGreeks)) << static_cast<int>(code);
+    EXPECT_EQ(d.verdict(code, d.order()), Verdict::kPass) << static_cast<int>(code);  // paper skips Greeks
+  }
 }
 
 // ---- RISKS_GREEKS_MAX_AGE_MS ----

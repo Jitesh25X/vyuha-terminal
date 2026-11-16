@@ -1,12 +1,15 @@
-// Rules 14 to 17, 19 and 20 of RISK_ENGINE §3 (M2.4a): the ones judged against a scope's own totals. 18, 21
-// and 22 come in M2.4b. Each limit row is measured at its own scope: the desk's against the desk, an
-// account's against that account, and so on.
+// Rules 14 to 22 of RISK_ENGINE §3 (M2.4a and M2.4b). 14 to 17, 19 and 20 are judged against a scope's own
+// totals: each limit row is measured at its own scope, the desk's against the desk, an account's against
+// that account, and so on. 18, 21 and 22 are short options, margin and discipline.
 
 #include <expected>
 #include <optional>
 #include <span>
 
 #include "rule_support.h"
+#include "vyuha/md/session.h"
+#include "vyuha/risk/discipline_table.h"
+#include "vyuha/risk/margin_cache.h"
 #include "vyuha/risk/rules.h"
 #include "vyuha/risk/scope_book.h"
 #include "vyuha/risk/wide.h"
@@ -102,6 +105,13 @@ template <class Measure>
   return buy ? added : -added;
 }
 
+// A mark older than an LTP may be (3 s), or from before a pause, is no price to measure exposure or a loss
+// with: a live order is refused R-DATA-MISSING:mark while any position held has one (owner, 2026-11-15).
+// Only opening orders get here, so a reducing order still passes. A paper order goes on the marks there are.
+[[nodiscard]] bool marks_missing(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
+  return o.is_paper.live() && !ctx.scopes->held_marks_fresh(f.monotonic, kMarkMaxAge, ctx.stale_before);
+}
+
 [[nodiscard]] bool greeks_fresh(const GateContext& ctx, const Greeks& g, Nanos monotonic) noexcept {
   const Nanos age = monotonic - g.as_of;
   return ctx.fresh(g.as_of) && age >= 0 && age <= ctx.greeks_max_age;
@@ -109,6 +119,21 @@ template <class Measure>
 
 // What one unit of the order's instrument counts for, in money units. A live order that needs Greeks it
 // doesn't have is refused in `missing`; a paper order skips Greeks (D-27) and counts nothing for them.
+// The order valued at the worst of its price, its trigger and the LTP, as order_value does for a stop-market.
+[[nodiscard]] std::optional<Price> worst_price(const GateContext& ctx, const OrderDetails& o,
+                                               const GateFacts& f) noexcept {
+  std::optional<Price> unit;
+  const auto raise = [&unit](const std::optional<Price>& candidate) noexcept {
+    if (candidate.has_value() && (!unit.has_value() || *candidate > *unit)) {
+      unit = candidate;
+    }
+  };
+  raise(o.price);
+  raise(o.trigger_price);
+  raise(fresh_ltp(ctx, o.instrument_id, f.monotonic));
+  return unit;
+}
+
 struct OrderUnits {
   Wide notional{0};
   Wide delta{0};
@@ -121,8 +146,14 @@ struct OrderUnits {
                                   const GateFacts& f) noexcept {
   OrderUnits u;
   const bool option = f.instrument != nullptr && f.instrument->segment == Segment::kOpt;
+  if (marks_missing(ctx, o, f)) {
+    u.missing = DataSource::kMark;
+    return u;
+  }
   // The aggregates leave out an option held with no Greeks at all, so for a live order of any kind they can't
-  // be trusted while one exists.
+  // be trusted while one exists (D-28; owner, 2026-11-15). Stale Greeks are another matter: only an option
+  // order needs them fresh. A share or a future has delta 1 and no vega by definition, so its order reads no
+  // Greeks.
   if (o.is_paper.live() && ctx.scopes->options_without_greeks() > 0) {
     u.missing = DataSource::kGreeks;
   }
@@ -143,16 +174,7 @@ struct OrderUnits {
     u.priced = true;
     return u;
   }
-  // Valued at the worst of its price, its trigger and the LTP, as order_value does for a stop-market.
-  std::optional<Price> unit;
-  const auto raise = [&unit](const std::optional<Price>& candidate) noexcept {
-    if (candidate.has_value() && (!unit.has_value() || *candidate > *unit)) {
-      unit = candidate;
-    }
-  };
-  raise(o.price);
-  raise(o.trigger_price);
-  raise(fresh_ltp(ctx, o.instrument_id, f.monotonic));
+  const std::optional<Price> unit = worst_price(ctx, o, f);
   if (unit.has_value()) {
     u.priced = true;
     u.notional = unit->units();
@@ -275,9 +297,12 @@ Outcome greeks(const GateContext& ctx, const OrderDetails& o, const GateFacts& f
 
 // D-30: the P&L as it stands, not including this order, which has none until it fills. A loss that has
 // reached the limit blocks opening orders.
-Outcome loss_daily(const GateContext& ctx, const OrderDetails& o, const GateFacts& /*f*/) noexcept {
+Outcome loss_daily(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
   if (!pnl_ready(ctx)) {
     return data_missing(DataSource::kPnl);
+  }
+  if (marks_missing(ctx, o, f)) {
+    return data_missing(DataSource::kMark);
   }
   return judge_rows(ctx, o, LimitKey::kMaxDailyLoss, false,
                     [&ctx](const LimitRow& row, const Measured& at) noexcept {
@@ -287,9 +312,12 @@ Outcome loss_daily(const GateContext& ctx, const OrderDetails& o, const GateFact
                     });
 }
 
-Outcome drawdown(const GateContext& ctx, const OrderDetails& o, const GateFacts& /*f*/) noexcept {
+Outcome drawdown(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
   if (!pnl_ready(ctx)) {
     return data_missing(DataSource::kPnl);
+  }
+  if (marks_missing(ctx, o, f)) {
+    return data_missing(DataSource::kMark);
   }
   return judge_rows(ctx, o, LimitKey::kMaxDrawdownFromPeak, false,
                     [&ctx](const LimitRow& row, const Measured& at) noexcept {
@@ -298,6 +326,223 @@ Outcome drawdown(const GateContext& ctx, const OrderDetails& o, const GateFacts&
                       return Breach{.current = down, .over = down >= row.value};
                     });
 }
+
+// ---- rule 18: short options (D-31) ----
+
+// The bool limit: allowed only if some hard row at the order's scopes says 1 and none says 0 (the strictest
+// wins). No row at all means not allowed, the default.
+[[nodiscard]] bool naked_allowed(const GateContext& ctx, const OrderDetails& o) noexcept {
+  const ResolvedLimit limit = ctx.limits.resolve(LimitKey::kNakedShortOptions, o, Tightest::kSmallest);
+  return limit.hard.has_value() && *limit.hard >= kLimitScale;
+}
+
+// An opening sell of an option against the lots limit: held shorts, working sells and this order.
+Outcome short_lots_limit(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
+  const Wide lot = f.instrument->lot_size;
+  if (lot <= 0) {
+    return reject();
+  }
+  const Wide order_lots = (Wide{o.qty} * kLimitScale) / lot;
+  return judge_rows(ctx, o, LimitKey::kMaxShortOptionLots, false,
+                    [&](const LimitRow& row, const Measured& at) noexcept {
+                      const ScopeAgg* agg = ctx.scopes->agg(at.kind, at.id);
+                      const Wide held = agg != nullptr ? agg->short_lots + agg->working_short_lots : Wide{0};
+                      const Wide projected = held + order_lots;  // working sells count against the limit
+                      return Breach{.current = projected, .over = projected > row.value};
+                    });
+}
+
+// An order that could take cover from a short: refused if it would leave more short units bare than there
+// were.
+Outcome uncover_check(const GateContext& ctx, const OrderDetails& o) noexcept {
+  const ScopeBook::Uncover left = ctx.scopes->uncover(o.account_id, o.instrument_id, o.side, o.qty);
+  if (!left.uncovers) {
+    return {};
+  }
+  Outcome out = reject(saturate(left.have), saturate(left.need));
+  out.reason = RuleReason::kUncover;
+  return out;
+}
+
+// Cover is compared in units of the underlying, not lots, so it holds whatever the contracts' lot sizes are,
+// a revised lot size included (D-39 (11)).
+Outcome cover_check(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
+  const Wide order_units = o.qty;
+  const std::int64_t underlying = f.instrument->underlying_id;
+  const OptionKind kind = f.instrument->option_kind;
+  const auto no_cover = [](Wide have, Wide need) noexcept {
+    Outcome out = reject(saturate(have), saturate(need));
+    out.reason = RuleReason::kNoCover;
+    return out;
+  };
+  if (underlying == 0 || kind == OptionKind::kNone) {
+    return no_cover(0, order_units);  // can't tell what would cover it
+  }
+  const ScopeBook::CoverView view =
+      ctx.scopes->cover_view(o.account_id, underlying, kind, f.instrument->expires_at);
+  if (view.overflowed) {
+    return no_cover(0, order_units);
+  }
+  const Wide need = view.short_units + order_units;
+  // Futures cover shorts unit for unit, and not twice: shorts of other expiries that their own longs don't
+  // cover take them first, whichever of them the futures could really serve. An order that sells through a
+  // long of its own (a flip) is counted the same way: the long it uses up is in `have`, and the whole order
+  // is in `need`.
+  const Wide pool = view.future_units - view.others_uncovered;
+  const Wide have = view.long_units + (pool > 0 ? pool : Wide{0});
+  return need > have ? no_cover(have, need) : Outcome{};
+}
+
+// The rule runs for every order, not only opening ones (D-39 (10)): an order that takes cover away from a
+// short is judged as an opening one would be, though it reduces a position. Three cases. An opening sell of
+// an option must fit the lots limit and have cover. Any other order that reduces a long option or a covering
+// future must leave every short as covered as it was. Everything else passes.
+Outcome short_opt(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
+  if (f.instrument == nullptr) {
+    return reject();  // can't tell what it is, so can't tell whether it needs or takes cover: fail closed
+  }
+  const Segment segment = f.instrument->segment;
+  const bool sell = o.side == Side::kSell;
+  const bool opening_short = f.opening && segment == Segment::kOpt && sell;
+  // A sold option or a future traded either way can take cover away; nothing else can.
+  const bool may_uncover = !opening_short && ((segment == Segment::kOpt && sell) || segment == Segment::kFut);
+  if (!opening_short && !may_uncover) {
+    return {};
+  }
+  if (!positions_ready(ctx)) {
+    return data_missing(DataSource::kPositions);
+  }
+  Outcome by_limit;
+  if (opening_short) {
+    by_limit = short_lots_limit(ctx, o, f);
+    if (by_limit.verdict == Verdict::kReject) {
+      return by_limit;
+    }
+  }
+  if (naked_allowed(ctx, o)) {
+    return by_limit;
+  }
+  if (may_uncover) {
+    return uncover_check(ctx, o);
+  }
+  const Outcome covered = cover_check(ctx, o, f);
+  return covered.verdict == Verdict::kReject ? covered : by_limit;
+}
+
+// ---- rule 21: margin (D-32) ----
+
+struct Required {
+  Wide amount{0};  // money units, before the buffer
+  bool known{false};
+};
+
+// What the order needs. A bought option costs its premium; a future or a sold option needs the broker's
+// margin per lot; shares are taken at their value, an upper bound (a reading, D-39).
+[[nodiscard]] Required required_margin(const GateContext& ctx, const OrderDetails& o,
+                                       const GateFacts& f) noexcept {
+  if (f.instrument == nullptr || f.instrument->lot_size <= 0) {
+    return {};
+  }
+  const InstrumentRef& i = *f.instrument;
+  const bool by_lot = i.segment == Segment::kFut || (i.segment == Segment::kOpt && o.side == Side::kSell);
+  if (by_lot) {
+    const MarginCache::PerLot* per = ctx.margin->per_lot(o.instrument_id);
+    if (per == nullptr || per->amount <= 0 || !ctx.fresh(per->as_of)) {
+      return {};
+    }
+    const Nanos age = f.monotonic - per->as_of;
+    if (age < 0 || age > ctx.margin_max_age) {
+      return {};
+    }
+    const Wide lot = i.lot_size;
+    return {.amount = ((Wide{per->amount} * Wide{o.qty}) + lot - 1) / lot, .known = true};  // rounded up
+  }
+  const std::optional<Price> unit = worst_price(ctx, o, f);
+  if (!unit.has_value()) {
+    return {};
+  }
+  return {.amount = Wide{o.qty} * unit->units(), .known = true};
+}
+
+constexpr Wide kPercent = 100;
+
+// The money an order has to have free, with the buffer on top, rounded up.
+[[nodiscard]] Wide buffered(Wide required, std::int64_t buffer) noexcept {
+  const Wide scale = kPercent * kLimitScale;
+  return ((required * (scale + buffer)) + scale - 1) / scale;
+}
+
+// A live order over this much goes through the broker's margin preview first (RISK_ENGINE §3). That preview
+// is M3.5's, so until then such an order is refused (D-39).
+constexpr Wide kPreviewAbove = Wide{1'000'000} * Price::kUnitsPerRupee;
+
+Outcome margin(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
+  if (!o.is_paper.live()) {
+    return {};  // paper orders skip margin (D-27)
+  }
+  if (ctx.margin == nullptr) {
+    return data_missing(DataSource::kMargin);
+  }
+  const MarginCache::Available* have = ctx.margin->available(o.account_id);
+  if (have == nullptr || !ctx.fresh(have->as_of) || f.monotonic - have->as_of < 0 ||
+      f.monotonic - have->as_of > ctx.margin_max_age) {
+    return data_missing(DataSource::kMargin);
+  }
+  const Required need = required_margin(ctx, o, f);
+  if (!need.known) {
+    return data_missing(DataSource::kMargin);
+  }
+  const std::optional<Price> unit = worst_price(ctx, o, f);
+  if (!unit.has_value() || (Wide{o.qty} * unit->units()) > kPreviewAbove) {
+    return data_missing(DataSource::kMargin);
+  }
+  const ResolvedLimit buffer = ctx.limits.resolve(LimitKey::kMarginBufferPct, o, Tightest::kLargest);
+  if (!buffer.hard.has_value() || *buffer.hard < 0) {
+    return reject();  // no buffer is loaded, or a negative one that would loosen the check
+  }
+  const Wide total = buffered(need.amount, *buffer.hard);
+  const Wide free = Wide{have->amount} - have->reserved;
+  if (total > free) {
+    return reject(saturate(free), saturate(total));
+  }
+  return {};
+}
+
+// What an approved order takes off the account's free margin until the next refresh, so a burst can't spend
+// the same money twice. Called only when the whole chain passed.
+void margin_commit(GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
+  if (!o.is_paper.live() || ctx.margin == nullptr) {
+    return;
+  }
+  const Required need = required_margin(ctx, o, f);
+  const ResolvedLimit buffer = ctx.limits.resolve(LimitKey::kMarginBufferPct, o, Tightest::kLargest);
+  if (need.known && buffer.hard.has_value() && *buffer.hard >= 0) {  // check() required all three
+    static_cast<void>(ctx.margin->reserve(o.account_id, buffered(need.amount, *buffer.hard)));
+  }
+}
+
+// ---- rule 22: discipline ----
+
+Outcome discipline(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
+  if (ctx.discipline == nullptr || !ctx.discipline->loaded()) {
+    // A paper order can't lose money, so not knowing the lockouts doesn't stop it.
+    return o.is_paper.live() ? data_missing(DataSource::kDiscipline) : Outcome{};
+  }
+  // Paper and live keep separate streaks and separate lockouts (owner, 2026-11-15): a live lockout blocks
+  // live orders only, and a paper one paper orders only.
+  const std::optional<Nanos> until = ctx.discipline->locked_until(o.user_id, o.is_paper);
+  const Nanos today = md::ist_day_start(f.now);
+  if (until.has_value() && today <= *until) {
+    return reject(*until, today);
+  }
+  return {};
+}
+
+constexpr std::array<Rule, 3> kLateRules{{
+    {.code = RuleCode::kShortOpt, .eval = &short_opt},
+    {.code = RuleCode::kMargin, .eval = &margin, .on_approved = &margin_commit},
+    {.code = RuleCode::kDiscipline, .eval = &discipline},
+}};
 
 constexpr std::array<Rule, 6> kScopeRules{{
     {.code = RuleCode::kOpenOrders, .eval = &open_orders},
@@ -312,26 +557,55 @@ constexpr std::array<Rule, 6> kScopeRules{{
 
 std::span<const Rule> scope_rules() noexcept { return kScopeRules; }
 
-std::expected<Nanos, Error> parse_greeks_max_age_ms(std::string_view text) noexcept {
-  constexpr std::string_view kMessage = "RISK_GREEKS_MAX_AGE_MS: whole milliseconds, 1 to 300000";
-  constexpr std::int64_t kMaxMs = 300'000;
+std::span<const Rule> late_rules() noexcept { return kLateRules; }
+
+std::span<const Rule> all_rules() noexcept {
+  // The 22 rules in the order of RISK_ENGINE §3, put together once.
+  static const std::array<Rule, kRuleCount> kAll = [] {
+    std::array<Rule, kRuleCount> table{};
+    for (const auto part : {pre_trade_rules(), scope_rules(), late_rules()}) {
+      for (const Rule& r : part) {
+        table.at(static_cast<std::size_t>(r.code) - 1) = r;
+      }
+    }
+    return table;
+  }();
+  return kAll;
+}
+
+namespace {
+
+std::expected<Nanos, Error> parse_age_ms(std::string_view text, Nanos fallback, std::int64_t max_ms,
+                                         std::string_view message) noexcept {
   if (text.empty()) {
-    return kDefaultGreeksMaxAge;
+    return fallback;
   }
   std::int64_t ms = 0;
   for (const char c : text) {
     if (c < '0' || c > '9') {
-      return std::unexpected(Error{ErrorCode::kInvalidArgument, kMessage});
+      return std::unexpected(Error{ErrorCode::kInvalidArgument, message});
     }
     ms = (ms * 10) + (c - '0');
-    if (ms > kMaxMs) {
-      return std::unexpected(Error{ErrorCode::kInvalidArgument, kMessage});
+    if (ms > max_ms) {
+      return std::unexpected(Error{ErrorCode::kInvalidArgument, message});
     }
   }
   if (ms < 1) {
-    return std::unexpected(Error{ErrorCode::kInvalidArgument, kMessage});
+    return std::unexpected(Error{ErrorCode::kInvalidArgument, message});
   }
   return ms * (kNanosPerSecond / 1'000);
+}
+
+}  // namespace
+
+std::expected<Nanos, Error> parse_greeks_max_age_ms(std::string_view text) noexcept {
+  return parse_age_ms(text, kDefaultGreeksMaxAge, 300'000,
+                      "RISK_GREEKS_MAX_AGE_MS: whole milliseconds, 1 to 300000");
+}
+
+std::expected<Nanos, Error> parse_margin_max_age_ms(std::string_view text) noexcept {
+  return parse_age_ms(text, kDefaultMarginMaxAge, 300'000,
+                      "RISK_MARGIN_MAX_AGE_MS: whole milliseconds, 1 to 300000");
 }
 
 }  // namespace vyuha::risk

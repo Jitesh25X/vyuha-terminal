@@ -148,26 +148,26 @@ TEST(ScopeBook, AShortGainsWhenThePriceFalls) {
 TEST(ScopeBook, AMarkMovesUnrealisedAtEveryScopeWithoutWalkingThePositions) {
   Book b;
   ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(105)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(105), 1));
   EXPECT_EQ(b.book.agg(LimitScope::kTrader, kTrader)->unrealised, Wide{10} * 5 * kRupee);
   EXPECT_EQ(b.book.agg(LimitScope::kDesk, Uuid{})->unrealised, Wide{10} * 5 * kRupee);
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(95)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(95), 1));
   EXPECT_EQ(b.book.agg(LimitScope::kDesk, Uuid{})->unrealised, Wide{-10} * 5 * kRupee);
   // Not added twice: the same mark again changes nothing.
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(95)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(95), 1));
   EXPECT_EQ(b.book.agg(LimitScope::kDesk, Uuid{})->unrealised, Wide{-10} * 5 * kRupee);
 }
 
 TEST(ScopeBook, AMarkThatArrivedBeforeThePositionIsUsedByIt) {
   Book b;
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(105)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(105), 1));
   ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
   EXPECT_EQ(b.book.agg(LimitScope::kAccount, kAccount)->unrealised, Wide{10} * 5 * kRupee);
 }
 
 TEST(ScopeBook, PnlIsRealisedPlusUnrealisedMinusCosts) {
   Book b;
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1));
   ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kEquity, Book::all(), 50 * kRupee));
   ASSERT_TRUE(b.fill(Side::kSell, 10, rupees(103), kEquity, Book::all(), 40 * kRupee));
   EXPECT_EQ(b.book.agg(LimitScope::kAccount, kAccount)->pnl(), Wide{10} * 3 * kRupee - Wide{90} * kRupee);
@@ -176,8 +176,8 @@ TEST(ScopeBook, PnlIsRealisedPlusUnrealisedMinusCosts) {
 TEST(ScopeBook, ThePeakIsTheBestDayPnlAndABeginSessionStartsTheDayAtNothing) {
   Book b;
   ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(110)));
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(104)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(110), 1));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(104), 1));
   const ScopeAgg* agg = b.book.agg(LimitScope::kDesk, Uuid{});
   EXPECT_EQ(agg->peak_pnl, Wide{10} * 10 * kRupee);
   EXPECT_EQ(agg->pnl(), Wide{10} * 4 * kRupee);
@@ -185,7 +185,7 @@ TEST(ScopeBook, ThePeakIsTheBestDayPnlAndABeginSessionStartsTheDayAtNothing) {
   EXPECT_EQ(agg->peak_pnl, 0);
   EXPECT_EQ(agg->day_pnl(), 0);
   EXPECT_EQ(agg->pnl(), Wide{10} * 4 * kRupee);  // what was carried over is still there, but isn't today's
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(102)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(102), 1));
   EXPECT_EQ(agg->day_pnl(), Wide{-10} * 2 * kRupee);
   EXPECT_EQ(agg->peak_pnl, 0);
 }
@@ -193,12 +193,12 @@ TEST(ScopeBook, ThePeakIsTheBestDayPnlAndABeginSessionStartsTheDayAtNothing) {
 TEST(ScopeBook, RepeatingAMarkChangesNeitherGrossNorTheUnderlyingNotional) {
   Book b;
   ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(105)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(105), 1));
   const Wide gross = b.book.agg(LimitScope::kDesk, Uuid{})->gross;
   const Wide underlying = b.book.underlying_notional(LimitScope::kDesk, Uuid{}, kEquity);
   EXPECT_EQ(gross, Wide{10} * 105 * kRupee);
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(105)));
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(105)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(105), 1));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(105), 1));
   EXPECT_EQ(b.book.agg(LimitScope::kDesk, Uuid{})->gross, gross);
   EXPECT_EQ(b.book.underlying_notional(LimitScope::kDesk, Uuid{}, kEquity), underlying);
 }
@@ -277,6 +277,105 @@ TEST(ScopeBook, RemovingAHeldOptionThatIsNotTheLastKeepsTheOthersChecked) {
   EXPECT_TRUE(b.book.held_greeks_fresh(1'000, 100, 0));
 }
 
+// A share or a future has delta 1 and no vega by definition: held with no Greeks at all, it is still fresh.
+TEST(ScopeBook, AHeldShareOrFutureNeedsNoGreeks) {
+  Book b;
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kEquity));
+  ASSERT_TRUE(b.fill(Side::kSell, 5, rupees(100), kFuture));
+  EXPECT_TRUE(b.book.held_greeks_fresh(1'000, 100, 0));
+  EXPECT_EQ(b.book.options_without_greeks(), 0);
+  ASSERT_TRUE(b.fill(Side::kSell, 65, rupees(10), kOption));  // an option is another matter
+  EXPECT_FALSE(b.book.held_greeks_fresh(1'000, 100, 0));
+}
+
+// A position keeps what the instrument was when it was made: a master that later forgets it or calls it a
+// share must not turn a held option into one (that would drop it out of the Greeks checks).
+TEST(ScopeBook, AHeldOptionStaysAnOptionWhenTheMasterNowDescribesItAsAShare) {
+  Book b;
+  ASSERT_TRUE(b.fill(Side::kSell, 65, rupees(10), kOption));
+  EXPECT_EQ(b.book.options_without_greeks(), 4);  // one position at each of four scopes
+  InstrumentRef share = *b.instruments.find(kOption);
+  share.segment = Segment::kEq;
+  ASSERT_TRUE(b.instruments.put(kOption, share));
+  ASSERT_TRUE(b.book.set_mark(kOption, rupees(10), 1'000));
+  EXPECT_EQ(b.book.options_without_greeks(), 4);  // still no Greeks, so still counted
+  EXPECT_FALSE(b.book.held_greeks_fresh(1'000, 100, 0));
+  ASSERT_TRUE(b.book.set_greeks(kOption, {.delta = 50 * kRupee, .vega = 2 * kRupee, .as_of = 10}));
+  EXPECT_EQ(b.book.options_without_greeks(), 0);
+  EXPECT_FALSE(b.book.held_greeks_fresh(1'000, 100, 0));  // its Greeks are stale
+  EXPECT_EQ(b.book.agg(LimitScope::kAccount, kAccount)->delta, Wide{-65} * 50 * kRupee);  // not the mark's
+  ASSERT_TRUE(b.book.set_greeks(kOption, {.delta = 50 * kRupee, .vega = 2 * kRupee, .as_of = 1'000}));
+  EXPECT_TRUE(b.book.held_greeks_fresh(1'000, 100, 0));
+}
+
+// ---- marks have an age (owner, 2026-11-15) ----
+
+TEST(ScopeBook, NothingHeldMeansNoMarkIsNeeded) {
+  Book b;
+  EXPECT_TRUE(b.book.held_marks_fresh(1'000, 100, 0));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1));  // a mark for what nobody holds, and old
+  EXPECT_TRUE(b.book.held_marks_fresh(1'000, 100, 0));
+}
+
+TEST(ScopeBook, AHeldInstrumentWithNoMarkIsNotFresh) {
+  Book b;
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
+  EXPECT_FALSE(b.book.held_marks_fresh(1'000, 100, 0));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1'000));
+  EXPECT_TRUE(b.book.held_marks_fresh(1'000, 100, 0));
+}
+
+TEST(ScopeBook, AMarkIsFreshAtExactlyTheMaximumAgeAndStaleOneNanosecondOver) {
+  Book b;
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1'000));
+  EXPECT_TRUE(b.book.held_marks_fresh(1'100, 100, 0));
+  EXPECT_FALSE(b.book.held_marks_fresh(1'101, 100, 0));
+}
+
+TEST(ScopeBook, AMarkFromBeforeAPauseOrStampedInTheFutureIsNotFresh) {
+  Book b;
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1'000));
+  EXPECT_TRUE(b.book.held_marks_fresh(1'050, 100, 999));
+  EXPECT_FALSE(b.book.held_marks_fresh(1'050, 100, 1'000));  // arrived at the pause itself: not after it
+  EXPECT_FALSE(b.book.held_marks_fresh(999, 100, 0));        // from the future
+}
+
+TEST(ScopeBook, OneOldMarkAmongManyMakesThemAllStaleAndAFlatInstrumentIsNotCounted) {
+  Book b;
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kEquity));
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kFuture));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1'000));
+  ASSERT_TRUE(b.book.set_mark(kFuture, rupees(100), 10));
+  EXPECT_FALSE(b.book.held_marks_fresh(1'000, 100, 0));
+  ASSERT_TRUE(b.fill(Side::kSell, 10, rupees(100), kFuture));  // flat in every scope
+  EXPECT_TRUE(b.book.held_marks_fresh(1'000, 100, 0));
+  ASSERT_TRUE(b.fill(Side::kBuy, 1, rupees(100), kFuture));  // held again, and old
+  EXPECT_FALSE(b.book.held_marks_fresh(1'000, 100, 0));
+}
+
+TEST(ScopeBook, AnInstrumentIsHeldWhileAnyScopeHoldsItForTheMarksToo) {
+  Book b;
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kEquity, {.account = kAccount}));
+  ASSERT_TRUE(b.fill(Side::kSell, 10, rupees(100), kEquity, {.account = kOtherAccount}));  // the desk is flat
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 10));
+  EXPECT_FALSE(b.book.held_marks_fresh(1'000, 100, 0));
+  ASSERT_TRUE(b.fill(Side::kSell, 10, rupees(100), kEquity, {.account = kAccount}));
+  EXPECT_FALSE(b.book.held_marks_fresh(1'000, 100, 0));  // the other account still holds it
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kEquity, {.account = kOtherAccount}));
+  EXPECT_TRUE(b.book.held_marks_fresh(1'000, 100, 0));
+}
+
+TEST(ScopeBook, ANewMarkRefreshesTheAge) {
+  Book b;
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 10));
+  EXPECT_FALSE(b.book.held_marks_fresh(1'000, 100, 0));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(101), 950));
+  EXPECT_TRUE(b.book.held_marks_fresh(1'000, 100, 0));
+}
+
 TEST(ScopeBook, AnOptionClosedAndHeldAgainIsCheckedAgain) {
   Book b;
   ASSERT_TRUE(b.fill(Side::kSell, 65, rupees(10), kOption));
@@ -292,7 +391,7 @@ TEST(ScopeBook, TheDataOnlyShareOfTheInstrumentTableIsExactlyHalf) {
   Book b;
   std::int64_t accepted = 0;
   for (std::int64_t id = 100'000; id < 110'000; ++id) {
-    accepted += b.book.set_mark(id, rupees(100)) ? 1 : 0;
+    accepted += b.book.set_mark(id, rupees(100), 1) ? 1 : 0;
   }
   EXPECT_EQ(accepted, 4'096);  // half of 8,192
 }
@@ -301,12 +400,12 @@ TEST(ScopeBook, AMarkForAnInstrumentNobodyHoldsIsDroppedOnceHalfTheTableIsUsedAn
   Book b;
   std::int64_t refused = 0;
   for (std::int64_t id = 10'000; id < 15'000; ++id) {
-    refused += b.book.set_mark(id, rupees(100)) ? 0 : 1;
+    refused += b.book.set_mark(id, rupees(100), 1) ? 0 : 1;
   }
   EXPECT_GT(refused, 0);
   EXPECT_TRUE(b.book.healthy());
   EXPECT_TRUE(b.fill(Side::kBuy, 1, rupees(100)));  // the other half is kept for what is held
-  EXPECT_TRUE(b.book.set_mark(kEquity, rupees(101)));
+  EXPECT_TRUE(b.book.set_mark(kEquity, rupees(101), 1));
 }
 
 TEST(ScopeBook, OverflowOrClippingMakesTheBookUnhealthy) {
@@ -332,7 +431,7 @@ TEST(ScopeBook, PnlNeedsEveryOpenPositionToHaveAMark) {
   ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
   EXPECT_EQ(b.book.positions_without_mark(), 4);  // desk, account, trader, strategy
   EXPECT_FALSE(b.book.pnl_loaded());
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1));
   EXPECT_EQ(b.book.positions_without_mark(), 0);
   EXPECT_TRUE(b.book.pnl_loaded());
   ASSERT_TRUE(b.fill(Side::kSell, 10, rupees(100)));  // flat again: nothing to mark
@@ -366,8 +465,8 @@ TEST(ScopeBook, TakingOffMoreThanWasPutOnMakesTheBookUnhealthy) {
 
 TEST(ScopeBook, ExposureAndTheUnderlyingNotionalAddUpAcrossInstruments) {
   Book b;
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100)));
-  ASSERT_TRUE(b.book.set_mark(kFuture, rupees(101)));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1));
+  ASSERT_TRUE(b.book.set_mark(kFuture, rupees(101), 1));
   ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kEquity));
   ASSERT_TRUE(b.fill(Side::kSell, 5, rupees(101), kFuture));
   EXPECT_EQ(b.book.agg(LimitScope::kAccount, kAccount)->gross, Wide{1000 + 505} * kRupee);
@@ -378,7 +477,7 @@ TEST(ScopeBook, ExposureAndTheUnderlyingNotionalAddUpAcrossInstruments) {
 
 TEST(ScopeBook, AnOptionCountsForItsDeltaNotionalAndVegaOnceItHasGreeks) {
   Book b;
-  ASSERT_TRUE(b.book.set_mark(kOption, rupees(10)));
+  ASSERT_TRUE(b.book.set_mark(kOption, rupees(10), 1));
   ASSERT_TRUE(b.fill(Side::kSell, 65, rupees(10), kOption));
   EXPECT_EQ(b.book.options_without_greeks(), 4);
   EXPECT_EQ(b.book.agg(LimitScope::kAccount, kAccount)->delta, 0);

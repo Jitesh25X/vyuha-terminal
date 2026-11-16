@@ -48,10 +48,18 @@ std::string_view reason_text(const RuleResult& result) noexcept {
           return "R-DATA-MISSING:margin";
         case DataSource::kGreeks:
           return "R-DATA-MISSING:greeks";
+        case DataSource::kDiscipline:
+          return "R-DATA-MISSING:discipline";
+        case DataSource::kMark:
+          return "R-DATA-MISSING:mark";
         case DataSource::kNone:
           return "R-DATA-MISSING";
       }
       return "R-DATA-MISSING";
+    case RuleReason::kNoCover:
+      return "R-SHORT-OPT:no-cover";
+    case RuleReason::kUncover:
+      return "R-SHORT-OPT-UNCOVER";
     case RuleReason::kRule:
       break;
   }
@@ -75,9 +83,9 @@ std::expected<RiskGate, Error> RiskGate::create(std::span<const Rule> rules, con
 // D-29: per account and instrument, an order is opening if abs(net + same-side working + this order) is more
 // than abs(net). A flip is opening as a whole order. With no positions loaded nothing is known, so every
 // order counts as opening (D-27) and the rules that need positions refuse it.
-bool RiskGate::is_opening(const GateContext& ctx, const oms::OrderDetails& order) noexcept {
+RiskGate::Direction RiskGate::direction(const GateContext& ctx, const oms::OrderDetails& order) noexcept {
   if (ctx.scopes == nullptr || !ctx.scopes->positions_loaded()) {
-    return true;
+    return {};
   }
   const Position* p = ctx.scopes->position(LimitScope::kAccount, order.account_id, order.instrument_id);
   const Wide net = p != nullptr ? Wide{p->net_qty} : Wide{0};
@@ -86,7 +94,13 @@ bool RiskGate::is_opening(const GateContext& ctx, const oms::OrderDetails& order
   const Wide added = working + Wide{order.qty};
   const Wide projected = net + (buy ? added : -added);
   // Larger, or on the other side of flat: a flip is opening as a whole order, however small the new side.
-  return wide_abs(projected) > wide_abs(net) || (net > 0 && projected < 0) || (net < 0 && projected > 0);
+  const bool flip = (net > 0 && projected < 0) || (net < 0 && projected > 0);
+  Direction out{.opening = flip || wide_abs(projected) > wide_abs(net)};
+  if (flip) {
+    const Wide closes = wide_abs(net) - working;  // what is left to close once the working orders have
+    out.flip_close_qty = closes > 0 ? saturate(closes) : 0;
+  }
+  return out;
 }
 
 GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order) const noexcept {
@@ -99,10 +113,12 @@ GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order
   out.stamp.ruleset_version = ctx.limits.version;
   out.stamp.ts = start;
   out.stamp.monotonic = started;
+  const Direction way = direction(ctx, order);
+  out.flip_close_qty = way.flip_close_qty;
   const GateFacts facts{
       .now = start,
       .monotonic = started,
-      .opening = is_opening(ctx, order),
+      .opening = way.opening,
       .instrument = ctx.instruments != nullptr ? ctx.instruments->find(order.instrument_id) : nullptr,
       .account = std::as_const(ctx).accounts.find(order.account_id)};
 

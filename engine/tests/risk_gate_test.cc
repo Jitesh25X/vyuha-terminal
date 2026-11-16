@@ -277,12 +277,21 @@ TEST(RiskGate, ALiveOrderNeedsTheWholeChain) {
   EXPECT_TRUE(full.evaluate(no_state(), live).approved.has_value());
 }
 
-TEST(RiskGate, OnlyRules14To22AreSkippedForAReducingOrder) {
+// R-SHORT-OPT is the exception: it also sees reducing orders, to refuse one that takes cover from a short
+// (D-39 (10)). It decides for itself which.
+TEST(RiskGate, OnlyRules14To22AreSkippedForAReducingOrderExceptRShortOpt) {
   for (std::size_t n = 1; n <= kRuleCount; ++n) {
     const auto code = static_cast<RuleCode>(n);
     EXPECT_TRUE(applies(code, true)) << code_text(code);
-    EXPECT_EQ(applies(code, false), n < std::to_underlying(RuleCode::kOpenOrders)) << code_text(code);
+    EXPECT_EQ(applies(code, false),
+              n < std::to_underlying(RuleCode::kOpenOrders) || code == RuleCode::kShortOpt)
+        << code_text(code);
   }
+  EXPECT_TRUE(applies(RuleCode::kShortOpt, false));
+  EXPECT_FALSE(applies(RuleCode::kOpenOrders, false));
+  EXPECT_FALSE(applies(RuleCode::kLossDaily, false));
+  EXPECT_FALSE(applies(RuleCode::kMargin, false));
+  EXPECT_FALSE(applies(RuleCode::kDiscipline, false));
 }
 
 // Until positions exist (M2.6) the gate can't tell an opening order from a reducing one, so it runs every

@@ -10,6 +10,7 @@
 #include "vyuha/core/price.h"
 #include "vyuha/oms/oms.h"
 #include "vyuha/risk/gate_context.h"
+#include "vyuha/risk/slot_index.h"
 #include "vyuha/risk/wide.h"
 
 namespace vyuha::risk {
@@ -58,12 +59,22 @@ struct Position {
   Wide c_delta{0};
   Wide c_vega{0};
   Wide c_unrealised{0};
+  Wide c_short_lots{0};
+  // Lots at the limit scale, worked out when the quantity changes so a check never divides.
+  Wide net_lots{0};
+  // What the instrument is, copied when the position is made: the cover check walks positions and mustn't
+  // look each one up.
+  Segment segment{Segment::kEq};
+  OptionKind option_kind{OptionKind::kNone};
+  Nanos expires_at{0};
+  std::int32_t lot_size{0};
   bool no_mark{false};    // counted in positions_without_mark
   bool no_greeks{false};  // an option, counted in options_without_greeks
-  bool held{false};       // an option with a non-zero net, counted in its instrument's held_positions
+  bool held{false};       // a non-zero net, counted in its instrument's held_positions
   std::int32_t agg{-1};
   std::int32_t underlying{-1};
   std::int32_t next_in_instrument{-1};
+  std::int32_t next_in_underlying{-1};
 };
 
 // What one scope adds up to, kept current as positions change, so a check never walks the positions.
@@ -71,8 +82,10 @@ struct ScopeAgg {
   LimitScope kind{LimitScope::kDesk};
   oms::Uuid id{};
   std::int64_t open_orders{0};
-  Wide gross{0};  // sum of abs notional
-  Wide delta{0};  // rupee delta
+  Wide short_lots{0};          // short option lots held, at the limit scale
+  Wide working_short_lots{0};  // option lots on open sell orders, at the limit scale
+  Wide gross{0};               // sum of abs notional
+  Wide delta{0};               // rupee delta
   Wide vega{0};
   Wide realised{0};
   Wide costs{0};
@@ -82,44 +95,6 @@ struct ScopeAgg {
   [[nodiscard]] Wide pnl() const noexcept { return realised + unrealised - costs; }
   [[nodiscard]] Wide day_pnl() const noexcept { return pnl() - session_base; }
 };
-
-namespace detail {
-
-// A hash index over a pool kept elsewhere: it maps a hash to the pool slot whose key matches. It never
-// removes, and it holds at most half full, so a probe always ends.
-class SlotIndex {
- public:
-  explicit SlotIndex(std::size_t entries) {
-    std::size_t n = 16;
-    while (n < entries * 2) {
-      n *= 2;
-    }
-    slots_.assign(n, -1);
-  }
-  template <class Match>
-  [[nodiscard]] std::int32_t find(std::uint64_t hash, Match matches) const noexcept {
-    const std::size_t mask = slots_.size() - 1;
-    for (std::size_t i = hash & mask;; i = (i + 1) & mask) {
-      const std::int32_t slot = slots_[i];  // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
-      if (slot < 0 || matches(slot)) {
-        return slot;
-      }
-    }
-  }
-  void insert(std::uint64_t hash, std::int32_t slot) noexcept {
-    const std::size_t mask = slots_.size() - 1;
-    std::size_t i = hash & mask;
-    while (slots_[i] >= 0) {  // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
-      i = (i + 1) & mask;
-    }
-    slots_[i] = slot;  // NOLINT(cppcoreguidelines-pro-bounds-constant-array-index)
-  }
-
- private:
-  std::vector<std::int32_t> slots_;
-};
-
-}  // namespace detail
 
 // Positions, working orders and what they add up to, per scope (desk, account, trader, strategy), updated
 // incrementally by fills, marks and Greeks (RISK_ENGINE §3 "GateContext holds pre-aggregated per-scope
@@ -145,7 +120,8 @@ class ScopeBook {
 
   // false when a table is full (the book is then unhealthy), or the instrument or fill is unusable.
   bool apply_fill(const Fill& fill) noexcept;
-  bool set_mark(std::int64_t instrument_id, Price mark) noexcept;
+  // `as_of` is IClock::monotonic when the price arrived, as for an LTP (D-26): a mark has an age.
+  bool set_mark(std::int64_t instrument_id, Price mark, Nanos as_of) noexcept;
   bool set_greeks(std::int64_t instrument_id, const Greeks& greeks) noexcept;
   // An order became (+) or stopped being (-) a working order for this much quantity.
   bool add_working(const Attribution& who, std::int64_t instrument_id, oms::Side side,
@@ -156,6 +132,9 @@ class ScopeBook {
   // Whether every option held has Greeks that arrived after `stale_before`, and not more than `max_age` ago
   // by `monotonic`. A held option's Greeks are part of the totals, so a stale one makes them stale.
   [[nodiscard]] bool held_greeks_fresh(Nanos monotonic, Nanos max_age, Nanos stale_before) const noexcept;
+  // The same for marks: whether every instrument held has a mark that arrived after `stale_before` and not
+  // more than `max_age` ago. Exposure and P&L are worked out from the marks, so one old mark makes them old.
+  [[nodiscard]] bool held_marks_fresh(Nanos monotonic, Nanos max_age, Nanos stale_before) const noexcept;
 
   [[nodiscard]] const Position* position(LimitScope kind, const oms::Uuid& scope,
                                          std::int64_t instrument_id) const noexcept;
@@ -164,15 +143,44 @@ class ScopeBook {
                                          std::int64_t underlying_id) const noexcept;
   [[nodiscard]] const Greeks* greeks(std::int64_t instrument_id) const noexcept;
 
+  // What an account holds on one underlying, for the short-option cover check (D-31). Everything is in
+  // units of the underlying, never lots, so contracts with different lot sizes compare correctly (D-39 (11)).
+  // `others_uncovered` is what the shorts of the other expiries leave over after their own longs, which they
+  // would take from the futures first.
+  struct CoverView {
+    Wide long_units{0};        // long options of the kind and expiry asked for, any strike
+    Wide short_units{0};       // short options of that group, with the working sells
+    Wide future_units{0};      // futures that cover the kind, expiring at or after the option
+    Wide others_uncovered{0};  // see above
+    bool overflowed{false};    // more expiries than are tracked: the answer can't be trusted
+  };
+  [[nodiscard]] CoverView cover_view(const oms::Uuid& account, std::int64_t underlying_id, OptionKind kind,
+                                     Nanos expiry) const noexcept;
+
+  // Whether an order would take away cover that a short option of the account needs (D-39 (10)): a sell of a
+  // long option, a sell of a long future (cover for calls) or a buy against a short future (cover for puts).
+  // `need` is the short units that would be left wanting, `have` the futures left for them. An order that
+  // leaves every short as covered as it was is not one, even if some short was uncovered already. More
+  // expiries than are tracked, with a short held, counts as uncovering: the answer can't be trusted.
+  struct Uncover {
+    bool uncovers{false};
+    Wide need{0};
+    Wide have{0};
+  };
+  [[nodiscard]] Uncover uncover(const oms::Uuid& account, std::int64_t instrument_id, oms::Side side,
+                                std::int64_t qty) const noexcept;
+
  private:
   struct InstState {
     std::int64_t instrument_id{0};
     Price mark{};
     bool has_mark{false};
+    Nanos mark_as_of{0};
+    bool option{false};  // set when a position in it is first held
     Greeks greeks{};
     bool has_greeks{false};
     std::int32_t head{-1};           // first position in this instrument
-    std::int32_t held_slot{-1};      // its place in held_ while an option of it is held
+    std::int32_t held_slot{-1};      // its place in held_ while some scope holds it
     std::int32_t held_positions{0};  // how many scopes hold a non-zero net of it
   };
   struct UnderlyingAgg {
@@ -180,13 +188,14 @@ class ScopeBook {
     oms::Uuid scope{};
     std::int64_t underlying_id{0};
     Wide notional{0};
+    std::int32_t head{-1};  // first position of this scope on the underlying
   };
 
   [[nodiscard]] std::int32_t find_position(LimitScope kind, const oms::Uuid& scope,
                                            std::int64_t instrument_id) const noexcept;
   [[nodiscard]] std::int32_t find_or_add_position(LimitScope kind, const oms::Uuid& scope,
                                                   std::int64_t instrument_id, std::int64_t underlying_id,
-                                                  std::int32_t inst) noexcept;
+                                                  std::int32_t inst, const InstrumentRef& ref) noexcept;
   [[nodiscard]] std::int32_t find_agg(LimitScope kind, const oms::Uuid& scope) const noexcept;
   [[nodiscard]] std::int32_t find_or_add_agg(LimitScope kind, const oms::Uuid& scope) noexcept;
   [[nodiscard]] std::int32_t find_underlying(LimitScope kind, const oms::Uuid& scope,
@@ -218,7 +227,7 @@ class ScopeBook {
   detail::SlotIndex underlying_index_;
   std::vector<InstState> insts_;
   std::size_t inst_count_{0};
-  std::vector<std::int32_t> held_;  // the options with a non-zero position somewhere, as insts_ slots
+  std::vector<std::int32_t> held_;  // the instruments with a non-zero position somewhere, as insts_ slots
   std::size_t held_count_{0};
   detail::SlotIndex inst_index_;
 };

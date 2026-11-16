@@ -38,6 +38,10 @@ inline constexpr std::size_t kOpsVenues = oms::kOpsVenues;
 // used.
 
 // A contract, from the instrument master. Index rows aren't loaded: they can't be traded.
+// An option is a call or a put; anything else has none. A short option can only be covered by its own kind
+// (D-31).
+enum class OptionKind : std::uint8_t { kNone, kCall, kPut };
+
 struct InstrumentRef {
   std::int32_t lot_size{0};
   Price tick_size{};
@@ -51,6 +55,7 @@ struct InstrumentRef {
   // Today's circuit band, when known. A live order needs it (D-22); M2.3c supplies it from broker quotes.
   std::optional<Price> lower_circuit{};
   std::optional<Price> upper_circuit{};
+  OptionKind option_kind{OptionKind::kNone};
 };
 
 class InstrumentTable {
@@ -204,8 +209,11 @@ enum class LimitKey : std::uint8_t {
   kMaxNetVegaInr,
   kMaxDailyLoss,
   kMaxDrawdownFromPeak,
+  kMaxShortOptionLots,
+  kNakedShortOptions,  // bool: 1 allows a short option with no cover (D-31)
+  kMarginBufferPct,
 };
-inline constexpr std::size_t kLimitKeyCount = 18;
+inline constexpr std::size_t kLimitKeyCount = 21;
 
 enum class LimitScope : std::uint8_t { kDesk, kAccount, kTrader, kStrategy, kInstrument };
 
@@ -399,9 +407,14 @@ struct DupTable {
 };
 
 class ScopeBook;
+class MarginCache;
+class DisciplineTable;
 
 // How old a Greek can be and still count (D-28). RISK_GREEKS_MAX_AGE_MS sets it.
 inline constexpr Nanos kDefaultGreeksMaxAge = 15 * kNanosPerSecond;
+// How old a margin figure can be and still count: three of the 10 s refresh periods (ARCHITECTURE; D-39).
+// RISK_MARGIN_MAX_AGE_MS sets it.
+inline constexpr Nanos kDefaultMarginMaxAge = 30 * kNanosPerSecond;
 
 struct GateContext {
   LimitSet limits{};
@@ -423,6 +436,10 @@ struct GateContext {
   // (D-27).
   ScopeBook* scopes{nullptr};
   Nanos greeks_max_age{kDefaultGreeksMaxAge};
+  // Margin figures from the broker (M3.5) and loss-streak lockouts (the EOD job). Null reads as "not loaded".
+  MarginCache* margin{nullptr};
+  Nanos margin_max_age{kDefaultMarginMaxAge};
+  DisciplineTable* discipline{nullptr};
   [[nodiscard]] bool fresh(Nanos received_monotonic) const noexcept {
     return received_monotonic > stale_before;
   }

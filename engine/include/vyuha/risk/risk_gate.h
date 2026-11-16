@@ -50,9 +50,11 @@ inline constexpr std::size_t kRuleCount = 22;
 [[nodiscard]] std::string_view code_text(RuleCode code) noexcept;
 
 // Rules 14–22 check only opening orders, so limits never stop a trader getting flat (RISK_ENGINE §3). Rules
-// 1–13 run for every order; those whose Applies column says "opening" or "live" decide that themselves.
+// 1–13 run for every order; those whose Applies column says "opening" or "live" decide that themselves. So
+// does R-SHORT-OPT, the one rule of 14–22 that also sees reducing orders: selling the hedge of a short option
+// reduces a position and leaves the short naked (D-39 (10)). It refuses only that.
 [[nodiscard]] constexpr bool applies(RuleCode code, bool opening) noexcept {
-  return opening || code < RuleCode::kOpenOrders;
+  return opening || code < RuleCode::kOpenOrders || code == RuleCode::kShortOpt;
 }
 
 enum class Verdict : std::uint8_t {
@@ -61,11 +63,11 @@ enum class Verdict : std::uint8_t {
   kReject,  // a hard limit: the chain stops here
 };
 
-// Why a rule refused, when the rule's own code isn't specific enough. Only R-FAT-FINGER uses it.
-enum class RuleReason : std::uint8_t { kRule, kTriggerSide, kTriggerBand, kDataMissing };
+// Why a rule refused, when the rule's own code isn't specific enough.
+enum class RuleReason : std::uint8_t { kRule, kTriggerSide, kTriggerBand, kDataMissing, kNoCover, kUncover };
 
 // What a rule needed and didn't have (D-27). The refusal's reason names it: R-DATA-MISSING:positions.
-enum class DataSource : std::uint8_t { kNone, kPositions, kPnl, kMargin, kGreeks };
+enum class DataSource : std::uint8_t { kNone, kPositions, kPnl, kMargin, kGreeks, kDiscipline, kMark };
 
 // What a rule returns. limit and current are in the rule's own unit (price units, lots, a count); messages
 // are rendered later, off the core thread.
@@ -125,6 +127,11 @@ struct GateDecision {
   std::array<RuleResult, kRuleCount> warnings{};
   std::size_t warning_count{0};
   GateStamp stamp;
+  // Set when the order would take the account's position through flat (a flip, which is opening as a whole
+  // order, D-38): the part of it that only closes, after the working orders on its side. Sent as an order of
+  // its own that part is reducing, so the ticket can offer "close 10 + open 4" when a flip is refused. 0 for
+  // any other order, and for a flip whose working orders already close the position.
+  std::int64_t flip_close_qty{0};
 
   [[nodiscard]] std::span<const RuleResult> warning_list() const noexcept {
     return std::span(warnings).first(warning_count);
@@ -155,9 +162,14 @@ class RiskGate {
     std::ranges::copy(rules, rules_.begin());
   }
 
-  // Whether the order adds to the absolute position. Positions arrive with M2.6; until then every order
-  // counts as opening, so every rule runs (fail closed). Revisit at M2.6, with M2.2b's modify rule.
-  [[nodiscard]] static bool is_opening(const GateContext& ctx, const oms::OrderDetails& order) noexcept;
+  // Whether the order adds to the absolute position, and for a flip how much of it only closes. Positions
+  // arrive with M2.6; until then every order counts as opening, so every rule runs (fail closed). Revisit at
+  // M2.6, with M2.2b's modify rule.
+  struct Direction {
+    bool opening{true};
+    std::int64_t flip_close_qty{0};
+  };
+  [[nodiscard]] static Direction direction(const GateContext& ctx, const oms::OrderDetails& order) noexcept;
 
   std::array<Rule, kRuleCount> rules_{};
   std::size_t count_{0};
