@@ -2,6 +2,7 @@
 
 #include "vyuha/oms/order_router.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -16,6 +17,8 @@
 #include "vyuha/core/clock.h"
 #include "vyuha/core/latency_histogram.h"
 #include "vyuha/risk/risk_gate.h"
+#include "vyuha/risk/rules.h"
+#include "vyuha/risk/scope_book.h"
 
 namespace vyuha::oms {
 namespace {
@@ -934,6 +937,42 @@ TEST(OutageRules, CancelAllGoesAndAsksTheBroker) {
   EXPECT_EQ(out.failed, 0U);
   EXPECT_EQ(r.broker.cancels.size(), 1U);
   EXPECT_EQ(r.oms.order(h).status, kCancelPending);
+}
+
+// An unhealthy scope book (a table full, a count gone wrong) makes the gate count every order as opening and
+// refuse it, naming the positions. Cancels never pass the gate, so they go on: getting out must stay
+// possible.
+TEST(OutageRules, WithAnUnhealthyScopeBookNewOrdersAreRefusedButCancelsStillGo) {
+  Rig r;
+  const OrderHandle first = open_order(r);
+  const OrderHandle second = r.oms.create(order_of(5, "second-client")).value();
+  ASSERT_TRUE(r.submit(second));
+  r.sink.durable_count = r.sink.events.size();
+  ASSERT_EQ(r.router.poll(), 1U);
+  ASSERT_TRUE(r.oms.apply(second, E::kBrokerAck, {.broker_order_id = "B2"}));
+
+  risk::InstrumentTable instruments{4};
+  ASSERT_TRUE(instruments.put(1, {.lot_size = 1, .tick_size = Price::from_units(500)}));
+  risk::ScopeBook book(instruments, 16);
+  book.set_positions_loaded(true);
+  ASSERT_FALSE(book.add_working({.account = Uuid{}}, 1, Side::kSell, -1));  // more taken off than was put on
+  ASSERT_FALSE(book.healthy());
+  risk::GateContext ctx;
+  ctx.scopes = &book;
+  const risk::RiskGate gate = risk::RiskGate::create(risk::scope_rules(), r.clock).value();
+  const risk::GateDecision refused = gate.evaluate(ctx, order_of(1, "third-client"));
+  ASSERT_TRUE(refused.rejection.has_value());
+  EXPECT_FALSE(refused.approved.has_value());
+  // NOLINTNEXTLINE(bugprone-unchecked-optional-access): asserted above
+  EXPECT_EQ(risk::reason_text(refused.rejection.value()), "R-DATA-MISSING:positions");
+
+  EXPECT_TRUE(r.router.cancel(first));
+  const auto out = r.router.cancel_all();
+  EXPECT_EQ(out.failed, 0U);
+  EXPECT_EQ(r.oms.order(first).status, kCancelPending);
+  EXPECT_EQ(r.oms.order(second).status, kCancelPending);
+  EXPECT_GE(r.broker.cancels.size(), 2U);  // a repeated cancel is allowed, so the first may be asked twice
+  EXPECT_NE(std::ranges::find(r.broker.cancels, r.oms.order(second).details.id), r.broker.cancels.end());
 }
 
 TEST(OutageRules, TheBrokersCancelAndItsConfirmAreRecorded) {

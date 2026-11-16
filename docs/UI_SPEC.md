@@ -102,6 +102,8 @@ Monaco editor in `STRAT` uses `@monaco-editor/react`, with Python language suppo
 - Header colour: live BUY green border, live SELL red border, paper = cyan border with a `PAPER` tag.
 - The ticket stays open with errors on rejection. On success it closes and focus returns to the source panel.
 - A short option refused with `R-SHORT-OPT:no-cover` shows "buy the hedge first": working orders don't count as cover, so the hedge has to be filled before the short is sent (D-31).
+- An order refused with `R-SHORT-OPT-UNCOVER` shows "close the short first, then the hedge": it would take the cover from a short option (D-39 (10)).
+- A flip refused by a limit offers "split into close 10 + open 4" from the rejection's `flip_close_qty`: two orders the trader confirms, the close first (D-38).
 - AI-drafted tickets show an `AI DRAFT` badge and the copilot's rationale (collapsible). The human must review and submit.
 
 ## 6. Visual design tokens

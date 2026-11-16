@@ -15,17 +15,29 @@ namespace vyuha::risk {
 
 // An LTP older than this can't be priced against (D-22). The same 3 s the UI uses to dim a price.
 inline constexpr Nanos kLtpMaxAge = 3 * kNanosPerSecond;
+// A mark is a price like any other, so it goes stale at the same age (owner, 2026-11-15).
+inline constexpr Nanos kMarkMaxAge = kLtpMaxAge;
 
 // Rules 1 to 13 of RISK_ENGINE §3, in chain order. M2.4 adds 14 to 22; until then a gate built from this
 // table is incomplete, so it refuses every live order.
 [[nodiscard]] std::span<const Rule> pre_trade_rules() noexcept;
 
-// Rules 14 to 17, 19 and 20, judged against a scope's own totals (M2.4a). 18, 21 and 22 come in M2.4b. Until
-// all 22 are in one gate, it refuses every live order.
+// Rules 14 to 17, 19 and 20, judged against a scope's own totals (M2.4a). Until all 22 are in one gate, it
+// refuses every live order.
 [[nodiscard]] std::span<const Rule> scope_rules() noexcept;
+
+// Rules 18, 21 and 22 (M2.4b): short options, margin, discipline.
+[[nodiscard]] std::span<const Rule> late_rules() noexcept;
+
+// All 22 rules in chain order. A gate built from this table is complete, so it no longer refuses every live
+// order for want of rules (RISK_ENGINE §3). Nothing in the engine builds one yet: M2.8 wires it in.
+[[nodiscard]] std::span<const Rule> all_rules() noexcept;
 
 // RISK_GREEKS_MAX_AGE_MS: whole milliseconds, 1 to 300,000; empty is the default 15,000 (D-28).
 [[nodiscard]] std::expected<Nanos, Error> parse_greeks_max_age_ms(std::string_view text) noexcept;
+
+// RISK_MARGIN_MAX_AGE_MS: whole milliseconds, 1 to 300,000; empty is the default 30,000 (D-39).
+[[nodiscard]] std::expected<Nanos, Error> parse_margin_max_age_ms(std::string_view text) noexcept;
 
 // Invariant 3: live trading needs the setting to be exactly "true" and the environment to be prod or staging.
 [[nodiscard]] bool live_trading_allowed(std::string_view enabled, std::string_view env) noexcept;

@@ -81,7 +81,7 @@ target_link_libraries(vyuha_oms PUBLIC vyuha::core PRIVATE vyuha_warnings)
 # The pre-trade RiskGate (RISK_ENGINE §3). ApprovedOrder is header-only, so the router can take one without
 # linking the gate.
 add_library(vyuha_risk STATIC src/risk/risk_gate.cc src/risk/rules.cc src/risk/scope_book.cc
-            src/risk/scope_rules.cc)
+            src/risk/scope_rules.cc src/risk/margin_cache.cc src/risk/discipline_table.cc)
 add_library(vyuha::risk ALIAS vyuha_risk)
 target_link_libraries(vyuha_risk PUBLIC vyuha::oms PRIVATE vyuha_warnings)
 

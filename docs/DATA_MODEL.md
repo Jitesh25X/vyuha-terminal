@@ -36,9 +36,9 @@ Four stores, each with one job:
 | `order_event` | Every state transition (event log) | `(order_id, seq)` unique; payload has gate stamp |
 | `fill` | Executions | Unique `(account_id, broker_trade_id)`; costs breakdown JSON |
 | `position_eod` | EOD reconciled snapshot | `reconciled=false` → alert |
-| `risk_limit` | Limit catalogue values by scope | Keys in `RISK_ENGINE.md §2` |
+| `risk_limit` | Limit catalogue values by scope | Keys in `RISK_ENGINE.md §2`. Desk defaults are seeded by migration 000011; a seeded row has `updated_by` NULL until a user edits it, and only a desk row may (constraint `risk_limit_updated_by_seed_only`) |
 | `kill_switch` | Kill switch history/current | One active row per scope |
-| `discipline_state` | Loss/win streaks and lockouts | Streaks count **trading days only**; no-trade days don't break a streak |
+| `discipline_state` | Loss/win streaks and lockouts | Keyed by `(user_id, is_paper)`: paper and live streaks and lockouts are separate (migration 000012); `is_paper` has no default, so every writer names the mode. Streaks count **trading days only**; no-trade days don't break a streak |
 | `cost_schedule` | Effective-dated charges | Must carry `source_url` + `verified_by` before use in live P&L |
 | `dataset`, `download_job` | Data lake catalogue and jobs | Idempotent by (instrument, interval, source, range) |
 | `backtest_run` | Backtest jobs and metrics | `sweep_id`, `split` for walk-forward |

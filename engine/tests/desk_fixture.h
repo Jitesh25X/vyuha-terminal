@@ -68,8 +68,8 @@ constexpr Uuid kOtherAccount = id_of(4);
 // A desk where the order from order() passes: every test then breaks one thing.
 struct Desk {
   SimClock clock{kNow};
-  InstrumentTable instruments{16};
-  md::LastValueBook book{16};
+  InstrumentTable instruments{64};
+  md::LastValueBook book{64};
   std::unique_ptr<GateContext> owned{std::make_unique<GateContext>()};
   GateContext& ctx{*owned};
 
@@ -147,14 +147,14 @@ struct Desk {
   [[nodiscard]] Outcome check(RuleCode code, const OrderDetails& o) const {
     return check_at(code, o, clock.monotonic());
   }
-  [[nodiscard]] Outcome check_at(RuleCode code, const OrderDetails& o, Nanos monotonic) const {
+  // The same, for an order the gate would count as reducing (rule 18 is the one of 14 to 22 that sees those).
+  [[nodiscard]] Outcome check_reducing(RuleCode code, const OrderDetails& o) const {
+    return check_at(code, o, clock.monotonic(), false);
+  }
+  [[nodiscard]] Outcome check_at(RuleCode code, const OrderDetails& o, Nanos monotonic,
+                                 bool opening = true) const {
     const Rule* found = nullptr;
-    for (const Rule& r : pre_trade_rules()) {
-      if (r.code == code) {
-        found = &r;
-      }
-    }
-    for (const Rule& r : scope_rules()) {
+    for (const Rule& r : all_rules()) {
       if (r.code == code) {
         found = &r;
       }
@@ -162,7 +162,7 @@ struct Desk {
     EXPECT_NE(found, nullptr);
     const GateFacts facts{.now = clock.now(),
                           .monotonic = monotonic,
-                          .opening = true,
+                          .opening = opening,
                           .instrument = instruments.find(o.instrument_id),
                           .account = std::as_const(ctx).accounts.find(o.account_id)};
     return found->eval(ctx, o, facts);

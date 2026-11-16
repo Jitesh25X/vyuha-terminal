@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -16,6 +17,8 @@
 
 #include "vyuha/core/clock.h"
 #include "vyuha/md/session.h"
+#include "vyuha/risk/discipline_table.h"
+#include "vyuha/risk/margin_cache.h"
 #include "vyuha/risk/risk_gate.h"
 #include "vyuha/risk/rules.h"
 #include "vyuha/risk/scope_book.h"
@@ -179,7 +182,7 @@ void prepare_scope_book(BenchDesk& desk, vyuha::risk::ScopeBook& book) {
   book.set_pnl_loaded(true);
   const vyuha::risk::Attribution who{.account = desk.account, .trader = desk.user};
   for (std::int64_t id = 1; id <= 500; ++id) {
-    static_cast<void>(book.set_mark(id, vyuha::Price::from_units(1'000'000)));
+    static_cast<void>(book.set_mark(id, vyuha::Price::from_units(1'000'000), BenchDesk::kNow));
     static_cast<void>(book.apply_fill({.who = who,
                                        .instrument_id = id,
                                        .side = vyuha::oms::Side::kBuy,
@@ -198,7 +201,21 @@ void prepare_scope_book(BenchDesk& desk, vyuha::risk::ScopeBook& book) {
   limit(LimitKey::kMaxNetVegaInr, 1'000'000'000'000'000);
   limit(LimitKey::kMaxDailyLoss, 1'000'000'000'000'000);
   limit(LimitKey::kMaxDrawdownFromPeak, 1'000'000'000'000'000);
+  limit(LimitKey::kMaxShortOptionLots, 1'000'000 * kScale);
+  limit(LimitKey::kMarginBufferPct, 10 * kScale);
 }
+
+// The tables rules 21 and 22 read, loaded and fresh.
+struct LateData {
+  vyuha::risk::MarginCache margin;
+  vyuha::risk::DisciplineTable discipline;
+  void attach(BenchDesk& desk) {
+    desk.ctx->margin = &margin;
+    desk.ctx->discipline = &discipline;
+    discipline.set_loaded(true);
+    static_cast<void>(margin.set_available(desk.account, 1'000'000'000'000'000, BenchDesk::kNow));
+  }
+};
 
 // One scope rule on its own, with a book of 1,500 positions.
 void BM_ScopeRule(benchmark::State& state, RuleCode code) {
@@ -226,6 +243,193 @@ BENCHMARK_CAPTURE(BM_ScopeRule, greeks, RuleCode::kGreeks);
 BENCHMARK_CAPTURE(BM_ScopeRule, loss_daily, RuleCode::kLossDaily);
 BENCHMARK_CAPTURE(BM_ScopeRule, drawdown, RuleCode::kDrawdown);
 
+// Rules 18, 21 and 22 on their own, called directly so a live order isn't stopped by the incomplete-chain
+// check.
+void BM_LateRule(benchmark::State& state, RuleCode code, bool live) {
+  BenchDesk desk;
+  vyuha::risk::ScopeBook book(desk.instruments);
+  prepare_scope_book(desk, book);
+  LateData late;
+  late.attach(desk);
+  const vyuha::risk::Rule* found = nullptr;
+  for (const Rule& r : vyuha::risk::late_rules()) {
+    if (r.code == code) {
+      found = &r;
+    }
+  }
+  vyuha::oms::OrderDetails order = desk.order();
+  order.is_paper = live ? vyuha::oms::kLiveOrder : vyuha::oms::kPaperOrder;
+  const vyuha::risk::GateFacts facts{.now = BenchDesk::kNow,
+                                     .monotonic = BenchDesk::kNow,
+                                     .opening = true,
+                                     .instrument = desk.instruments.find(order.instrument_id),
+                                     .account = std::as_const(*desk.ctx).accounts.find(order.account_id)};
+  for (auto _ : state) {
+    auto outcome = found->eval(*desk.ctx, order, facts);
+    benchmark::DoNotOptimize(outcome);
+  }
+}
+BENCHMARK_CAPTURE(BM_LateRule, short_opt_equity_sell, RuleCode::kShortOpt, false);
+BENCHMARK_CAPTURE(BM_LateRule, margin_paper, RuleCode::kMargin, false);
+BENCHMARK_CAPTURE(BM_LateRule, margin_live, RuleCode::kMargin, true);
+BENCHMARK_CAPTURE(BM_LateRule, discipline_live, RuleCode::kDiscipline, true);
+
+// The worst case for the cover check: an account long 800 options of one underlying across 16 expiries, and a
+// short call of its own to cover. The check walks that underlying's positions and nothing else.
+void BM_ShortOptCover(benchmark::State& state) {
+  BenchDesk desk;
+  vyuha::risk::ScopeBook book(desk.instruments);
+  prepare_scope_book(desk, book);
+  LateData late;
+  late.attach(desk);
+  const vyuha::risk::Attribution who{.account = desk.account, .trader = desk.user};
+  const vyuha::Nanos expiry =
+      BenchDesk::kNow + (vyuha::Nanos{3} * vyuha::Nanos{1'440} * vyuha::kNanosPerMinute);
+  for (std::int64_t i = 0; i < 800; ++i) {
+    const std::int64_t id = 66'000 + i;
+    static_cast<void>(desk.instruments.put(
+        id, {.lot_size = 65,
+             .tick_size = vyuha::Price::from_units(500),
+             .exchange = vyuha::risk::Exchange::kNfo,
+             .segment = vyuha::risk::Segment::kOpt,
+             .expires_at = expiry + (vyuha::Nanos{i % 16} * vyuha::Nanos{1'440} * vyuha::kNanosPerMinute),
+             .underlying_id = 1,
+             .option_kind = vyuha::risk::OptionKind::kCall}));
+    static_cast<void>(book.apply_fill({.who = who,
+                                       .instrument_id = id,
+                                       .side = vyuha::oms::Side::kBuy,
+                                       .qty = 65,
+                                       .price = vyuha::Price::from_units(1'000'000)}));
+  }
+  const vyuha::risk::Rule* found = nullptr;
+  for (const Rule& r : vyuha::risk::late_rules()) {
+    if (r.code == RuleCode::kShortOpt) {
+      found = &r;
+    }
+  }
+  vyuha::oms::OrderDetails order = desk.order();
+  order.instrument_id = 66'000;
+  order.side = vyuha::oms::Side::kSell;
+  order.qty = 65;
+  const vyuha::risk::GateFacts facts{.now = BenchDesk::kNow,
+                                     .monotonic = BenchDesk::kNow,
+                                     .opening = true,
+                                     .instrument = desk.instruments.find(order.instrument_id),
+                                     .account = std::as_const(*desk.ctx).accounts.find(order.account_id)};
+  for (auto _ : state) {
+    auto outcome = found->eval(*desk.ctx, order, facts);
+    if (outcome.verdict != vyuha::risk::Verdict::kPass) {
+      state.SkipWithError("the bench order wasn't covered, so this isn't timing the whole walk");
+      break;
+    }
+    benchmark::DoNotOptimize(outcome);
+  }
+}
+BENCHMARK(BM_ShortOptCover);
+
+// The same rules for a LIVE order, which also reads the age of every held mark: the scan over the 500
+// instruments held. Called directly so the incomplete-chain refusal doesn't stop a live order.
+void BM_ScopeRuleLive(benchmark::State& state, RuleCode code) {
+  BenchDesk desk;
+  vyuha::risk::ScopeBook book(desk.instruments);
+  prepare_scope_book(desk, book);
+  const vyuha::risk::Rule* found = nullptr;
+  for (const Rule& r : vyuha::risk::scope_rules()) {
+    if (r.code == code) {
+      found = &r;
+    }
+  }
+  vyuha::oms::OrderDetails order = desk.order();
+  order.is_paper = vyuha::oms::kLiveOrder;
+  const vyuha::risk::GateFacts facts{.now = BenchDesk::kNow,
+                                     .monotonic = BenchDesk::kNow,
+                                     .opening = true,
+                                     .instrument = desk.instruments.find(order.instrument_id),
+                                     .account = std::as_const(*desk.ctx).accounts.find(order.account_id)};
+  for (auto _ : state) {
+    auto outcome = found->eval(*desk.ctx, order, facts);
+    if (outcome.verdict != vyuha::risk::Verdict::kPass) {
+      state.SkipWithError("the live bench order was refused, so this isn't timing the mark scan");
+      break;
+    }
+    benchmark::DoNotOptimize(outcome);
+  }
+}
+BENCHMARK_CAPTURE(BM_ScopeRuleLive, position, RuleCode::kPosition);
+BENCHMARK_CAPTURE(BM_ScopeRuleLive, exposure, RuleCode::kExposure);
+BENCHMARK_CAPTURE(BM_ScopeRuleLive, loss_daily, RuleCode::kLossDaily);
+
+// The mark scan on its own: every instrument held (500 of them) has a mark, so it walks all of them.
+void BM_HeldMarksFresh(benchmark::State& state) {
+  BenchDesk desk;
+  vyuha::risk::ScopeBook book(desk.instruments);
+  prepare_scope_book(desk, book);
+  for (auto _ : state) {
+    auto fresh = std::as_const(book).held_marks_fresh(BenchDesk::kNow, vyuha::risk::kMarkMaxAge, 0);
+    benchmark::DoNotOptimize(fresh);
+    if (!fresh) {
+      state.SkipWithError("a held mark was stale, so the scan stopped early");
+      break;
+    }
+  }
+}
+BENCHMARK(BM_HeldMarksFresh);
+
+// The worst case for the uncover check: an account holding 800 option positions of one underlying across 16
+// expiries, a short of its own, and an order that sells one of the longs. The check walks every one of them.
+void BM_ShortOptUncover(benchmark::State& state) {
+  BenchDesk desk;
+  vyuha::risk::ScopeBook book(desk.instruments);
+  prepare_scope_book(desk, book);
+  LateData late;
+  late.attach(desk);
+  const vyuha::risk::Attribution who{.account = desk.account, .trader = desk.user};
+  const vyuha::Nanos expiry =
+      BenchDesk::kNow + (vyuha::Nanos{3} * vyuha::Nanos{1'440} * vyuha::kNanosPerMinute);
+  for (std::int64_t i = 0; i < 800; ++i) {
+    const std::int64_t id = 66'000 + i;
+    static_cast<void>(desk.instruments.put(
+        id, {.lot_size = 65,
+             .tick_size = vyuha::Price::from_units(500),
+             .exchange = vyuha::risk::Exchange::kNfo,
+             .segment = vyuha::risk::Segment::kOpt,
+             .expires_at = expiry + (vyuha::Nanos{i % 16} * vyuha::Nanos{1'440} * vyuha::kNanosPerMinute),
+             .underlying_id = 1,
+             .option_kind = vyuha::risk::OptionKind::kCall}));
+    // Longs everywhere but the last: that one is a short of the first expiry, which the longs there cover.
+    static_cast<void>(book.apply_fill({.who = who,
+                                       .instrument_id = id,
+                                       .side = i == 799 ? vyuha::oms::Side::kSell : vyuha::oms::Side::kBuy,
+                                       .qty = 65,
+                                       .price = vyuha::Price::from_units(1'000'000)}));
+  }
+  const vyuha::risk::Rule* found = nullptr;
+  for (const Rule& r : vyuha::risk::late_rules()) {
+    if (r.code == RuleCode::kShortOpt) {
+      found = &r;
+    }
+  }
+  vyuha::oms::OrderDetails order = desk.order();
+  order.instrument_id = 66'000;
+  order.side = vyuha::oms::Side::kSell;
+  order.qty = 65;
+  const vyuha::risk::GateFacts facts{
+      .now = BenchDesk::kNow,
+      .monotonic = BenchDesk::kNow,
+      .opening = false,  // it closes a long: rule 18 asks only whether it uncovers
+      .instrument = desk.instruments.find(order.instrument_id),
+      .account = std::as_const(*desk.ctx).accounts.find(order.account_id)};
+  for (auto _ : state) {
+    auto outcome = found->eval(*desk.ctx, order, facts);
+    if (outcome.verdict != vyuha::risk::Verdict::kPass) {
+      state.SkipWithError("the bench order was refused, so this isn't timing the whole walk");
+      break;
+    }
+    benchmark::DoNotOptimize(outcome);
+  }
+}
+BENCHMARK(BM_ShortOptUncover);
+
 // The book's updates: a fill, and a mark that moves three positions' P&L.
 void BM_ScopeBookFill(benchmark::State& state) {
   BenchDesk desk;
@@ -248,7 +452,8 @@ void BM_ScopeBookMark(benchmark::State& state) {
   prepare_scope_book(desk, book);
   std::int64_t i = 0;
   for (auto _ : state) {
-    benchmark::DoNotOptimize(book.set_mark(42, vyuha::Price::from_units(1'000'000 + ((++i & 1) * 500))));
+    benchmark::DoNotOptimize(
+        book.set_mark(42, vyuha::Price::from_units(1'000'000 + ((++i & 1) * 500)), BenchDesk::kNow));
   }
 }
 BENCHMARK(BM_ScopeBookMark);
@@ -315,18 +520,14 @@ void BM_RiskRuleStop(benchmark::State& state, RuleCode code, vyuha::oms::OrderTy
 BENCHMARK_CAPTURE(BM_RiskRuleStop, fat_finger_stop_market, RuleCode::kFatFinger, vyuha::oms::OrderType::kSlM);
 BENCHMARK_CAPTURE(BM_RiskRuleStop, order_shape_stop_limit, RuleCode::kOrderShape, vyuha::oms::OrderType::kSl);
 
-// The 19 real rules, approving every order, and 3 pass-through stand-ins for M2.4b.
+// All 22 real rules, approving every order.
 void BM_RiskGateRealRulesPercentiles(benchmark::State& state, bool full_duplicate_table) {
   BenchDesk desk;
   vyuha::risk::ScopeBook book(desk.instruments);
   prepare_scope_book(desk, book);
-  // The real rules in their places, and the pass-through stand-ins for 18, 21 and 22 (M2.4b).
-  std::vector<Rule> rules(kChain.begin(), kChain.end());
-  for (const auto table : {vyuha::risk::pre_trade_rules(), vyuha::risk::scope_rules()}) {
-    for (const Rule& r : table) {
-      rules.at(static_cast<std::size_t>(r.code) - 1) = r;
-    }
-  }
+  LateData late;
+  late.attach(desk);
+  const std::span<const Rule> rules = vyuha::risk::all_rules();
   const auto gate = vyuha::risk::RiskGate::create(rules, desk.clock).value();
   const vyuha::oms::OrderDetails order = desk.order();
   std::vector<std::int64_t> samples;

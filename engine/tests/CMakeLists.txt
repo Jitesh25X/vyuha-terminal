@@ -18,6 +18,9 @@ add_executable(vyuha_tests
   risk_rules_test.cc
   scope_book_test.cc
   scope_rules_test.cc
+  guard_rules_test.cc
+  risk_properties_test.cc
+  uncover_rules_test.cc
   session_manager_test.cc
   upstox_feed_test.cc
   upstox_parser_test.cc
@@ -25,7 +28,7 @@ add_executable(vyuha_tests
   version_test.cc
 )
 # RapidCheck's headers use std::aligned_storage, deprecated in C++23.
-set_source_files_properties(order_state_test.cc risk_gate_test.cc risk_rules_test.cc PROPERTIES COMPILE_OPTIONS -Wno-deprecated-declarations)
+set_source_files_properties(order_state_test.cc risk_gate_test.cc risk_rules_test.cc risk_properties_test.cc PROPERTIES COMPILE_OPTIONS -Wno-deprecated-declarations)
 target_link_libraries(vyuha_tests PRIVATE vyuha::core vyuha::oms vyuha::risk rapidcheck vyuha::kite vyuha::upstox vyuha::session vyuha::bus cnats::nats_static Boost::beast vyuha_warnings Threads::Threads GTest::gtest_main)
 # Discovery runs the fresh binary to list tests; macOS can take >5 s (the default) to first-launch
 # a newly linked binary on a busy machine.
