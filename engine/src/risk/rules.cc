@@ -7,6 +7,9 @@
 #include <limits>
 #include <optional>
 
+#include "rule_support.h"
+#include "vyuha/risk/wide.h"
+
 namespace vyuha::risk {
 
 namespace {
@@ -14,35 +17,9 @@ namespace {
 using oms::OrderDetails;
 using oms::OrderType;
 
-// Prices and quantities come from callers, so the products below can't be allowed to overflow.
-__extension__ using Wide = __int128;
-
-constexpr Outcome reject(std::int64_t limit = 0, std::int64_t current = 0) noexcept {
-  return {.verdict = Verdict::kReject, .limit = limit, .current = current};
-}
-constexpr Outcome warn(std::int64_t limit, std::int64_t current) noexcept {
-  return {.verdict = Verdict::kWarn, .limit = limit, .current = current};
-}
-
-constexpr std::int64_t saturate(Wide value) noexcept {
-  return value > std::numeric_limits<std::int64_t>::max() ? std::numeric_limits<std::int64_t>::max()
-                                                          : static_cast<std::int64_t>(value);
-}
-
-// The LTP if there is one and it arrived within kLtpMaxAge. The book is the core thread's, as the gate is, so
-// a tick can't be newer than the gate's reading: one that looks it, or has no stamp, is refused.
-std::optional<Price> fresh_ltp(const GateContext& ctx, std::int64_t instrument_id, Nanos monotonic) noexcept {
-  if (ctx.book == nullptr || instrument_id <= 0) {
-    return std::nullopt;
-  }
-  const md::Tick* tick = ctx.book->find(static_cast<md::InstrumentId>(instrument_id));
-  if (tick == nullptr || tick->ltp <= Price{} || tick->recv_mono <= 0 || !ctx.fresh(tick->recv_mono)) {
-    return std::nullopt;
-  }
-  const Nanos age =
-      monotonic - tick->recv_mono;  // the engine's own receive stamp, never exchange time (D-26)
-  return age <= kLtpMaxAge && age >= 0 ? std::optional{tick->ltp} : std::nullopt;
-}
+using detail::fresh_ltp;
+using detail::reject;
+using detail::warn;
 
 // A hard limit that's breached rejects and a soft one warns. `over` says whether a limit value is breached.
 template <class Over>
@@ -484,5 +461,24 @@ std::uint8_t GateSendLimits::ops_venue(std::int64_t instrument_id) const noexcep
   const InstrumentRef* i = ctx_->instruments != nullptr ? ctx_->instruments->find(instrument_id) : nullptr;
   return i != nullptr ? risk::ops_venue(i->exchange) : oms::kOpsVenueUnknown;
 }
+
+namespace detail {
+
+// The LTP if there is one and it arrived within kLtpMaxAge. The book is the core thread's, as the gate is, so
+// a tick can't be newer than the gate's reading: one that looks it, or has no stamp, is refused.
+std::optional<Price> fresh_ltp(const GateContext& ctx, std::int64_t instrument_id, Nanos monotonic) noexcept {
+  if (ctx.book == nullptr || instrument_id <= 0) {
+    return std::nullopt;
+  }
+  const md::Tick* tick = ctx.book->find(static_cast<md::InstrumentId>(instrument_id));
+  if (tick == nullptr || tick->ltp <= Price{} || tick->recv_mono <= 0 || !ctx.fresh(tick->recv_mono)) {
+    return std::nullopt;
+  }
+  const Nanos age =
+      monotonic - tick->recv_mono;  // the engine's own receive stamp, never exchange time (D-26)
+  return age <= kLtpMaxAge && age >= 0 ? std::optional{tick->ltp} : std::nullopt;
+}
+
+}  // namespace detail
 
 }  // namespace vyuha::risk

@@ -46,6 +46,8 @@ struct InstrumentRef {
   Nanos expires_at{0};  // 15:30 IST on expiry day; 0 for a contract that doesn't expire
   bool fo_ban{false};
   bool restricted{false};
+  // The instrument an option or a future is on; 0 for one that isn't on another (an equity is its own).
+  std::int64_t underlying_id{0};
   // Today's circuit band, when known. A live order needs it (D-22); M2.3c supplies it from broker quotes.
   std::optional<Price> lower_circuit{};
   std::optional<Price> upper_circuit{};
@@ -194,8 +196,16 @@ enum class LimitKey : std::uint8_t {
   kAllowMisAfter,  // HHMM in IST
   kTradingWindowStart,
   kTradingWindowEnd,
+  kMaxOpenOrders,
+  kMaxPositionLots,
+  kMaxPositionNotional,
+  kMaxGrossExposure,
+  kMaxNetDeltaInr,
+  kMaxNetVegaInr,
+  kMaxDailyLoss,
+  kMaxDrawdownFromPeak,
 };
-inline constexpr std::size_t kLimitKeyCount = 10;
+inline constexpr std::size_t kLimitKeyCount = 18;
 
 enum class LimitScope : std::uint8_t { kDesk, kAccount, kTrader, kStrategy, kInstrument };
 
@@ -237,24 +247,40 @@ struct LimitSet {
     return true;
   }
 
-  // Every scope that applies to this order: desk, its account, trader and strategy, and its instrument.
+  // Whether a limit row covers this order: the desk's, its account's, trader's or strategy's, or its
+  // instrument's.
+  [[nodiscard]] static bool applies(const LimitRow& r, const oms::OrderDetails& order) noexcept {
+    switch (r.scope) {
+      case LimitScope::kDesk:
+        return true;
+      case LimitScope::kAccount:
+        return r.id == order.account_id;
+      case LimitScope::kTrader:
+        return r.id == order.user_id;
+      case LimitScope::kStrategy:
+        return order.strategy_id.has_value() && r.id == *order.strategy_id;
+      case LimitScope::kInstrument:
+        return r.instrument_id == order.instrument_id;
+    }
+    return false;
+  }
+
+  // The strictest of every row that applies to this order.
   [[nodiscard]] ResolvedLimit resolve(LimitKey key, const oms::OrderDetails& order,
                                       Tightest tightest) const noexcept {
-    return resolve_where(key, tightest, [&order](const LimitRow& r) noexcept {
-      switch (r.scope) {
-        case LimitScope::kDesk:
-          return true;
-        case LimitScope::kAccount:
-          return r.id == order.account_id;
-        case LimitScope::kTrader:
-          return r.id == order.user_id;
-        case LimitScope::kStrategy:
-          return order.strategy_id.has_value() && r.id == *order.strategy_id;
-        case LimitScope::kInstrument:
-          return r.instrument_id == order.instrument_id;
+    return resolve_where(key, tightest, [&order](const LimitRow& r) noexcept { return applies(r, order); });
+  }
+
+  // Every row that applies, one at a time: a limit that is measured against a scope's own total (open orders,
+  // exposure, P&L) has to be judged per row, since each scope has a different total.
+  template <class Fn>
+  void for_each_applicable(LimitKey key, const oms::OrderDetails& order, Fn fn) const noexcept {
+    const auto k = static_cast<std::size_t>(key);
+    for (const LimitRow& r : std::span(rows[k]).first(counts[k])) {
+      if (applies(r, order)) {
+        fn(r);
       }
-      return false;
-    });
+    }
   }
 
   // Desk and account scopes only: an OPS bucket belongs to the account, not to a trader or strategy on it.
@@ -372,6 +398,11 @@ struct DupTable {
   std::size_t count{0};
 };
 
+class ScopeBook;
+
+// How old a Greek can be and still count (D-28). RISK_GREEKS_MAX_AGE_MS sets it.
+inline constexpr Nanos kDefaultGreeksMaxAge = 15 * kNanosPerSecond;
+
 struct GateContext {
   LimitSet limits{};
   KillSwitch kill{};
@@ -388,6 +419,10 @@ struct GateContext {
   // a tick newer than the pause. Core thread only.
   PauseWatch pause{};
   Nanos stale_before{0};
+  // Positions, working orders and what they add up to, per scope. Null reads as "positions not loaded"
+  // (D-27).
+  ScopeBook* scopes{nullptr};
+  Nanos greeks_max_age{kDefaultGreeksMaxAge};
   [[nodiscard]] bool fresh(Nanos received_monotonic) const noexcept {
     return received_monotonic > stale_before;
   }

@@ -1,4 +1,6 @@
 #include "vyuha/risk/risk_gate.h"
+#include "vyuha/risk/scope_book.h"
+#include "vyuha/risk/wide.h"
 
 #include <array>
 #include <utility>
@@ -36,6 +38,20 @@ std::string_view reason_text(const RuleResult& result) noexcept {
       return kTriggerSideReason;
     case RuleReason::kTriggerBand:
       return kTriggerBandReason;
+    case RuleReason::kDataMissing:
+      switch (result.source) {
+        case DataSource::kPositions:
+          return "R-DATA-MISSING:positions";
+        case DataSource::kPnl:
+          return "R-DATA-MISSING:pnl";
+        case DataSource::kMargin:
+          return "R-DATA-MISSING:margin";
+        case DataSource::kGreeks:
+          return "R-DATA-MISSING:greeks";
+        case DataSource::kNone:
+          return "R-DATA-MISSING";
+      }
+      return "R-DATA-MISSING";
     case RuleReason::kRule:
       break;
   }
@@ -56,8 +72,21 @@ std::expected<RiskGate, Error> RiskGate::create(std::span<const Rule> rules, con
   return RiskGate(rules, clock);
 }
 
-bool RiskGate::is_opening(const GateContext& /*ctx*/, const oms::OrderDetails& /*order*/) noexcept {
-  return true;
+// D-29: per account and instrument, an order is opening if abs(net + same-side working + this order) is more
+// than abs(net). A flip is opening as a whole order. With no positions loaded nothing is known, so every
+// order counts as opening (D-27) and the rules that need positions refuse it.
+bool RiskGate::is_opening(const GateContext& ctx, const oms::OrderDetails& order) noexcept {
+  if (ctx.scopes == nullptr || !ctx.scopes->positions_loaded()) {
+    return true;
+  }
+  const Position* p = ctx.scopes->position(LimitScope::kAccount, order.account_id, order.instrument_id);
+  const Wide net = p != nullptr ? Wide{p->net_qty} : Wide{0};
+  const bool buy = order.side == oms::Side::kBuy;
+  const Wide working = p == nullptr ? Wide{0} : Wide{buy ? p->working_buy : p->working_sell};
+  const Wide added = working + Wide{order.qty};
+  const Wide projected = net + (buy ? added : -added);
+  // Larger, or on the other side of flat: a flip is opening as a whole order, however small the new side.
+  return wide_abs(projected) > wide_abs(net) || (net > 0 && projected < 0) || (net < 0 && projected > 0);
 }
 
 GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order) const noexcept {
@@ -93,7 +122,8 @@ GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order
                             .limit = o.limit,
                             .current = o.current,
                             .alert = o.alert,
-                            .reason = o.reason};
+                            .reason = o.reason,
+                            .source = o.source};
     if (o.verdict == Verdict::kWarn) {
       out.warnings.at(out.warning_count++) = result;  // at most one per rule, so it always fits
     } else if (o.verdict != Verdict::kPass) {
