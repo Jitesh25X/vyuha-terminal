@@ -239,10 +239,21 @@ Current milestone: **M4.1, then M2**
   - needs: nothing new
   - done: Tests: an illiquid stale holding at 10 s doesn't block an unrelated live opening order but blocks it at 61 s; a stale order instrument, or a stale underlying, blocks at 3 s. `RISK_MARK_MAX_AGE_OTHER_MS` is parsed like the other ages, default 60,000. Migration 000013 writes one `limit.seed` audit event per seeded limit and the chain still verifies.
   - notes: Owner, 2026-11-16 (D-27 as amended, D-42). Also records D-40, D-41 and the D-26 note.
-- [ ] **M2.5** SimBroker (paper) on live ticks; brackets/OCO; freeze-qty slicer
-  - deps: M2.4b
+- [ ] **M2.5a** SimBroker (paper) on live ticks
+  - deps: M2.4c
   - needs: nothing new
-  - done: F-EX-4 ACs
+  - done: F-EX-4's fill AC (a BUY LIMIT at 100 fills at 100 when the LTP prints 99.95), a market order filling at the opposite best plus configured slippage ticks, and the order sender and order book interfaces a real adapter has. The other two F-EX-4 ACs land later: paper P&L with the cost model in M2.6 (flat schedule) and M4, the `PAPER` tag in M2.9.
+  - notes: Owner, 2026-11-17: M2.5 is split (D-46). The SimBroker is a broker adapter, so it takes only `ApprovedOrder` (invariant 1) and uses the same OMS and gate path as live. It is the only broker allowed in tests, CI and dev (invariant 3).
+- [ ] **M2.5b** Freeze-quantity slicer
+  - deps: M2.5a
+  - needs: nothing new
+  - done: Children at or below the freeze quantity, each its own id and each through the gate, shown as one parent; a refused child stops the rest (D-45).
+  - notes: Build on `oms::FreezeSlicer` (M2.3), the only code that can make `SliceIntent`. It still needs lot rounding and ids for the children. `max_order_qty_lots` applies per order before slicing, so gate the parent's full size. Give each child its own id: until then, a child submitted twice has the sibling exemption from R-DUP. `InstrumentRef` has no freeze quantity yet.
+- [ ] **M2.5c** Brackets and OCO
+  - deps: M2.5b
+  - needs: nothing new
+  - done: The protective stop is placed immediately after the entry fills and the target rests as a LIMIT, one cancels the other within 1 s, the pair counts once for the opening test (D-43), and a refused stop is retried, then alerted, with the position shown as unprotected (D-44). `min_reward_risk` is read here (D-33).
+  - notes: Owner, 2026-11-17. The OCO sibling rule must be in the `ScopeBook` working totals before M2.6 relies on them.
   - notes: `min_reward_risk` is seeded 0 at desk scope (migration 000011) and 0 means off, so "strictest" isn't the smallest value: before the ratio check reads it, write in RISK_ENGINE §3 that the largest ratio wins, with a test that a desk 0 doesn't cancel a stricter account row (M2.4b review). Build on `oms::FreezeSlicer` (M2.3), the only code that can make `SliceIntent`. It still needs lot rounding and ids for the children. `max_order_qty_lots` applies per order before slicing, so gate the parent's full size. Give each child its own id: until then, a child submitted twice has the sibling exemption from R-DUP.
 - [ ] **M2.6** Position/MTM projector + costs (temporary flat schedule until M4)
   - deps: M2.5
