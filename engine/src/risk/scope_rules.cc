@@ -105,11 +105,29 @@ template <class Measure>
   return buy ? added : -added;
 }
 
-// A mark older than an LTP may be (3 s), or from before a pause, is no price to measure exposure or a loss
-// with: a live order is refused R-DATA-MISSING:mark while any position held has one (owner, 2026-11-15).
-// Only opening orders get here, so a reducing order still passes. A paper order goes on the marks there are.
-[[nodiscard]] bool marks_missing(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
-  return o.is_paper.live() && !ctx.scopes->held_marks_fresh(f.monotonic, kMarkMaxAge, ctx.stale_before);
+// What a live order needs of the marks (owner, 2026-11-16): its own instrument and its underlying, held or
+// not, no older than an LTP may be (3 s); every other instrument held no older than ctx.mark_max_age_other.
+// A mark from before a pause, or stamped in the future, is no mark at all. Refused R-DATA-MISSING:mark,
+// naming the instrument in `current` and the age it was allowed, in ms, in `limit`. Only opening orders get
+// here, so a reducing order still passes. A paper order goes on the marks there are.
+[[nodiscard]] std::optional<Outcome> marks_missing(const GateContext& ctx, const OrderDetails& o,
+                                                   const GateFacts& f) noexcept {
+  if (!o.is_paper.live()) {
+    return std::nullopt;
+  }
+  const std::int64_t underlying = f.instrument != nullptr ? f.instrument->underlying_id : 0;
+  const auto stale = ctx.scopes->stale_mark(o.instrument_id, underlying,
+                                            {.monotonic = f.monotonic,
+                                             .stale_before = ctx.stale_before,
+                                             .near_age = kMarkMaxAge,
+                                             .other_age = ctx.mark_max_age_other});
+  if (!stale.has_value()) {
+    return std::nullopt;
+  }
+  Outcome out = data_missing(DataSource::kMark);
+  out.current = stale->instrument_id;
+  out.limit = stale->max_age / (kNanosPerSecond / 1'000);
+  return out;
 }
 
 [[nodiscard]] bool greeks_fresh(const GateContext& ctx, const Greeks& g, Nanos monotonic) noexcept {
@@ -140,13 +158,15 @@ struct OrderUnits {
   Wide vega{0};
   bool priced{false};
   std::optional<DataSource> missing;
+  std::optional<Outcome> stale_mark;  // set with missing == kMark: the refusal that names the instrument
 };
 
 [[nodiscard]] OrderUnits units_of(const GateContext& ctx, const OrderDetails& o,
                                   const GateFacts& f) noexcept {
   OrderUnits u;
   const bool option = f.instrument != nullptr && f.instrument->segment == Segment::kOpt;
-  if (marks_missing(ctx, o, f)) {
+  if (const auto stale = marks_missing(ctx, o, f); stale.has_value()) {
+    u.stale_mark = stale;
     u.missing = DataSource::kMark;
     return u;
   }
@@ -181,6 +201,13 @@ struct OrderUnits {
     u.delta = unit->units();  // delta 1: the rupee delta of a share or a future is its price
   }
   return u;
+}
+
+[[nodiscard]] Outcome missing_outcome(const OrderUnits& u) noexcept {
+  if (u.stale_mark.has_value()) {
+    return *u.stale_mark;
+  }
+  return data_missing(u.missing.value_or(DataSource::kNone));
 }
 
 // ---- rule 14 ----
@@ -220,7 +247,7 @@ Outcome position(const GateContext& ctx, const OrderDetails& o, const GateFacts&
   }
   const OrderUnits u = units_of(ctx, o, f);
   if (u.missing.has_value()) {
-    return data_missing(*u.missing);
+    return missing_outcome(u);
   }
   if (!u.priced) {
     return reject();
@@ -245,7 +272,7 @@ Outcome exposure(const GateContext& ctx, const OrderDetails& o, const GateFacts&
   }
   const OrderUnits u = units_of(ctx, o, f);
   if (u.missing.has_value()) {
-    return data_missing(*u.missing);
+    return missing_outcome(u);
   }
   if (!u.priced) {
     return reject();
@@ -268,7 +295,7 @@ Outcome greeks(const GateContext& ctx, const OrderDetails& o, const GateFacts& f
   }
   const OrderUnits u = units_of(ctx, o, f);
   if (u.missing.has_value()) {
-    return data_missing(*u.missing);
+    return missing_outcome(u);
   }
   if (!u.priced) {
     return reject();
@@ -301,8 +328,8 @@ Outcome loss_daily(const GateContext& ctx, const OrderDetails& o, const GateFact
   if (!pnl_ready(ctx)) {
     return data_missing(DataSource::kPnl);
   }
-  if (marks_missing(ctx, o, f)) {
-    return data_missing(DataSource::kMark);
+  if (const auto stale = marks_missing(ctx, o, f); stale.has_value()) {
+    return *stale;
   }
   return judge_rows(ctx, o, LimitKey::kMaxDailyLoss, false,
                     [&ctx](const LimitRow& row, const Measured& at) noexcept {
@@ -316,8 +343,8 @@ Outcome drawdown(const GateContext& ctx, const OrderDetails& o, const GateFacts&
   if (!pnl_ready(ctx)) {
     return data_missing(DataSource::kPnl);
   }
-  if (marks_missing(ctx, o, f)) {
-    return data_missing(DataSource::kMark);
+  if (const auto stale = marks_missing(ctx, o, f); stale.has_value()) {
+    return *stale;
   }
   return judge_rows(ctx, o, LimitKey::kMaxDrawdownFromPeak, false,
                     [&ctx](const LimitRow& row, const Measured& at) noexcept {
@@ -606,6 +633,11 @@ std::expected<Nanos, Error> parse_greeks_max_age_ms(std::string_view text) noexc
 std::expected<Nanos, Error> parse_margin_max_age_ms(std::string_view text) noexcept {
   return parse_age_ms(text, kDefaultMarginMaxAge, 300'000,
                       "RISK_MARGIN_MAX_AGE_MS: whole milliseconds, 1 to 300000");
+}
+
+std::expected<Nanos, Error> parse_mark_max_age_other_ms(std::string_view text) noexcept {
+  return parse_age_ms(text, kDefaultMarkMaxAgeOther, 300'000,
+                      "RISK_MARK_MAX_AGE_OTHER_MS: whole milliseconds, 1 to 300000");
 }
 
 }  // namespace vyuha::risk

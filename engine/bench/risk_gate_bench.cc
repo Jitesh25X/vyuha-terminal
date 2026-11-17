@@ -359,21 +359,26 @@ BENCHMARK_CAPTURE(BM_ScopeRuleLive, position, RuleCode::kPosition);
 BENCHMARK_CAPTURE(BM_ScopeRuleLive, exposure, RuleCode::kExposure);
 BENCHMARK_CAPTURE(BM_ScopeRuleLive, loss_daily, RuleCode::kLossDaily);
 
-// The mark scan on its own: every instrument held (500 of them) has a mark, so it walks all of them.
-void BM_HeldMarksFresh(benchmark::State& state) {
+// The mark check on its own: an order's instrument and its underlying (both held here, so the scan skips
+// them) and every other instrument held (500 of them), each with a mark, so it walks the whole list.
+void BM_StaleMark(benchmark::State& state) {
   BenchDesk desk;
   vyuha::risk::ScopeBook book(desk.instruments);
   prepare_scope_book(desk, book);
+  const vyuha::risk::ScopeBook::MarkWindow window{.monotonic = BenchDesk::kNow,
+                                                  .stale_before = 0,
+                                                  .near_age = vyuha::risk::kMarkMaxAge,
+                                                  .other_age = vyuha::risk::kDefaultMarkMaxAgeOther};
   for (auto _ : state) {
-    auto fresh = std::as_const(book).held_marks_fresh(BenchDesk::kNow, vyuha::risk::kMarkMaxAge, 0);
-    benchmark::DoNotOptimize(fresh);
-    if (!fresh) {
-      state.SkipWithError("a held mark was stale, so the scan stopped early");
+    auto stale = std::as_const(book).stale_mark(1, 2, window);
+    benchmark::DoNotOptimize(stale);
+    if (stale.has_value()) {
+      state.SkipWithError("a mark was stale, so the scan stopped early");
       break;
     }
   }
 }
-BENCHMARK(BM_HeldMarksFresh);
+BENCHMARK(BM_StaleMark);
 
 // The worst case for the uncover check: an account holding 800 option positions of one underlying across 16
 // expiries, a short of its own, and an order that sells one of the longs. The check walks every one of them.

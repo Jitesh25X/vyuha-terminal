@@ -457,15 +457,46 @@ bool ScopeBook::held_greeks_fresh(Nanos monotonic, Nanos max_age, Nanos stale_be
   return true;
 }
 
-bool ScopeBook::held_marks_fresh(Nanos monotonic, Nanos max_age, Nanos stale_before) const noexcept {
+namespace {
+
+[[nodiscard]] bool mark_usable(bool has_mark, Nanos as_of, const ScopeBook::MarkWindow& w,
+                               Nanos max_age) noexcept {
+  const Nanos age = w.monotonic - as_of;
+  return has_mark && as_of > w.stale_before && age >= 0 && age <= max_age;
+}
+
+}  // namespace
+
+std::optional<ScopeBook::StaleMark> ScopeBook::stale_mark(std::int64_t own, std::int64_t underlying,
+                                                          const MarkWindow& window) const noexcept {
+  const auto near_stale = [&](std::int64_t id) noexcept {
+    const std::int32_t slot = find_inst(id);
+    if (slot < 0) {
+      return true;
+    }
+    const InstState& state = insts_[static_cast<std::size_t>(slot)];
+    return !mark_usable(state.has_mark, state.mark_as_of, window, window.near_age);
+  };
+  if (near_stale(own)) {
+    return StaleMark{.instrument_id = own, .max_age = window.near_age};
+  }
+  const bool has_underlying = underlying != 0 && underlying != own;
+  if (has_underlying && near_stale(underlying)) {
+    return StaleMark{.instrument_id = underlying, .max_age = window.near_age};
+  }
+  // own and the underlying passed the near age. Unless the other age is the shorter, that is enough for the
+  // other one too, so the scan need not tell them apart.
+  const bool skip_near = window.other_age < window.near_age;
   for (std::size_t i = 0; i < held_count_; ++i) {
     const InstState& state = insts_[static_cast<std::size_t>(held_[i])];
-    const Nanos age = monotonic - state.mark_as_of;
-    if (!state.has_mark || state.mark_as_of <= stale_before || age < 0 || age > max_age) {
-      return false;
+    if (skip_near && (state.instrument_id == own || (has_underlying && state.instrument_id == underlying))) {
+      continue;  // judged above, at the near age
+    }
+    if (!mark_usable(state.has_mark, state.mark_as_of, window, window.other_age)) {
+      return StaleMark{.instrument_id = state.instrument_id, .max_age = window.other_age};
     }
   }
-  return true;
+  return std::nullopt;
 }
 
 const Position* ScopeBook::position(LimitScope kind, const Uuid& scope,

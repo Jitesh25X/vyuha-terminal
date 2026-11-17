@@ -416,6 +416,10 @@ inline constexpr Nanos kDefaultGreeksMaxAge = 15 * kNanosPerSecond;
 // RISK_MARGIN_MAX_AGE_MS sets it.
 inline constexpr Nanos kDefaultMarginMaxAge = 30 * kNanosPerSecond;
 
+// How old the mark of an instrument held, other than the order's own and its underlying, can be and still
+// count (D-27, owner 2026-11-16). RISK_MARK_MAX_AGE_OTHER_MS sets it.
+inline constexpr Nanos kDefaultMarkMaxAgeOther = 60 * kNanosPerSecond;
+
 struct GateContext {
   LimitSet limits{};
   KillSwitch kill{};
@@ -439,6 +443,7 @@ struct GateContext {
   // Margin figures from the broker (M3.5) and loss-streak lockouts (the EOD job). Null reads as "not loaded".
   MarginCache* margin{nullptr};
   Nanos margin_max_age{kDefaultMarginMaxAge};
+  Nanos mark_max_age_other{kDefaultMarkMaxAgeOther};
   DisciplineTable* discipline{nullptr};
   [[nodiscard]] bool fresh(Nanos received_monotonic) const noexcept {
     return received_monotonic > stale_before;

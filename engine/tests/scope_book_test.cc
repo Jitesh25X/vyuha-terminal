@@ -10,6 +10,7 @@
 
 #include "vyuha/core/price.h"
 
+// NOLINTBEGIN(bugprone-unchecked-optional-access): the tests that read a stale mark say it is there first
 namespace vyuha::risk {
 namespace {
 
@@ -308,72 +309,125 @@ TEST(ScopeBook, AHeldOptionStaysAnOptionWhenTheMasterNowDescribesItAsAShare) {
   EXPECT_TRUE(b.book.held_greeks_fresh(1'000, 100, 0));
 }
 
-// ---- marks have an age (owner, 2026-11-15) ----
+// ---- marks have an age (owner, 2026-11-15 and 2026-11-16) ----
 
-TEST(ScopeBook, NothingHeldMeansNoMarkIsNeeded) {
-  Book b;
-  EXPECT_TRUE(b.book.held_marks_fresh(1'000, 100, 0));
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1));  // a mark for what nobody holds, and old
-  EXPECT_TRUE(b.book.held_marks_fresh(1'000, 100, 0));
+// The window the tests use: marks of the order's own instrument and its underlying may be 100 old, any other
+// held instrument's 1,000.
+ScopeBook::MarkWindow window(Nanos now, Nanos stale_before = 0) {
+  return {.monotonic = now, .stale_before = stale_before, .near_age = 100, .other_age = 1'000};
 }
 
-TEST(ScopeBook, AHeldInstrumentWithNoMarkIsNotFresh) {
+TEST(ScopeBook, TheOrdersOwnInstrumentNeedsAMarkWhetherHeldOrNot) {
   Book b;
-  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
-  EXPECT_FALSE(b.book.held_marks_fresh(1'000, 100, 0));
+  const auto none = b.book.stale_mark(kEquity, 0, window(1'000));
+  ASSERT_TRUE(none.has_value());
+  EXPECT_EQ(none->instrument_id, kEquity);
+  EXPECT_EQ(none->max_age, 100);
   ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1'000));
-  EXPECT_TRUE(b.book.held_marks_fresh(1'000, 100, 0));
+  EXPECT_FALSE(b.book.stale_mark(kEquity, 0, window(1'000)).has_value());  // nobody holds it
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
+  EXPECT_FALSE(b.book.stale_mark(kEquity, 0, window(1'000)).has_value());  // and held
 }
 
 TEST(ScopeBook, AMarkIsFreshAtExactlyTheMaximumAgeAndStaleOneNanosecondOver) {
   Book b;
-  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
   ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1'000));
-  EXPECT_TRUE(b.book.held_marks_fresh(1'100, 100, 0));
-  EXPECT_FALSE(b.book.held_marks_fresh(1'101, 100, 0));
+  EXPECT_FALSE(b.book.stale_mark(kEquity, 0, window(1'100)).has_value());
+  const auto stale = b.book.stale_mark(kEquity, 0, window(1'101));
+  ASSERT_TRUE(stale.has_value());
+  EXPECT_EQ(stale->instrument_id, kEquity);
 }
 
 TEST(ScopeBook, AMarkFromBeforeAPauseOrStampedInTheFutureIsNotFresh) {
   Book b;
-  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
   ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1'000));
-  EXPECT_TRUE(b.book.held_marks_fresh(1'050, 100, 999));
-  EXPECT_FALSE(b.book.held_marks_fresh(1'050, 100, 1'000));  // arrived at the pause itself: not after it
-  EXPECT_FALSE(b.book.held_marks_fresh(999, 100, 0));        // from the future
+  EXPECT_FALSE(b.book.stale_mark(kEquity, 0, window(1'050, 999)).has_value());
+  EXPECT_TRUE(b.book.stale_mark(kEquity, 0, window(1'050, 1'000)).has_value());  // at the pause: not after it
+  EXPECT_TRUE(b.book.stale_mark(kEquity, 0, window(999)).has_value());           // from the future
 }
 
-TEST(ScopeBook, OneOldMarkAmongManyMakesThemAllStaleAndAFlatInstrumentIsNotCounted) {
+TEST(ScopeBook, TheUnderlyingIsJudgedLikeTheOwnInstrumentWhetherHeldOrNotAndNeedNotBeInTheTable) {
+  Book b;
+  constexpr std::int64_t kIndex = 900;  // not in the instrument table
+  ASSERT_TRUE(b.book.set_mark(kFuture, rupees(100), 1'000));
+  const auto none = b.book.stale_mark(kFuture, kIndex, window(1'000));
+  ASSERT_TRUE(none.has_value());
+  EXPECT_EQ(none->instrument_id, kIndex);
+  EXPECT_EQ(none->max_age, 100);
+  ASSERT_TRUE(b.book.set_mark(kIndex, rupees(100), 900));
+  EXPECT_FALSE(b.book.stale_mark(kFuture, kIndex, window(1'000)).has_value());
+  EXPECT_TRUE(b.book.stale_mark(kFuture, kIndex, window(1'001)).has_value());
+  EXPECT_FALSE(b.book.stale_mark(kFuture, kFuture, window(1'000)).has_value());  // its own underlying: once
+}
+
+TEST(ScopeBook, OwnIsJudgedBeforeTheUnderlyingAndThatBeforeTheOthersHeld) {
+  Book b;
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kOption2));
+  EXPECT_EQ(b.book.stale_mark(kFuture, kEquity, window(1'000))->instrument_id, kFuture);
+  ASSERT_TRUE(b.book.set_mark(kFuture, rupees(100), 1'000));
+  EXPECT_EQ(b.book.stale_mark(kFuture, kEquity, window(1'000))->instrument_id, kEquity);
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1'000));
+  const auto other = b.book.stale_mark(kFuture, kEquity, window(1'000));
+  ASSERT_TRUE(other.has_value());
+  EXPECT_EQ(other->instrument_id, kOption2);
+  EXPECT_EQ(other->max_age, 1'000);
+}
+
+TEST(ScopeBook, AnotherHeldInstrumentMayBeOlderButNotMissingOrFromBeforeAPauseOrFromTheFuture) {
+  Book b;
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1'000));
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kFuture));
+  EXPECT_TRUE(b.book.stale_mark(kEquity, 0, window(1'000)).has_value());  // no mark at all
+  ASSERT_TRUE(b.book.set_mark(kFuture, rupees(100), 1'000));
+  EXPECT_FALSE(b.book.stale_mark(kEquity, 0, window(1'000)).has_value());
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 2'000));
+  EXPECT_FALSE(b.book.stale_mark(kEquity, 0, window(2'000)).has_value());  // 1,000 old: at the age
+  const auto old = b.book.stale_mark(kEquity, 0, window(2'001));
+  ASSERT_TRUE(old.has_value());
+  EXPECT_EQ(old->instrument_id, kFuture);
+  EXPECT_TRUE(b.book.stale_mark(kEquity, 0, window(2'000, 1'000)).has_value());  // pause at its stamp
+  ASSERT_TRUE(b.book.set_mark(kFuture, rupees(100), 2'001));
+  EXPECT_TRUE(b.book.stale_mark(kEquity, 0, window(2'000)).has_value());  // stamped in the future
+}
+
+TEST(ScopeBook, AnOtherAgeShorterThanTheNearAgeNeverJudgesTheOwnInstrumentOrItsUnderlying) {
   Book b;
   ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kEquity));
   ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kFuture));
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1'000));
-  ASSERT_TRUE(b.book.set_mark(kFuture, rupees(100), 10));
-  EXPECT_FALSE(b.book.held_marks_fresh(1'000, 100, 0));
-  ASSERT_TRUE(b.fill(Side::kSell, 10, rupees(100), kFuture));  // flat in every scope
-  EXPECT_TRUE(b.book.held_marks_fresh(1'000, 100, 0));
-  ASSERT_TRUE(b.fill(Side::kBuy, 1, rupees(100), kFuture));  // held again, and old
-  EXPECT_FALSE(b.book.held_marks_fresh(1'000, 100, 0));
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kOption2));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 950));
+  ASSERT_TRUE(b.book.set_mark(kFuture, rupees(100), 950));
+  ASSERT_TRUE(b.book.set_mark(kOption2, rupees(100), 995));
+  ScopeBook::MarkWindow w = window(1'000);
+  w.other_age = 10;                                                  // shorter than the near age of 100
+  EXPECT_FALSE(b.book.stale_mark(kFuture, kEquity, w).has_value());  // 50 old, each at the near age
+  w.monotonic = 1'005;
+  EXPECT_FALSE(b.book.stale_mark(kFuture, kEquity, w).has_value());  // the other one is 10 old: at the age
+  w.monotonic = 1'006;
+  const auto other = b.book.stale_mark(kFuture, kEquity, w);
+  ASSERT_TRUE(other.has_value());
+  EXPECT_EQ(other->instrument_id, kOption2);
+  EXPECT_EQ(other->max_age, 10);
 }
 
-TEST(ScopeBook, AnInstrumentIsHeldWhileAnyScopeHoldsItForTheMarksToo) {
+TEST(ScopeBook, AFlatInstrumentIsNotCountedAndOneHeldInAnyScopeIs) {
   Book b;
-  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kEquity, {.account = kAccount}));
-  ASSERT_TRUE(b.fill(Side::kSell, 10, rupees(100), kEquity, {.account = kOtherAccount}));  // the desk is flat
-  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 10));
-  EXPECT_FALSE(b.book.held_marks_fresh(1'000, 100, 0));
-  ASSERT_TRUE(b.fill(Side::kSell, 10, rupees(100), kEquity, {.account = kAccount}));
-  EXPECT_FALSE(b.book.held_marks_fresh(1'000, 100, 0));  // the other account still holds it
-  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kEquity, {.account = kOtherAccount}));
-  EXPECT_TRUE(b.book.held_marks_fresh(1'000, 100, 0));
+  ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 1'000));
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kFuture, {.account = kAccount}));
+  ASSERT_TRUE(b.fill(Side::kSell, 10, rupees(100), kFuture, {.account = kOtherAccount}));  // the desk is flat
+  EXPECT_TRUE(b.book.stale_mark(kEquity, 0, window(1'000)).has_value());
+  ASSERT_TRUE(b.fill(Side::kSell, 10, rupees(100), kFuture, {.account = kAccount}));
+  EXPECT_TRUE(b.book.stale_mark(kEquity, 0, window(1'000)).has_value());  // the other account still holds it
+  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100), kFuture, {.account = kOtherAccount}));
+  EXPECT_FALSE(b.book.stale_mark(kEquity, 0, window(1'000)).has_value());
 }
 
 TEST(ScopeBook, ANewMarkRefreshesTheAge) {
   Book b;
-  ASSERT_TRUE(b.fill(Side::kBuy, 10, rupees(100)));
   ASSERT_TRUE(b.book.set_mark(kEquity, rupees(100), 10));
-  EXPECT_FALSE(b.book.held_marks_fresh(1'000, 100, 0));
+  EXPECT_TRUE(b.book.stale_mark(kEquity, 0, window(1'000)).has_value());
   ASSERT_TRUE(b.book.set_mark(kEquity, rupees(101), 950));
-  EXPECT_TRUE(b.book.held_marks_fresh(1'000, 100, 0));
+  EXPECT_FALSE(b.book.stale_mark(kEquity, 0, window(1'000)).has_value());
 }
 
 TEST(ScopeBook, AnOptionClosedAndHeldAgainIsCheckedAgain) {
@@ -527,3 +581,4 @@ TEST(ScopeBook, ManyScopesAndInstrumentsDontCollide) {
 
 }  // namespace
 }  // namespace vyuha::risk
+// NOLINTEND(bugprone-unchecked-optional-access)

@@ -100,6 +100,7 @@ struct ScopeDesk : Desk {
       banded.upper_circuit = rupees(1'000);
       EXPECT_TRUE(instruments.put(id, banded));
       tick(id, rupees(100));
+      mark(id, rupees(100));  // a live order needs a fresh mark for its own instrument (D-27)
     }
     tick(kFuture, rupees(100));
     mark(kEquity, rupees(100));

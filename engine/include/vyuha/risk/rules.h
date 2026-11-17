@@ -15,7 +15,8 @@ namespace vyuha::risk {
 
 // An LTP older than this can't be priced against (D-22). The same 3 s the UI uses to dim a price.
 inline constexpr Nanos kLtpMaxAge = 3 * kNanosPerSecond;
-// A mark is a price like any other, so it goes stale at the same age (owner, 2026-11-15).
+// A mark is a price like any other, so the order's own and its underlying's go stale at the same age (owner,
+// 2026-11-15). Other instruments held may be older: GateContext::mark_max_age_other.
 inline constexpr Nanos kMarkMaxAge = kLtpMaxAge;
 
 // Rules 1 to 13 of RISK_ENGINE §3, in chain order. M2.4 adds 14 to 22; until then a gate built from this
@@ -38,6 +39,9 @@ inline constexpr Nanos kMarkMaxAge = kLtpMaxAge;
 
 // RISK_MARGIN_MAX_AGE_MS: whole milliseconds, 1 to 300,000; empty is the default 30,000 (D-39).
 [[nodiscard]] std::expected<Nanos, Error> parse_margin_max_age_ms(std::string_view text) noexcept;
+
+// RISK_MARK_MAX_AGE_OTHER_MS: whole milliseconds, 1 to 300,000; empty is the default 60,000 (D-27).
+[[nodiscard]] std::expected<Nanos, Error> parse_mark_max_age_other_ms(std::string_view text) noexcept;
 
 // Invariant 3: live trading needs the setting to be exactly "true" and the environment to be prod or staging.
 [[nodiscard]] bool live_trading_allowed(std::string_view enabled, std::string_view env) noexcept;
