@@ -132,9 +132,25 @@ class ScopeBook {
   // Whether every option held has Greeks that arrived after `stale_before`, and not more than `max_age` ago
   // by `monotonic`. A held option's Greeks are part of the totals, so a stale one makes them stale.
   [[nodiscard]] bool held_greeks_fresh(Nanos monotonic, Nanos max_age, Nanos stale_before) const noexcept;
-  // The same for marks: whether every instrument held has a mark that arrived after `stale_before` and not
-  // more than `max_age` ago. Exposure and P&L are worked out from the marks, so one old mark makes them old.
-  [[nodiscard]] bool held_marks_fresh(Nanos monotonic, Nanos max_age, Nanos stale_before) const noexcept;
+  // How old a mark can be for the check below. `near_age` applies to the order's own instrument and its
+  // underlying (D-27, owner 2026-11-16); `other_age` to every other instrument held.
+  struct MarkWindow {
+    Nanos monotonic{0};
+    Nanos stale_before{0};
+    Nanos near_age{0};
+    Nanos other_age{0};
+  };
+  struct StaleMark {
+    std::int64_t instrument_id{0};
+    Nanos max_age{0};  // the age that instrument's mark was allowed
+  };
+  // The first instrument whose mark is no use, or nothing when all are: `own` (the order's instrument) and
+  // `underlying` (0 for none) must each have a mark whether held or not; every other instrument held in any
+  // scope needs one too, but may be older. A mark is no use when there is none, when it arrived at or before
+  // `stale_before`, when it is stamped in the future, or when it is older than its age. Own is judged first,
+  // then the underlying, then the held ones. One pass over the held list; nothing allocates.
+  [[nodiscard]] std::optional<StaleMark> stale_mark(std::int64_t own, std::int64_t underlying,
+                                                    const MarkWindow& window) const noexcept;
 
   [[nodiscard]] const Position* position(LimitScope kind, const oms::Uuid& scope,
                                          std::int64_t instrument_id) const noexcept;

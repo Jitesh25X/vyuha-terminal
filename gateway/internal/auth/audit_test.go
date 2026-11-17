@@ -11,6 +11,11 @@ import (
 // Every auth mutation leaves an audit row in order, the chain verifies, and nothing secret is stored.
 func TestAuthEventsAreAudited(t *testing.T) {
 	f := newFixture(t)
+	// Migrations seed audit rows (limit.seed); only the events written below are compared.
+	var baseline, baseCount int64
+	if err := f.pool.QueryRow(f.ctx, `SELECT coalesce(max(id), 0), count(*) FROM audit_event`).Scan(&baseline, &baseCount); err != nil {
+		t.Fatal(err)
+	}
 	username := f.createUser()                                                   // user.create
 	_, _ = f.svc.Login(f.ctx, "t_ghost_user", testPassword, f.meta)              // auth.login.failure (unknown_user)
 	_, _ = f.svc.Login(f.ctx, "correcthorsebatterystaple", testPassword, f.meta) // a password in the username box
@@ -32,7 +37,7 @@ func TestAuthEventsAreAudited(t *testing.T) {
 	}
 	_ = f.svc.Logout(f.ctx, s2.RefreshToken, f.meta) // already revoked: no second event
 
-	rows, err := f.pool.Query(f.ctx, `SELECT action, coalesce(payload->>'reason', payload->>'step', ''), coalesce(host(ip), '') FROM audit_event ORDER BY id`)
+	rows, err := f.pool.Query(f.ctx, `SELECT action, coalesce(payload->>'reason', payload->>'step', ''), coalesce(host(ip), '') FROM audit_event WHERE id > $1 ORDER BY id`, baseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +72,7 @@ func TestAuthEventsAreAudited(t *testing.T) {
 	}
 
 	res, err := audit.Verify(f.ctx, f.pool)
-	if err != nil || !res.OK || res.RowsChecked != int64(len(want)) {
+	if err != nil || !res.OK || res.RowsChecked != baseCount+int64(len(want)) {
 		t.Fatalf("verify: %+v %v", res, err)
 	}
 

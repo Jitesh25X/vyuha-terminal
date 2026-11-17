@@ -106,9 +106,20 @@ func exec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
 
 func TestChainVerifies(t *testing.T) {
 	_, pool := testdb.New(t)
+	// A migrated database already holds the 24 desk-limit seed events (migration 000013).
+	var seeds, baseline int64
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FILTER (WHERE action = 'limit.seed' AND actor_kind = 'system' AND entity = 'risk_limit'), count(*) FROM audit_event`).Scan(&seeds, &baseline); err != nil {
+		t.Fatal(err)
+	}
+	if seeds != 24 || baseline != 24 {
+		t.Fatalf("fresh database: %d limit.seed events of %d audit rows, want 24 of 24", seeds, baseline)
+	}
+	if r := mustVerify(t, pool); !r.OK || r.RowsChecked != baseline {
+		t.Fatalf("seed events do not verify: %+v", r)
+	}
 	ids := seed(t, pool)
 	r := mustVerify(t, pool)
-	if !r.OK || r.RowsChecked != int64(len(ids)) || r.HeadID != ids[len(ids)-1] || len(r.HeadHash) != 32 {
+	if !r.OK || r.RowsChecked != baseline+int64(len(ids)) || r.HeadID != ids[len(ids)-1] || len(r.HeadHash) != 32 {
 		t.Fatalf("unexpected result: %+v", r)
 	}
 	for i := 1; i < len(ids); i++ {
@@ -125,6 +136,10 @@ func TestChainVerifies(t *testing.T) {
 func TestConcurrentWritersKeepChainOrder(t *testing.T) {
 	_, pool := testdb.New(t)
 	q := store.New(pool)
+	var baseline int64
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM audit_event`).Scan(&baseline); err != nil {
+		t.Fatal(err)
+	}
 	var wg sync.WaitGroup
 	errs := make(chan error, 50)
 	for i := 0; i < 50; i++ {
@@ -142,7 +157,7 @@ func TestConcurrentWritersKeepChainOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if r := mustVerify(t, pool); !r.OK || r.RowsChecked != 50 {
+	if r := mustVerify(t, pool); !r.OK || r.RowsChecked != baseline+50 {
 		t.Fatalf("unexpected result: %+v", r)
 	}
 }

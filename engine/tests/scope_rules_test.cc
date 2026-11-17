@@ -371,8 +371,9 @@ TEST(RGreeks, GreeksThatPredateAPauseAreStaleHoweverYoungTheyLook) {
   ScopeDesk d;
   d.fresh_greeks();
   d.ctx.stale_before = d.clock.monotonic();
-  EXPECT_TRUE(names(d.check(RuleCode::kGreeks, d.option_order(Side::kSell, 10, true)), DataSource::kGreeks));
   d.clock.advance(1);
+  d.restamp_marks();  // the marks arrived after the pause: it is the Greeks that predate it
+  EXPECT_TRUE(names(d.check(RuleCode::kGreeks, d.option_order(Side::kSell, 10, true)), DataSource::kGreeks));
   d.fresh_greeks();
   EXPECT_PASS(d, kGreeks, d.option_order(Side::kSell, 10, true));
 }
@@ -534,7 +535,8 @@ TEST(DataMissing, PnlNotLoadedOrAPositionWithNoMarkNamesThePnlForPaperAndLive) {
   }
   d.sb.set_pnl_loaded(true);
   EXPECT_PASS(d, kLossDaily, d.order());
-  d.fill(Side::kBuy, 5, rupees(100), kFuture);  // no mark for the future
+  d.mark(kFuture, Price{});  // no mark for the future
+  d.fill(Side::kBuy, 5, rupees(100), kFuture);
   EXPECT_TRUE(names(d.check(RuleCode::kLossDaily, d.order()), DataSource::kPnl));
   d.mark(kFuture, rupees(100));
   EXPECT_PASS(d, kLossDaily, d.order());
@@ -684,7 +686,7 @@ TEST(Opening, ARejectedOrderLeavesNoWorkingState) {
 constexpr std::array<RuleCode, 5> kMarkRules{RuleCode::kPosition, RuleCode::kExposure, RuleCode::kGreeks,
                                              RuleCode::kLossDaily, RuleCode::kDrawdown};
 
-TEST(MarkAge, ALiveOpeningOrderIsRefusedWhenAHeldMarkIsOverThreeSecondsOldAndPassesAtExactlyThree) {
+TEST(MarkAge, ALiveOpeningOrderIsRefusedWhenItsOwnHeldMarkIsOverThreeSecondsOldAndPassesAtExactlyThree) {
   for (const RuleCode code : kMarkRules) {
     ScopeDesk d;
     d.fill(Side::kBuy, 10, rupees(100));  // held; its mark arrived now
@@ -737,22 +739,29 @@ TEST(MarkAge, APaperOrderGoesOnTheMarksThereAre) {
   }
 }
 
-TEST(MarkAge, WithNothingHeldNoMarkIsNeeded) {
+TEST(MarkAge, WithNothingHeldTheOrdersOwnInstrumentStillNeedsAFreshMark) {
   for (const RuleCode code : kMarkRules) {
     ScopeDesk d;
     d.clock.advance(600 * kNanosPerSecond);  // the one mark there is, for the equity, is ten minutes old
+    const Outcome out = d.check(code, d.live_order());
+    EXPECT_TRUE(names(out, DataSource::kMark)) << static_cast<int>(code);
+    EXPECT_EQ(out.current, kEquity);
+    EXPECT_EQ(out.limit, 3'000);
+    d.restamp_marks();
     EXPECT_EQ(d.verdict(code, d.live_order()), Verdict::kPass) << static_cast<int>(code);
   }
 }
 
-TEST(MarkAge, AStaleMarkOnAPositionHeldOnlyByAnotherAccountStillBlocks) {
+TEST(MarkAge, AStaleMarkOnAPositionHeldOnlyByAnotherAccountStillBlocksOnceItIsOverTheOtherAge) {
   for (const RuleCode code : kMarkRules) {
     ScopeDesk d;
     d.fill(Side::kBuy, 5, rupees(100), kFuture, {.account = kOtherAccount});
     d.mark(kFuture, rupees(100));
-    d.clock.advance(4 * kNanosPerSecond);
+    d.clock.advance(60 * kNanosPerSecond + 1);
     ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(100), d.clock.monotonic()));  // this order's own mark is fresh
-    EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kMark)) << static_cast<int>(code);
+    const Outcome out = d.check(code, d.live_order());
+    EXPECT_TRUE(names(out, DataSource::kMark)) << static_cast<int>(code);
+    EXPECT_EQ(out.current, kFuture);
   }
 }
 
@@ -762,7 +771,7 @@ TEST(MarkAge, AnInstrumentThatWentFlatInEveryScopeNoLongerCounts) {
     d.fill(Side::kBuy, 5, rupees(100), kFuture);
     d.fill(Side::kBuy, 5, rupees(100), kFuture, {.account = kOtherAccount});
     d.mark(kFuture, rupees(100));
-    d.clock.advance(4 * kNanosPerSecond);
+    d.clock.advance(61 * kNanosPerSecond);
     ASSERT_TRUE(d.sb.set_mark(kEquity, rupees(100), d.clock.monotonic()));
     EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kMark)) << static_cast<int>(code);
     d.fill(Side::kSell, 5, rupees(100), kFuture);
@@ -776,11 +785,16 @@ TEST(MarkAge, AnInstrumentThatWentFlatInEveryScopeNoLongerCounts) {
 TEST(MarkAge, AHeldPositionWithNoMarkAtAllIsRefusedByRules15To17AsMissingAndByRules19And20AsMissingPnl) {
   for (const RuleCode code : {RuleCode::kPosition, RuleCode::kExposure, RuleCode::kGreeks}) {
     ScopeDesk d;
-    d.fill(Side::kBuy, 5, rupees(100), kFuture);  // nothing has marked the future
-    EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kMark)) << static_cast<int>(code);
+    d.mark(kFuture, Price{});  // nothing has marked the future
+    d.fill(Side::kBuy, 5, rupees(100), kFuture);
+    const Outcome out = d.check(code, d.live_order());
+    EXPECT_TRUE(names(out, DataSource::kMark)) << static_cast<int>(code);
+    EXPECT_EQ(out.current, kFuture);
+    EXPECT_EQ(out.limit, 60'000);
   }
   for (const RuleCode code : {RuleCode::kLossDaily, RuleCode::kDrawdown}) {
     ScopeDesk d;
+    d.mark(kFuture, Price{});
     d.fill(Side::kBuy, 5, rupees(100), kFuture);
     EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kPnl))
         << static_cast<int>(code);  // as built
@@ -845,6 +859,321 @@ TEST(MarkAge, AReducingLiveOrderPassesTheWholeChainWithStaleMarks) {
   const GateDecision refused = d.run_all(opening);  // while an opening one is refused for the same marks
   ASSERT_TRUE(refused.rejection.has_value());
   EXPECT_EQ(reason_text(refused.rejection.value()), "R-DATA-MISSING:mark");
+}
+
+// ---- which marks a live order needs, and how old (D-27; owner, 2026-11-16) ----
+
+constexpr std::int64_t kIndexUnderlying = 900;  // an index: it has a mark in the book but no row in the table
+constexpr std::int64_t kIndexFuture = 901;      // a future on it
+
+// A desk where everything but the marks is fresh whenever a test says so, so a mark is the only thing that
+// can refuse an order.
+struct MarkDesk : ScopeDesk {
+  MarkDesk() {
+    InstrumentRef fut = *instruments.find(kFuture);
+    fut.underlying_id = kIndexUnderlying;
+    fut.lower_circuit = rupees(1);
+    fut.upper_circuit = rupees(1'000);
+    EXPECT_TRUE(instruments.put(kIndexFuture, fut));
+    mark(kIndexFuture, rupees(100));
+  }
+  // The LTPs, Greeks and margin as of now.
+  void freshen() {
+    ctx.dup = DupTable{};  // the same order is run again and again
+    tick(kEquity, rupees(100), clock.monotonic());
+    tick(kIndexFuture, rupees(100), clock.monotonic());
+    for (const std::int64_t id : kDerivatives) {
+      tick(id, rupees(100), clock.monotonic());
+    }
+    refresh_margin();
+    ASSERT_TRUE(margin_cache->set_per_lot(kIndexFuture, rupees(100).units(), clock.monotonic()));
+    fresh_greeks_all();
+  }
+  // The order passes all 22 rules, and each of 15, 16, 17, 19 and 20 alone.
+  void expect_passes(const OrderDetails& o) {
+    freshen();
+    const GateDecision out = run_all(o);
+    EXPECT_TRUE(out.approved.has_value());
+    if (out.rejection.has_value()) {
+      ADD_FAILURE() << "refused by rule " << static_cast<int>(out.rejection->code) << ": "
+                    << reason_text(out.rejection.value());
+    }
+    for (const RuleCode code : kMarkRules) {
+      EXPECT_EQ(verdict(code, o), Verdict::kPass) << static_cast<int>(code);
+    }
+  }
+  // The order is refused R-DATA-MISSING:mark naming `id` and the age it was allowed, by the chain and by each
+  // of the five rules alone.
+  void expect_blocks(const OrderDetails& o, std::int64_t id, std::int64_t limit_ms) {
+    freshen();
+    const GateDecision out = run_all(o);
+    ASSERT_TRUE(out.rejection.has_value());
+    EXPECT_EQ(reason_text(out.rejection.value()), "R-DATA-MISSING:mark");
+    EXPECT_EQ(out.rejection->current, id);
+    EXPECT_EQ(out.rejection->limit, limit_ms);
+    for (const RuleCode code : kMarkRules) {
+      const Outcome one = check(code, o);
+      EXPECT_TRUE(names(one, DataSource::kMark)) << static_cast<int>(code);
+      EXPECT_EQ(one.current, id) << static_cast<int>(code);
+      EXPECT_EQ(one.limit, limit_ms) << static_cast<int>(code);
+    }
+  }
+  [[nodiscard]] OrderDetails future_order(std::int64_t id = kFuture) const {
+    OrderDetails o = live_order();
+    o.instrument_id = id;
+    o.qty = 5;
+    return o;
+  }
+  // The far call held (long, so it needs no cover), marked now.
+  void hold_far_call() {
+    fill(Side::kBuy, 65, rupees(10), kCallFar);
+    mark(kCallFar, rupees(10));
+  }
+};
+
+TEST(MarkScope, AnIlliquidHeldInstrumentDoesNotBlockAnUnrelatedOrderUntilItIsOverSixtySecondsOld) {
+  const std::array<std::pair<Nanos, bool>, 5> cases{{{10 * kNanosPerSecond, true},
+                                                     {60 * kNanosPerSecond, true},
+                                                     {60 * kNanosPerSecond + 1, false},
+                                                     {61 * kNanosPerSecond, false},
+                                                     {600 * kNanosPerSecond, false}}};
+  for (const auto& [age, passes] : cases) {
+    MarkDesk d;
+    d.hold_far_call();
+    d.clock.advance(age);
+    d.mark(kEquity, rupees(100));  // the order's own instrument is fresh; the far call's mark is `age` old
+    if (passes) {
+      d.expect_passes(d.live_order());
+    } else {
+      d.expect_blocks(d.live_order(), kCallFar, 60'000);
+    }
+  }
+}
+
+TEST(MarkScope, TheOrdersOwnMarkBlocksOverThreeSecondsOldAndPassesAtExactlyThreeHeldOrNot) {
+  for (const bool held : {false, true}) {
+    MarkDesk d;
+    if (held) {
+      d.fill(Side::kBuy, 10, rupees(100));
+    }
+    d.clock.advance(3 * kNanosPerSecond);
+    d.expect_passes(d.live_order());
+    d.clock.advance(1);
+    d.expect_blocks(d.live_order(), kEquity, 3'000);
+    d.mark(kEquity, rupees(100));
+    d.expect_passes(d.live_order());
+  }
+}
+
+TEST(MarkScope, AnOwnInstrumentWithNoMarkAtAllBlocksHeldOrNot) {
+  {
+    MarkDesk d;
+    d.mark(kFuture, Price{});  // the future has never had a price, and nobody holds it
+    d.expect_blocks(d.future_order(), kFuture, 3'000);
+  }
+  {
+    MarkDesk d;  // held: the position has no P&L, which rules 19 and 20 name first (as built)
+    d.mark(kFuture, Price{});
+    d.fill(Side::kBuy, 5, rupees(100), kFuture);
+    d.freshen();
+    for (const RuleCode code : {RuleCode::kPosition, RuleCode::kExposure, RuleCode::kGreeks}) {
+      const Outcome out = d.check(code, d.future_order());
+      EXPECT_TRUE(names(out, DataSource::kMark)) << static_cast<int>(code);
+      EXPECT_EQ(out.current, kFuture);
+      EXPECT_EQ(out.limit, 3'000);
+    }
+    for (const RuleCode code : {RuleCode::kLossDaily, RuleCode::kDrawdown}) {
+      EXPECT_TRUE(names(d.check(code, d.future_order()), DataSource::kPnl)) << static_cast<int>(code);
+    }
+  }
+}
+
+TEST(MarkScope, AnOwnMarkAndAnUnderlyingMarkAreEachJudgedAtThreeSecondsForAnOptionAndAFuture) {
+  for (const bool option : {true, false}) {
+    MarkDesk d;
+    const auto order = [&] { return option ? d.option_order(Side::kBuy, 65, true) : d.future_order(); };
+    const std::int64_t own = option ? kOption : kFuture;
+    d.clock.advance(3 * kNanosPerSecond);
+    d.mark(own, rupees(100));  // the underlying's mark (the equity) is exactly 3 s old
+    d.expect_passes(order());
+    d.clock.advance(1);
+    d.mark(own, rupees(100));  // and now 3 s and 1 ns
+    d.expect_blocks(order(), kEquity, 3'000);
+    d.mark(kEquity, rupees(100));
+    d.expect_passes(order());
+  }
+}
+
+TEST(MarkScope, AnUnderlyingThatIsNotInTheInstrumentTableButHasAFreshMarkPasses) {
+  MarkDesk d;
+  ASSERT_EQ(d.instruments.find(kIndexUnderlying), nullptr);
+  const OrderDetails o = d.future_order(kIndexFuture);
+  d.mark(kIndexUnderlying, rupees(20'000));
+  d.expect_passes(o);
+  d.clock.advance(3 * kNanosPerSecond + 1);
+  d.mark(kIndexFuture, rupees(100));
+  d.expect_blocks(o, kIndexUnderlying, 3'000);
+  d.mark(kIndexUnderlying, rupees(20'000));
+  d.expect_passes(o);
+}
+
+TEST(MarkScope, AnUnderlyingWithNoMarkAtAllBlocksWhetherOrNotItIsInTheTable) {
+  MarkDesk d;
+  d.expect_blocks(d.future_order(kIndexFuture), kIndexUnderlying, 3'000);
+  d.mark(kEquity, Price{});
+  d.expect_blocks(d.future_order(), kEquity, 3'000);
+}
+
+TEST(MarkScope, AHeldInstrumentThatIsTheOrdersUnderlyingIsJudgedAtThreeSecondsNotSixty) {
+  MarkDesk d;
+  d.fill(Side::kBuy, 10, rupees(100));  // the equity: held, and the future's underlying
+  d.hold_far_call();
+  d.clock.advance(4 * kNanosPerSecond);
+  d.mark(kFuture, rupees(100));
+  d.expect_blocks(d.future_order(), kEquity, 3'000);  // the far call, as old, is within its 60 s
+  d.mark(kEquity, rupees(100));
+  d.expect_passes(d.future_order());
+}
+
+TEST(MarkScope, AHeldInstrumentThatIsTheOrdersOwnIsJudgedAtThreeSecondsNotSixty) {
+  MarkDesk d;
+  d.fill(Side::kBuy, 5, rupees(100), kFuture);
+  d.clock.advance(4 * kNanosPerSecond);
+  d.mark(kEquity, rupees(100));
+  d.expect_blocks(d.future_order(), kFuture, 3'000);
+}
+
+TEST(MarkScope, TheConfiguredAgeForOtherHeldInstrumentsIsHonoured) {
+  MarkDesk d;
+  d.ctx.mark_max_age_other = 5 * kNanosPerSecond;
+  d.hold_far_call();
+  d.clock.advance(5 * kNanosPerSecond);
+  d.mark(kEquity, rupees(100));
+  d.expect_passes(d.live_order());
+  d.clock.advance(1);
+  d.mark(kEquity, rupees(100));
+  d.expect_blocks(d.live_order(), kCallFar, 5'000);
+}
+
+TEST(MarkScope, AMarkFromBeforeAPauseOrStampedInTheFutureBlocksForEachOfTheThreeClasses) {
+  enum class Kind : std::uint8_t { kOwn, kUnderlying, kOther };
+  for (const Kind kind : {Kind::kOwn, Kind::kUnderlying, Kind::kOther}) {
+    for (const bool future : {false, true}) {
+      MarkDesk d;
+      d.hold_far_call();
+      d.ctx.stale_before = d.clock.monotonic();
+      d.clock.advance(10);
+      d.restamp_marks();  // every mark arrived after the pause
+      const OrderDetails o = kind == Kind::kOwn ? d.live_order() : d.future_order();
+      const std::int64_t stale = kind == Kind::kOther ? kCallFar : kEquity;
+      const std::int64_t allowed = kind == Kind::kOther ? 60'000 : 3'000;
+      d.expect_passes(o);
+      const Nanos at = future ? d.clock.monotonic() + 1 : d.ctx.stale_before;
+      ASSERT_TRUE(d.sb.set_mark(stale, rupees(100), at));
+      d.expect_blocks(o, stale, allowed);
+    }
+  }
+}
+
+TEST(MarkScope, APaperOrderIsNeverRefusedForAMark) {
+  MarkDesk d;
+  d.hold_far_call();
+  d.clock.advance(600 * kNanosPerSecond);
+  d.freshen();
+  OrderDetails paper_future = d.future_order();
+  paper_future.is_paper = oms::kPaperOrder;
+  d.ctx.stale_before = d.clock.monotonic();  // and every mark is from before a pause
+  for (const RuleCode code : kMarkRules) {
+    EXPECT_EQ(d.verdict(code, d.order()), Verdict::kPass) << static_cast<int>(code);
+    EXPECT_EQ(d.verdict(code, paper_future), Verdict::kPass) << static_cast<int>(code);
+  }
+}
+
+// Spec point 6: an order whose instrument the table doesn't know has no underlying to judge, but its own mark
+// is still needed, so no pass path appears. Rule 15 rejects it earlier, for want of a lot size.
+TEST(MarkScope, ALiveOrderForAnInstrumentNotInTheTableIsRefusedForItsOwnMarkByRules16To20) {
+  constexpr std::int64_t kUnknown = 777;
+  for (const bool has_stale_mark : {true, false}) {
+    MarkDesk d;
+    ASSERT_EQ(d.instruments.find(kUnknown), nullptr);
+    if (has_stale_mark) {
+      ASSERT_TRUE(d.sb.set_mark(kUnknown, rupees(100), d.clock.monotonic()));
+      d.clock.advance(3 * kNanosPerSecond + 1);
+    }
+    OrderDetails o = d.live_order();
+    o.instrument_id = kUnknown;
+    EXPECT_EQ(d.verdict(RuleCode::kPosition, o), Verdict::kReject);
+    for (const RuleCode code :
+         {RuleCode::kExposure, RuleCode::kGreeks, RuleCode::kLossDaily, RuleCode::kDrawdown}) {
+      const Outcome out = d.check(code, o);
+      EXPECT_TRUE(names(out, DataSource::kMark)) << static_cast<int>(code) << " " << has_stale_mark;
+      EXPECT_EQ(out.current, kUnknown) << static_cast<int>(code);
+      EXPECT_EQ(out.limit, 3'000) << static_cast<int>(code);
+    }
+  }
+}
+
+TEST(MarkScope, AReducingLiveOrderPassesTheWholeChainWithEveryMarkStale) {
+  MarkDesk d;
+  d.fill(Side::kBuy, 10, rupees(100));
+  d.hold_far_call();
+  d.clock.advance(600 * kNanosPerSecond);
+  d.freshen();
+  OrderDetails closing = d.live_order();
+  closing.side = Side::kSell;
+  closing.qty = 4;
+  EXPECT_TRUE(d.run_all(closing).approved.has_value());
+  d.expect_blocks(d.live_order(), kEquity, 3'000);  // an opening one is refused for the same marks
+}
+
+TEST(MarkScope, NotLoadedPositionsAndPnlAreStillNamedFirstAndTheMarkBeforeTheGreeks) {
+  {
+    MarkDesk d;
+    d.clock.advance(10 * kNanosPerSecond);  // the order's own mark is old
+    d.sb.set_positions_loaded(false);
+    for (const RuleCode code : {RuleCode::kPosition, RuleCode::kExposure, RuleCode::kGreeks}) {
+      EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kPositions)) << static_cast<int>(code);
+    }
+  }
+  {
+    MarkDesk d;
+    d.clock.advance(10 * kNanosPerSecond);
+    d.sb.set_pnl_loaded(false);
+    for (const RuleCode code : {RuleCode::kLossDaily, RuleCode::kDrawdown}) {
+      EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kPnl)) << static_cast<int>(code);
+    }
+  }
+  {
+    MarkDesk d;  // an option held with no Greeks, and the order's own mark old: the mark is named
+    d.fill(Side::kSell, 65, rupees(10), kOption);
+    d.mark(kOption, rupees(10));
+    d.clock.advance(10 * kNanosPerSecond);
+    for (const RuleCode code : {RuleCode::kPosition, RuleCode::kExposure, RuleCode::kGreeks}) {
+      EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kMark)) << static_cast<int>(code);
+    }
+    d.restamp_marks();
+    for (const RuleCode code : {RuleCode::kPosition, RuleCode::kExposure, RuleCode::kGreeks}) {
+      EXPECT_TRUE(names(d.check(code, d.live_order()), DataSource::kGreeks)) << static_cast<int>(code);
+    }
+  }
+}
+
+// ---- RISK_MARK_MAX_AGE_OTHER_MS ----
+
+TEST(MarkMaxAgeOther, ParsesWholeMillisecondsInRange) {
+  EXPECT_EQ(parse_mark_max_age_other_ms("").value_or(0), kDefaultMarkMaxAgeOther);
+  EXPECT_EQ(parse_mark_max_age_other_ms("60000").value_or(0), 60 * kNanosPerSecond);
+  EXPECT_EQ(parse_mark_max_age_other_ms("1").value_or(0), 1'000'000);
+  EXPECT_EQ(parse_mark_max_age_other_ms("300000").value_or(0), 300 * kNanosPerSecond);
+  for (const std::string_view bad :
+       {"0", "-5", "300001", "60s", " 60", "1.5", "abc", "99999999999999999999"}) {
+    EXPECT_FALSE(parse_mark_max_age_other_ms(bad).has_value()) << bad;
+  }
+}
+
+TEST(MarkMaxAgeOther, TheDefaultIsSixtySeconds) {
+  EXPECT_EQ(kDefaultMarkMaxAgeOther, 60 * kNanosPerSecond);
+  EXPECT_EQ(GateContext{}.mark_max_age_other, kDefaultMarkMaxAgeOther);
 }
 
 // ---- Greeks of held options, by the kind of order (D-28; owner, 2026-11-15) ----
