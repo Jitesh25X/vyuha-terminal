@@ -78,6 +78,12 @@ add_library(vyuha_oms STATIC src/oms/oms.cc src/oms/order_router.cc)
 add_library(vyuha::oms ALIAS vyuha_oms)
 target_link_libraries(vyuha_oms PUBLIC vyuha::core PRIVATE vyuha_warnings)
 
+# The paper broker (F-EX-4): an adapter, so it takes only ApprovedOrder and feeds the same Oms. Its own target
+# because it needs the Oms, which core does not link.
+add_library(vyuha_sim STATIC src/sim/sim_broker.cc)
+add_library(vyuha::sim ALIAS vyuha_sim)
+target_link_libraries(vyuha_sim PUBLIC vyuha::oms PRIVATE vyuha_warnings)
+
 # The pre-trade RiskGate (RISK_ENGINE §3). ApprovedOrder is header-only, so the router can take one without
 # linking the gate.
 add_library(vyuha_risk STATIC src/risk/risk_gate.cc src/risk/rules.cc src/risk/scope_book.cc

@@ -342,6 +342,11 @@ class Oms {
   // sending.
   [[nodiscard]] std::expected<void, Error> confirm_reconciled(OrderHandle handle) noexcept;
 
+  // The handle of the order with this client_order_id, if the OMS holds it. A thin wrapper over the private
+  // index, so a broker adapter's event pump can find the order an event is about.
+  [[nodiscard]] std::optional<OrderHandle> find_handle(std::string_view client_order_id) const noexcept {
+    return find_client(client_order_id);
+  }
   [[nodiscard]] const Order& order(OrderHandle handle) const noexcept { return orders_[handle]; }
   [[nodiscard]] std::size_t size() const noexcept { return orders_.size(); }
   [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
