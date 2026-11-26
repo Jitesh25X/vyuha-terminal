@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
@@ -102,6 +103,19 @@ def test_first_sync_maps_contracts_from_both_brokers(dsn: str, day1: sync.Files)
     assert audit[0]["actor_kind"] == "system"
 
 
+def test_sync_logs_the_freeze_source_once_per_run(
+    dsn: str, day1: sync.Files, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.INFO, logger=sync.__name__):
+        sync_files(dsn, day1, DAY1)
+    lines = [r.getMessage() for r in caplog.records if "freeze quantity source" in r.getMessage()]
+    assert lines == [
+        "freeze quantity source upstox.freeze_quantity: 8 instruments have a value in the file, "
+        "1 F&O instruments have none in the file, 0 invalid values ignored; "
+        "F&O contracts now: 0 carried forward, 1 inherited, 0 unknown"
+    ]
+
+
 def test_resync_is_idempotent(dsn: str, day1: sync.Files) -> None:
     sync_files(dsn, day1, DAY1)
     ids = {k: r["id"] for k, r in active(dsn).items()}
@@ -139,7 +153,7 @@ def test_failed_sync_keeps_master_and_alerts_admins(dsn: str, day1: sync.Files) 
     with pytest.raises(sync.upstox.UpstoxFormatError):
         sync_files(dsn, broken, DAY2)
     assert active(dsn) == before  # AC3: yesterday's master stays active
-    alerts = q(dsn, "SELECT severity, title, body FROM alert_event")
+    alerts = q(dsn, "SELECT severity, title, body FROM alert_event WHERE severity = 'critical'")
     assert len(alerts) == 1
     assert alerts[0]["severity"] == "critical"
     assert "trading not blocked" in alerts[0]["body"]

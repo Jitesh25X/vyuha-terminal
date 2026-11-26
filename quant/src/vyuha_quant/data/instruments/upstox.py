@@ -8,17 +8,21 @@ expiry day); `exchange_token` is a string; `freeze_quantity` is units (float).
 
 from __future__ import annotations
 
+import math
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ...config import IST
 from .model import Exchange, OptionType, Segment, SourceRow
 
 URL = "https://assets.upstox.com/market-quote/instruments/exchange/{file}.json.gz"
 FILES = ("NSE", "BSE")
+# The only source of `instrument.freeze_qty` (D-52): the parser reads this field and the sync log names it.
+FREEZE_QTY_FIELD = "freeze_quantity"
+_INT32_MAX = 2**31 - 1  # `instrument.freeze_qty` is a Postgres int
 
 _SEGMENTS: dict[str, Exchange] = {
     "NSE_EQ": "NSE",
@@ -48,7 +52,7 @@ class _Row(BaseModel):
     strike_price: float | None = None
     lot_size: int | None = None
     tick_size: float | None = None
-    freeze_quantity: float | None = None
+    freeze_qty_raw: float | None = Field(default=None, validation_alias=FREEZE_QTY_FIELD)
     underlying_symbol: str | None = None
     underlying_key: str | None = None
 
@@ -68,6 +72,16 @@ def parse(items: list[Any]) -> list[SourceRow]:
 
 def expiry_date(ms: int) -> date:
     return datetime.fromtimestamp(ms / 1000, IST).date()
+
+
+def _freeze_qty(raw: float | None) -> tuple[int | None, bool]:
+    """(units, invalid). Zero or absent is no value. Anything else that is not a whole number the column can hold
+    (negative, fractional, NaN, infinite, above int32) is invalid: never truncated, and never fails the sync."""
+    if not raw:
+        return None, False
+    if not math.isfinite(raw) or not 0 < raw <= _INT32_MAX or not raw.is_integer():
+        return None, True
+    return int(raw), False
 
 
 def _row(r: _Row) -> SourceRow:
@@ -95,6 +109,7 @@ def _row(r: _Row) -> SourceRow:
     if tick <= 0 or lot <= 0:
         raise UpstoxFormatError(f"upstox {r.instrument_key}: tick_size/lot_size must be positive")
     ts = r.trading_symbol.strip()
+    freeze_qty, freeze_qty_invalid = _freeze_qty(r.freeze_qty_raw)
     return SourceRow(
         exchange=exchange,
         segment=segment,
@@ -111,6 +126,7 @@ def _row(r: _Row) -> SourceRow:
         tick_size=tick.normalize(),
         broker_id=r.instrument_key,
         isin=r.isin,
-        freeze_qty=int(r.freeze_quantity) if r.freeze_quantity else None,
+        freeze_qty=freeze_qty,
+        freeze_qty_invalid=freeze_qty_invalid,
         underlying_key=r.underlying_key,
     )

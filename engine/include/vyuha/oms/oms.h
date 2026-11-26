@@ -128,11 +128,21 @@ class PaperFlag {
 inline constexpr PaperFlag kPaperOrder{true};
 inline constexpr PaperFlag kLiveOrder{false};
 
+// The freeze-quantity parent a child order was cut from (D-48): stored once in order_slice_parent, which each
+// child's row points to. It is a record of what was asked for and earns no exemption from any rule (only
+// SliceIntent does, D-24). Only FreezeSlicer should set it: M2.8 must not take it from a client.
+struct SliceParent {
+  Uuid id{};
+  std::int32_t qty{0};  // the parent's full quantity
+  FixedString<64> client_order_id{};
+  bool operator==(const SliceParent&) const = default;
+};
+
 // NOLINTBEGIN(readability-redundant-member-init): every field without a value gets {} so that designated
 // initializers (the only way to build these since is_paper became required, M2.2b) don't trip GCC's
 // -Wmissing-field-initializers.
 // What an order is: the Postgres `order` row. Only a modify changes it: qty, price and trigger_price, once
-// the broker confirms; order_event keeps what they were. (Brackets arrive with M2.5.)
+// the broker confirms; order_event keeps what they were. parent_id is reserved for brackets (M2.5c, D-48).
 struct OrderDetails {
   Uuid id{};
   std::optional<Uuid> parent_id{};
@@ -153,7 +163,8 @@ struct OrderDetails {
   FixedString<32> tag{};
   PaperFlag is_paper;  // required: no default (see PaperFlag)
   Nanos created_at{0};
-  SliceIntent slice{};  // set only by FreezeSlicer; not stored
+  SliceIntent slice{};                        // set only by FreezeSlicer; not stored
+  std::optional<SliceParent> slice_parent{};  // set by FreezeSlicer; stored (D-48)
   bool operator==(const OrderDetails&) const = default;
 };
 
@@ -173,6 +184,9 @@ struct Order {
   std::int32_t modify_qty{0};  // 0: unchanged
   std::optional<Price> modify_price{};
   std::optional<Price> modify_trigger{};
+  // It has been UNKNOWN in this run, whatever it became since: a sliced parent never resumes after that
+  // (D-53), even if the order was reconciled before anyone looked.
+  bool went_unknown{false};
 };
 
 // A modify, as an event records it.
@@ -291,6 +305,10 @@ struct RecoveredOrder {
 };
 // NOLINTEND(readability-redundant-member-init)
 
+// Whether two orders are the same request under one client_order_id: everything a caller asks for, so not the
+// order id, the creation time or the slice intent.
+[[nodiscard]] bool same_request(const OrderDetails& a, const OrderDetails& b) noexcept;
+
 // Order state machine (F-EX-2). Single writer: only the core thread calls it. All storage is reserved up
 // front, and nothing here allocates after construction.
 class Oms {
@@ -300,7 +318,8 @@ class Oms {
   // Idempotent on client_order_id: the same request returns the existing order and records nothing; a
   // different one is kOrderDup (ORDER_DUP). An order id already held by another client_order_id is kOrderDup
   // too: one id is one order. Otherwise records NEW. kInvalidArgument if the order couldn't be
-  // stored; kCapacityExceeded if the pool or sink is full. It knows the orders of this run and open ones
+  // stored, or if exactly one of slice_parent and slice is set (only FreezeSlicer sets them, and it sets
+  // both); kCapacityExceeded if the pool or sink is full. It knows the orders of this run and open ones
   // restored into it; a terminal order of an earlier run is the gateway's check against Postgres (M2.8), and
   // failing that the writer refuses only the duplicate.
   [[nodiscard]] std::expected<Intake, Error> intake(const OrderDetails& details) noexcept;

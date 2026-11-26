@@ -69,7 +69,8 @@ struct ScopeDesk : Desk {
                         .exchange = Exchange::kNfo,
                         .segment = Segment::kFut,
                         .expires_at = option.expires_at + (Nanos{20} * Nanos{1'440} * kNanosPerMinute),
-                        .underlying_id = kEquity};
+                        .underlying_id = kEquity,
+                        .freeze_qty = kAmpleFreeze};
     EXPECT_TRUE(instruments.put(kHedgeFut, hedge));
     hedge.expires_at = option.expires_at - (Nanos{1} * Nanos{1'440} * kNanosPerMinute);
     EXPECT_TRUE(instruments.put(kHedgeFutNear, hedge));
@@ -82,7 +83,8 @@ struct ScopeDesk : Desk {
                                           .tick_size = Price::from_units(500),
                                           .exchange = Exchange::kNfo,
                                           .segment = Segment::kFut,
-                                          .underlying_id = kEquity}));
+                                          .underlying_id = kEquity,
+                                          .freeze_qty = kAmpleFreeze}));
     EXPECT_TRUE(instruments.put(kOption2, option));
     InstrumentRef call75 = option;
     call75.lot_size = 75;

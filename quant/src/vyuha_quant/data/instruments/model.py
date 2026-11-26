@@ -33,6 +33,7 @@ class SourceRow:
     broker_id: str  # kite instrument_token or upstox instrument_key
     isin: str | None = None
     freeze_qty: int | None = None
+    freeze_qty_invalid: bool = False  # the file's value is not a positive whole int32
     underlying_key: str | None = None  # upstox only
 
 

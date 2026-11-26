@@ -147,6 +147,8 @@ class OrderRouter {
   // can't be recorded (a full sink) the queue waits, and it is never sent.
   std::size_t poll() noexcept;
   [[nodiscard]] std::size_t pending() const noexcept { return pending_.size(); }
+  // How many orders the send queue holds at most. submit refuses once pending() reaches it.
+  [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
   [[nodiscard]] std::size_t cancels_queued() const noexcept { return cancels_.size(); }
   // Gate stamp to handing over to the adapter, per order sent: vyuha_engine_approval_to_send_seconds. It
   // includes waiting for the APPROVED event to be durable, so it shows how close real latency gets to

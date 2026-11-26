@@ -7,6 +7,9 @@ Row lifecycle (`valid_from` / `valid_to`, `valid_to` exclusive):
 - a contract missing from today's files is closed with `valid_to = sync date`;
 - a contract whose identity changes under the same trading symbol (segment, expiry, strike, option
   type) is closed and re-inserted, so a re-used symbol never inherits another contract's id;
+- a freeze qty is never overwritten with nothing (D-52): a file value is stored with the file's date, otherwise
+  the contract keeps what it had, also when it is listed again as a new row (same symbol and identity);
+  `freeze.inherit` then fills F&O contracts that have none;
 - re-running the sync on the same day is idempotent.
 """
 
@@ -16,6 +19,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from ...db import Conn
+from . import freeze
 from .model import Instrument
 
 _COLUMNS = (
@@ -32,7 +36,6 @@ _MUTABLE = (
     "isin",
     "lot_size",
     "tick_size",
-    "freeze_qty",
     "kite_token",
     "upstox_key",
     "partial_mapping",
@@ -100,19 +103,41 @@ async def apply(conn: Conn, instruments: list[Instrument], day: date) -> ApplySt
             day,
         )
     )
-    sets = ", ".join(f"{c} = s.{c}" for c in _MUTABLE)
+    # freeze_qty is apart from the other mutable fields: a missing value in the file keeps the stored one.
+    new_freeze = "COALESCE(s.freeze_qty, i.freeze_qty)"
+    sets = ", ".join([*(f"{c} = s.{c}" for c in _MUTABLE), f"freeze_qty = {new_freeze}"])
+    old = ", ".join([*(f"i.{c}" for c in _MUTABLE), "i.freeze_qty"])
+    new = ", ".join([*(f"s.{c}" for c in _MUTABLE), new_freeze])
     updated = _count(
         await conn.execute(
             f"""UPDATE instrument i SET {sets} FROM stg s
-                WHERE {_KEY} AND i.valid_to IS NULL
-                  AND ({", ".join(f"i.{c}" for c in _MUTABLE)}) IS DISTINCT FROM ({", ".join(f"s.{c}" for c in _MUTABLE)})"""
+                WHERE {_KEY} AND i.valid_to IS NULL AND ({old}) IS DISTINCT FROM ({new})"""
         )
     )
-    cols = ", ".join(_COLUMNS[:15])
+    # A value from this file takes its date and stops being inherited. Not counted as an updated instrument.
+    await conn.execute(
+        f"""UPDATE instrument i SET freeze_qty_as_of = $1, freeze_qty_from_id = NULL FROM stg s
+            WHERE {_KEY} AND i.valid_to IS NULL AND s.freeze_qty IS NOT NULL
+              AND (i.freeze_qty_as_of IS DISTINCT FROM $1 OR i.freeze_qty_from_id IS NOT NULL)""",
+        day,
+    )
+    cols = [c for c in _COLUMNS[:15] if c != "freeze_qty"]
+    # A new row for a contract listed before takes that contract's last known freeze qty and its provenance.
     inserted = _count(
         await conn.execute(
-            f"""INSERT INTO instrument ({cols}, valid_from)
-                SELECT {", ".join(f"s.{c}" for c in _COLUMNS[:15])}, $1 FROM stg s
+            f"""INSERT INTO instrument ({", ".join(cols)}, freeze_qty, freeze_qty_as_of, freeze_qty_from_id,
+                                        valid_from)
+                SELECT {", ".join(f"s.{c}" for c in cols)},
+                       COALESCE(s.freeze_qty, p.freeze_qty),
+                       CASE WHEN s.freeze_qty IS NULL THEN p.freeze_qty_as_of ELSE $1::date END,
+                       CASE WHEN s.freeze_qty IS NULL THEN p.freeze_qty_from_id END,
+                       $1::date
+                FROM stg s
+                LEFT JOIN LATERAL (
+                  SELECT i.freeze_qty, i.freeze_qty_as_of, i.freeze_qty_from_id FROM instrument i
+                  WHERE {_KEY} AND i.valid_to IS NOT NULL AND i.freeze_qty IS NOT NULL AND NOT {_IDENTITY}
+                  ORDER BY i.valid_to DESC, i.id DESC LIMIT 1
+                ) p ON true
                 WHERE NOT EXISTS (SELECT 1 FROM instrument i WHERE {_KEY} AND i.valid_to IS NULL)""",
             day,
         )
@@ -123,6 +148,7 @@ async def apply(conn: Conn, instruments: list[Instrument], day: date) -> ApplySt
               ON u.exchange = s.u_exchange AND u.tradingsymbol = s.u_tradingsymbol AND u.valid_to IS NULL
             WHERE {_KEY} AND i.valid_to IS NULL AND i.underlying_id IS DISTINCT FROM u.id"""
     )
+    await freeze.inherit(conn)
     return ApplyStats(
         active_before=before,
         inserted=inserted,

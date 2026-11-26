@@ -60,6 +60,10 @@ std::string_view reason_text(const RuleResult& result) noexcept {
       return "R-SHORT-OPT:no-cover";
     case RuleReason::kUncover:
       return "R-SHORT-OPT-UNCOVER";
+    case RuleReason::kFreezeUnknown:
+      return kFreezeUnknownReason;
+    case RuleReason::kFreezeExceeded:
+      return kFreezeExceededReason;
     case RuleReason::kRule:
       break;
   }
@@ -103,8 +107,9 @@ RiskGate::Direction RiskGate::direction(const GateContext& ctx, const oms::Order
   return out;
 }
 
-GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order) const noexcept {
-  GateDecision out;
+template <class Out>
+GateFacts RiskGate::run_chain(GateContext& ctx, const oms::OrderDetails& order, bool parent_check,
+                              Out& out) const noexcept {
   const Nanos start = clock_->now();
   const Nanos started = clock_->monotonic();
   if (ctx.pause.observe(start, started)) {
@@ -120,7 +125,8 @@ GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order
       .monotonic = started,
       .opening = way.opening,
       .instrument = ctx.instruments != nullptr ? ctx.instruments->find(order.instrument_id) : nullptr,
-      .account = std::as_const(ctx).accounts.find(order.account_id)};
+      .account = std::as_const(ctx).accounts.find(order.account_id),
+      .sliced_parent = parent_check};
 
   if (order.is_paper.live() && !complete()) {
     out.rejection = RuleResult{.code = RuleCode::kLiveDisabled, .verdict = Verdict::kReject};
@@ -129,7 +135,7 @@ GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order
     if (out.rejection.has_value()) {
       break;
     }
-    if (!applies(rule.code, facts.opening)) {
+    if (!applies(rule.code, facts.opening) || (parent_check && rule.code == RuleCode::kOps)) {
       continue;
     }
     const Outcome o = rule.eval(std::as_const(ctx), order, facts);  // pure: the check can't change ctx
@@ -147,6 +153,19 @@ GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order
       out.rejection->verdict = Verdict::kReject;
     }
   }
+  return facts;
+}
+
+GateCheck RiskGate::check(GateContext& ctx, const oms::OrderDetails& order) const noexcept {
+  GateCheck out;
+  static_cast<void>(run_chain(ctx, order, true, out));
+  out.stamp.eval_ns = clock_->monotonic() - out.stamp.monotonic;
+  return out;
+}
+
+GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order) const noexcept {
+  GateDecision out;
+  const GateFacts facts = run_chain(ctx, order, false, out);
   if (!out.rejection.has_value()) {
     for (const Rule& rule : std::span(rules_).first(count_)) {
       if (rule.on_approved != nullptr && applies(rule.code, facts.opening)) {
@@ -154,7 +173,7 @@ GateDecision RiskGate::evaluate(GateContext& ctx, const oms::OrderDetails& order
       }
     }
   }
-  out.stamp.eval_ns = clock_->monotonic() - started;
+  out.stamp.eval_ns = clock_->monotonic() - out.stamp.monotonic;
   if (!out.rejection.has_value()) {
     out.approved = ApprovedOrder(order, out.stamp);
   }

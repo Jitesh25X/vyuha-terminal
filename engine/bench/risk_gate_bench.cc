@@ -294,7 +294,8 @@ void BM_ShortOptCover(benchmark::State& state) {
              .segment = vyuha::risk::Segment::kOpt,
              .expires_at = expiry + (vyuha::Nanos{i % 16} * vyuha::Nanos{1'440} * vyuha::kNanosPerMinute),
              .underlying_id = 1,
-             .option_kind = vyuha::risk::OptionKind::kCall}));
+             .option_kind = vyuha::risk::OptionKind::kCall,
+             .freeze_qty = 1'000'000}));
     static_cast<void>(book.apply_fill({.who = who,
                                        .instrument_id = id,
                                        .side = vyuha::oms::Side::kBuy,
@@ -400,7 +401,8 @@ void BM_ShortOptUncover(benchmark::State& state) {
              .segment = vyuha::risk::Segment::kOpt,
              .expires_at = expiry + (vyuha::Nanos{i % 16} * vyuha::Nanos{1'440} * vyuha::kNanosPerMinute),
              .underlying_id = 1,
-             .option_kind = vyuha::risk::OptionKind::kCall}));
+             .option_kind = vyuha::risk::OptionKind::kCall,
+             .freeze_qty = 1'000'000}));
     // Longs everywhere but the last: that one is a short of the first expiry, which the longs there cover.
     static_cast<void>(book.apply_fill({.who = who,
                                        .instrument_id = id,

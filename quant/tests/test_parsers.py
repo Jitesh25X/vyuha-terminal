@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
+import logging
 from datetime import date
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
 from vyuha_quant.data import banlist
-from vyuha_quant.data.instruments import kite, merge, sync, upstox
+from vyuha_quant.data.instruments import freeze, kite, merge, sync, upstox
 from vyuha_quant.data.instruments.model import SourceRow
 
 
@@ -59,6 +62,79 @@ def test_upstox_rejects_derivative_without_expiry() -> None:
             "trading_symbol": "X FUT", "lot_size": 1, "tick_size": 5.0}  # fmt: skip
     with pytest.raises(upstox.UpstoxFormatError, match="without expiry"):
         upstox.parse([item])
+
+
+def _future(**extra: Any) -> dict[str, Any]:
+    return {"segment": "NSE_FO", "instrument_type": "FUT", "instrument_key": "NSE_FO|1", "exchange_token": "1",
+            "trading_symbol": "X FUT", "lot_size": 1, "tick_size": 5.0, "expiry": 1795544999000, **extra}  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("extra", "want", "invalid"),
+    [
+        ({"freeze_quantity": 1800.0}, 1800, False),
+        ({"freeze_quantity": 0.0}, None, False),
+        ({"freeze_quantity": None}, None, False),
+        ({}, None, False),
+        ({"freeze_quantity": -1800.0}, None, True),
+        ({"freeze_quantity": 1800.5}, None, True),
+        ({"freeze_quantity": 0.5}, None, True),
+        ({"freeze_quantity": float("nan")}, None, True),
+        ({"freeze_quantity": float("inf")}, None, True),
+        ({"freeze_quantity": float("-inf")}, None, True),
+        ({"freeze_quantity": 2147483647.0}, 2147483647, False),  # the column is a 32-bit int
+        ({"freeze_quantity": 2147483648.0}, None, True),
+        ({"freeze_quantity": 1e30}, None, True),
+    ],
+)
+def test_upstox_freeze_quantity(extra: dict[str, Any], want: int | None, invalid: bool) -> None:
+    [row] = upstox.parse([_future(**extra)])
+    assert (row.freeze_qty, row.freeze_qty_invalid) == (want, invalid)
+
+
+def _freeze_line(files: sync.Files, caplog: pytest.LogCaptureFixture) -> str:
+    k, u = sync.parse(files)
+    with caplog.at_level(logging.INFO, logger=sync.__name__):
+        nothing = freeze.Status(date(2026, 10, 28), [], [], [], [], [])  # database counts: see integration
+        sync.log_freeze_source(u, merge.merge(k, u).instruments, nothing)
+    [record] = caplog.records
+    return record.getMessage()
+
+
+def test_freeze_source_log(day1: sync.Files, caplog: pytest.LogCaptureFixture) -> None:
+    # The one F&O instrument without a value is the Kite-only NIFTY26NOV24100PE.
+    assert _freeze_line(day1, caplog) == (
+        "freeze quantity source upstox.freeze_quantity: 8 instruments have a value in the file, "
+        "1 F&O instruments have none in the file, 0 invalid values ignored; "
+        "F&O contracts now: 0 carried forward, 0 inherited, 0 unknown"
+    )
+
+
+def test_freeze_source_log_counts_missing_and_invalid(
+    day1: sync.Files, caplog: pytest.LogCaptureFixture
+) -> None:
+    rows = day1.upstox["NSE"]
+    for i, r in enumerate(rows):
+        if r["instrument_key"] == "NSE_FO|61471":
+            rows[i] = {key: v for key, v in r.items() if key != "freeze_quantity"}
+        elif r["instrument_key"] == "NSE_FO|50001":
+            rows[i] = {**r, "freeze_quantity": -1.0}
+    assert _freeze_line(day1, caplog) == (
+        "freeze quantity source upstox.freeze_quantity: 6 instruments have a value in the file, "
+        "3 F&O instruments have none in the file, 1 invalid values ignored; "
+        "F&O contracts now: 0 carried forward, 0 inherited, 0 unknown"
+    )
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", "2147483648"])
+def test_freeze_source_log_counts_unusable_numbers(
+    day1: sync.Files, caplog: pytest.LogCaptureFixture, bad: str
+) -> None:
+    rows = day1.upstox["NSE"]
+    for i, r in enumerate(rows):
+        if r["instrument_key"] == "NSE_FO|50001":
+            rows[i] = {**r, "freeze_quantity": json.loads(bad)}  # as the file parser would read it
+    assert "1 invalid values ignored" in _freeze_line(day1, caplog)
 
 
 def test_merge(day1: sync.Files) -> None:

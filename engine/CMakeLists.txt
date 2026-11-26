@@ -91,6 +91,12 @@ add_library(vyuha_risk STATIC src/risk/risk_gate.cc src/risk/rules.cc src/risk/s
 add_library(vyuha::risk ALIAS vyuha_risk)
 target_link_libraries(vyuha_risk PUBLIC vyuha::oms PRIVATE vyuha_warnings)
 
+# The freeze-quantity slicer (F-EX-3, F-RK-1): drives the gate, the OMS and the router, so it sits above all
+# three.
+add_library(vyuha_slicer STATIC src/oms/slice_runner.cc)
+add_library(vyuha::slicer ALIAS vyuha_slicer)
+target_link_libraries(vyuha_slicer PUBLIC vyuha::oms vyuha::risk PRIVATE vyuha_warnings)
+
 # Market-data bus: protobuf encoders + NATS publisher (md.tick.*, md.bar.*, KV md_last).
 add_library(vyuha_bus src/bus/md_encode.cc src/bus/md_publisher.cc src/bus/system_alert_publisher.cc)
 add_library(vyuha::bus ALIAS vyuha_bus)

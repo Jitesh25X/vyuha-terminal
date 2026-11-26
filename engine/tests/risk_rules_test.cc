@@ -27,6 +27,25 @@
 namespace vyuha::risk {
 namespace {
 
+// Child ids for the slicer: distinct, and the same on every run.
+class CountingIds final : public oms::IOrderIdSource {
+ public:
+  // NOLINTNEXTLINE(bugprone-exception-escape): the indices are in range, so at() cannot throw
+  [[nodiscard]] Uuid next() noexcept override {
+    Uuid id = id_of(0xC0);
+    id.bytes.at(15) = ++drawn_;
+    return id;
+  }
+
+ private:
+  std::uint8_t drawn_{0};
+};
+std::size_t slice(OrderDetails parent, std::int32_t max_child_qty, std::vector<OrderDetails>& out) {
+  EXPECT_TRUE(parent.client_order_id.assign("parent"));
+  CountingIds ids;
+  return oms::FreezeSlicer::slice(parent, max_child_qty, ids, out);
+}
+
 TEST(Rules, TheTableIsTheFirstThirteenInOrderAndLeavesTheGateIncomplete) {
   ASSERT_EQ(pre_trade_rules().size(), 13U);
   for (std::size_t i = 0; i < 13; ++i) {
@@ -1137,7 +1156,7 @@ TEST(RDup, ChildrenOfOneSliceAreNotDuplicatesOfEachOther) {
   OrderDetails parent = d.order();
   parent.qty = 30;
   std::vector<OrderDetails> children(3, parent);
-  ASSERT_EQ(oms::FreezeSlicer::slice(parent, 10, children), 3U);
+  ASSERT_EQ(slice(parent, 10, children), 3U);
   for (const OrderDetails& child : children) {
     EXPECT_EQ(child.qty, 10);
     const GateDecision out = d.run(child);
@@ -1151,8 +1170,8 @@ TEST(RDup, TwoSeparateSlicesAreStillDuplicatesOfEachOther) {
   parent.qty = 20;
   std::vector<OrderDetails> first(2, parent);
   std::vector<OrderDetails> second(2, parent);
-  ASSERT_EQ(oms::FreezeSlicer::slice(parent, 10, first), 2U);
-  ASSERT_EQ(oms::FreezeSlicer::slice(parent, 10, second), 2U);
+  ASSERT_EQ(slice(parent, 10, first), 2U);
+  ASSERT_EQ(slice(parent, 10, second), 2U);
   ASSERT_TRUE(d.run(first[0]).approved.has_value());
   EXPECT_REJECT(d, kDup, second[0]);
 }
@@ -1162,7 +1181,7 @@ TEST(RDup, AnOrdinaryOrderIsStillADuplicateOfASliceChild) {
   OrderDetails parent = d.order();
   parent.qty = 20;
   std::vector<OrderDetails> children(2, parent);
-  ASSERT_EQ(oms::FreezeSlicer::slice(parent, 10, children), 2U);
+  ASSERT_EQ(slice(parent, 10, children), 2U);
   ASSERT_TRUE(d.run(children[0]).approved.has_value());
   EXPECT_REJECT(d, kDup, d.order());
 }
@@ -1588,11 +1607,12 @@ TEST(FreezeSlicerBasics, SplitsWithTheRemainderLast) {
   parent.id = id_of(8);
   parent.qty = 25;
   std::vector<OrderDetails> out(3, parent);
-  ASSERT_EQ(oms::FreezeSlicer::slice(parent, 10, out), 3U);
+  ASSERT_EQ(slice(parent, 10, out), 3U);
   EXPECT_EQ(out[0].qty, 10);
   EXPECT_EQ(out[1].qty, 10);
   EXPECT_EQ(out[2].qty, 5);
-  EXPECT_EQ(out[2].parent_id, parent.id);
+  EXPECT_FALSE(out[2].parent_id.has_value());  // left as the parent had it (D-48)
+  EXPECT_EQ(out[2].slice_parent->id, parent.id);
   EXPECT_TRUE(out[0].slice.sliced());
   EXPECT_EQ(out[0].slice, out[2].slice);
 }
@@ -1602,8 +1622,8 @@ TEST(FreezeSlicerBasics, ANewIntentEachTime) {
   parent.qty = 10;
   std::vector<OrderDetails> a(1, parent);
   std::vector<OrderDetails> b(1, parent);
-  ASSERT_EQ(oms::FreezeSlicer::slice(parent, 10, a), 1U);
-  ASSERT_EQ(oms::FreezeSlicer::slice(parent, 10, b), 1U);
+  ASSERT_EQ(slice(parent, 10, a), 1U);
+  ASSERT_EQ(slice(parent, 10, b), 1U);
   EXPECT_FALSE(a[0].slice == b[0].slice);
 }
 
@@ -1611,10 +1631,10 @@ TEST(FreezeSlicerBasics, BadInputsWriteNothing) {
   OrderDetails parent{.is_paper = oms::kPaperOrder};
   parent.qty = 25;
   std::vector<OrderDetails> out(2, parent);
-  EXPECT_EQ(oms::FreezeSlicer::slice(parent, 10, out), 0U);  // needs 3
-  EXPECT_EQ(oms::FreezeSlicer::slice(parent, 0, out), 0U);
+  EXPECT_EQ(slice(parent, 10, out), 0U);  // needs 3
+  EXPECT_EQ(slice(parent, 0, out), 0U);
   parent.qty = 0;
-  EXPECT_EQ(oms::FreezeSlicer::slice(parent, 10, out), 0U);
+  EXPECT_EQ(slice(parent, 10, out), 0U);
   EXPECT_FALSE(out[0].slice.sliced());
 }
 
