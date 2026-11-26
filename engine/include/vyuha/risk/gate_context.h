@@ -56,6 +56,11 @@ struct InstrumentRef {
   std::optional<Price> lower_circuit{};
   std::optional<Price> upper_circuit{};
   OptionKind option_kind{OptionKind::kNone};
+  // The exchange's freeze quantity in units, as the instrument master has it. A larger F&O order is sliced
+  // into whole-lot children strictly below it (D-52), and the gate refuses a single one above that size
+  // (D-54). 0 or less means unknown, and an F&O order of more than one lot is then refused (D-51). An equity
+  // is not sliced or refused on it, for now.
+  std::int32_t freeze_qty{0};
 };
 
 class InstrumentTable {

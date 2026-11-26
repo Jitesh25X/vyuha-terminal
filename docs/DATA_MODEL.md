@@ -25,7 +25,8 @@ Four stores, each with one job:
 | `personal_access_token` | External MCP access | Read-only scopes by default |
 | `broker_account` | One row per broker client account | Encrypted key/secret/token; `static_ip` bound by engine; `public_static_ip` unique (no sharing between unrelated accounts); `ops_cap` ≤ 10 |
 | `account_user_map` | Who can view/trade which account | One default account per user |
-| `instrument` | Unified instrument master | Kite token + Upstox key on one row; option chain index; F&O ban flag; freeze qty |
+| `instrument` | Unified instrument master | Kite token + Upstox key on one row; option chain index; F&O ban flag; freeze qty with `freeze_qty_as_of` (the file date it came from) and `freeze_qty_from_id` (set when inherited from another contract of the underlying; migration 000015, D-52). A good value is never overwritten with nothing |
+| `order_slice_parent` | The parent of a sliced order (migration 000014, D-48) | Never updated; children point to it with `order.slice_parent_id` |
 | `restricted_instrument` | Desk restricted list | Gate rule `R-INSTR-RESTRICTED` |
 | `corporate_action` | Price/volume adjustment factors | Raw bars never mutated |
 | `exchange_holiday` | Calendar overrides incl. special sessions | Seeded from `exchange_calendars` XBOM (`vyuha-quant holidays seed`); existing rows win |

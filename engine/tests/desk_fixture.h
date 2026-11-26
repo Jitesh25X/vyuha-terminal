@@ -52,6 +52,9 @@ constexpr Nanos kNow = at(10, 0);
 constexpr std::int64_t kEquity = 1;
 constexpr std::int64_t kOption = 2;
 constexpr std::int64_t kBseEquity = 3;
+// An F&O fixture's freeze quantity: far above any order here, so R-ORDER-SHAPE's D-51 refusal stays out of
+// tests that are about something else.
+constexpr std::int32_t kAmpleFreeze = 1'000'000'000;
 constexpr std::int64_t kFromScale = kLimitScale;
 constexpr Price rupees(std::int64_t r) { return Price::from_units(r * Price::kUnitsPerRupee); }
 
@@ -84,7 +87,8 @@ struct Desk {
                                   .tick_size = Price::from_units(500),
                                   .exchange = Exchange::kNfo,
                                   .segment = Segment::kOpt,
-                                  .expires_at = at(15, 30) + (Nanos{2} * Nanos{1'440} * kNanosPerMinute)}));
+                                  .expires_at = at(15, 30) + (Nanos{2} * Nanos{1'440} * kNanosPerMinute),
+                                  .freeze_qty = kAmpleFreeze}));
     EXPECT_TRUE(instruments.put(
         kBseEquity, {.lot_size = 1, .tick_size = Price::from_units(500), .exchange = Exchange::kBse}));
     tick(kEquity, rupees(100));

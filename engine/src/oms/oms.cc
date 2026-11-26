@@ -38,17 +38,6 @@ constexpr Error kNoOrder{ErrorCode::kInvalidArgument, "oms: no such order"};
 constexpr std::int64_t kMaxNumericUnits = 1'000'000'000'000'000'000;  // numeric(18,4)
 constexpr std::int32_t kMaxMillipct = 1'000'000;                      // numeric(6,3)
 
-// Postgres CHECKs and column ranges on `order`, so an order that can't be stored is refused here.
-[[nodiscard]] bool same_request(const OrderDetails& a, const OrderDetails& b) noexcept {
-  return a.client_order_id.view() == b.client_order_id.view() && a.parent_id == b.parent_id &&
-         a.account_id == b.account_id && a.user_id == b.user_id && a.strategy_id == b.strategy_id &&
-         a.source == b.source && a.instrument_id == b.instrument_id && a.side == b.side && a.qty == b.qty &&
-         a.order_type == b.order_type && a.product == b.product && a.validity == b.validity &&
-         a.price == b.price && a.trigger_price == b.trigger_price &&
-         a.market_protection_millipct == b.market_protection_millipct && a.tag.view() == b.tag.view() &&
-         a.is_paper == b.is_paper;
-}
-
 constexpr OrderHandle kEmptySlot = 0xFFFF'FFFF;
 constexpr std::size_t kTradeSlotsPerOrder = 16;
 
@@ -90,6 +79,7 @@ constexpr std::size_t kTradeSlotsPerOrder = 16;
   }
 }
 
+// Postgres CHECKs and column ranges on `order`, so an order that can't be stored is refused here.
 [[nodiscard]] bool storable(const OrderDetails& d) noexcept {
   const bool needs_price = d.order_type == OrderType::kLimit || d.order_type == OrderType::kSl;
   const bool needs_trigger = d.order_type == OrderType::kSl || d.order_type == OrderType::kSlM;
@@ -105,6 +95,16 @@ constexpr std::size_t kTradeSlotsPerOrder = 16;
 }
 
 }  // namespace
+
+bool same_request(const OrderDetails& a, const OrderDetails& b) noexcept {
+  return a.client_order_id.view() == b.client_order_id.view() && a.parent_id == b.parent_id &&
+         a.account_id == b.account_id && a.user_id == b.user_id && a.strategy_id == b.strategy_id &&
+         a.source == b.source && a.instrument_id == b.instrument_id && a.side == b.side && a.qty == b.qty &&
+         a.order_type == b.order_type && a.product == b.product && a.validity == b.validity &&
+         a.price == b.price && a.trigger_price == b.trigger_price &&
+         a.market_protection_millipct == b.market_protection_millipct && a.tag.view() == b.tag.view() &&
+         a.is_paper == b.is_paper && a.slice_parent == b.slice_parent;
+}
 
 std::string_view to_string(OrderStatus s) noexcept {
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-constant-array-index): every enumerator is in range
@@ -211,6 +211,11 @@ bool Oms::remember_trade(OrderHandle handle, std::string_view id) noexcept {
 std::expected<Intake, Error> Oms::intake(const OrderDetails& details) noexcept {
   if (!storable(details)) {
     return std::unexpected(Error{ErrorCode::kInvalidArgument, "oms: order can't be stored"});
+  }
+  // A parent link and a slice intent come together, from FreezeSlicer alone. Recovery uses restore(), where a
+  // child has its link and no intent (the intent isn't stored).
+  if (details.slice_parent.has_value() != details.slice.sliced()) {
+    return std::unexpected(Error{ErrorCode::kInvalidArgument, "oms: a slice link without its intent"});
   }
   if (const auto existing = find_client(details.client_order_id.view()); existing.has_value()) {
     if (!same_request(orders_[*existing].details, details)) {
@@ -339,6 +344,7 @@ std::expected<OrderStatus, Error> Oms::record(Order& order, OrderStatus to, std:
     return std::unexpected(kSinkFull);
   }
   order.status = to;
+  order.went_unknown = order.went_unknown || to == OrderStatus::kUnknown;
   order.seq = event.seq;
   order.filled_qty = filled;
   order.broker_order_id = broker_id;
@@ -585,7 +591,8 @@ std::expected<OrderHandle, Error> Oms::restore(const RecoveredOrder& recovered) 
                           .seq = recovered.seq,
                           .filled_qty = recovered.filled_qty,
                           .broker_order_id = broker_id,
-                          .needs_reconcile = true});
+                          .needs_reconcile = true,
+                          .went_unknown = recovered.status == OrderStatus::kUnknown});
   const auto handle = static_cast<OrderHandle>(orders_.size() - 1);
   index_client(handle);
   for (const std::string& trade : recovered.trade_ids) {

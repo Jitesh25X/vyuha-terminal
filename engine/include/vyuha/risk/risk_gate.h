@@ -64,7 +64,16 @@ enum class Verdict : std::uint8_t {
 };
 
 // Why a rule refused, when the rule's own code isn't specific enough.
-enum class RuleReason : std::uint8_t { kRule, kTriggerSide, kTriggerBand, kDataMissing, kNoCover, kUncover };
+enum class RuleReason : std::uint8_t {
+  kRule,
+  kTriggerSide,
+  kTriggerBand,
+  kDataMissing,
+  kNoCover,
+  kUncover,
+  kFreezeUnknown,   // R-ORDER-SHAPE: an F&O contract with no freeze quantity, and more than one lot (D-51)
+  kFreezeExceeded,  // R-ORDER-SHAPE: an F&O order above the largest size its freeze quantity allows (D-54)
+};
 
 // What a rule needed and didn't have (D-27). The refusal's reason names it: R-DATA-MISSING:positions.
 enum class DataSource : std::uint8_t { kNone, kPositions, kPnl, kMargin, kGreeks, kDiscipline, kMark };
@@ -93,9 +102,12 @@ struct RuleResult {
 
 inline constexpr std::string_view kTriggerSideReason = "R-TRIGGER-SIDE";
 inline constexpr std::string_view kTriggerBandReason = "R-TRIGGER-BAND";
+inline constexpr std::string_view kFreezeUnknownReason = "R-FREEZE-UNKNOWN";
+inline constexpr std::string_view kFreezeExceededReason = "R-FREEZE-EXCEEDED";
 
 // The order's reason code when it is refused. It's the rule's code, except for a rejection with a reason of
-// its own: R-DUP's full table, which needs an alert, and R-FAT-FINGER's stop triggers.
+// its own: R-DUP's full table, which needs an alert, R-FAT-FINGER's stop triggers, and the others in
+// RuleReason.
 [[nodiscard]] std::string_view reason_text(const RuleResult& result) noexcept;
 
 // Worked out once per evaluation. instrument and account are null when the context doesn't know them.
@@ -105,6 +117,9 @@ struct GateFacts {
   bool opening{true};
   const InstrumentRef* instrument{nullptr};
   const AccountState* account{nullptr};
+  // RiskGate::check on a freeze-quantity parent, which is sliced next: R-FREEZE-EXCEEDED does not apply to it
+  // (D-54). Never set by evaluate.
+  bool sliced_parent{false};
 };
 
 // A rule: a plain function, called through a fixed table with no virtual dispatch. It must be noexcept, must
@@ -138,6 +153,21 @@ struct GateDecision {
   }
 };
 
+// What a check-only evaluation found (D-49). It has no ApprovedOrder and no way to make one: a passed check
+// sends nothing.
+struct GateCheck {
+  std::optional<RuleResult> rejection{};  // NOLINT(readability-redundant-member-init)
+  std::array<RuleResult, kRuleCount> warnings{};
+  std::size_t warning_count{0};
+  GateStamp stamp{};               // NOLINT(readability-redundant-member-init)
+  std::int64_t flip_close_qty{0};  // as in GateDecision
+
+  [[nodiscard]] bool passed() const noexcept { return !rejection.has_value(); }
+  [[nodiscard]] std::span<const RuleResult> warning_list() const noexcept {
+    return std::span(warnings).first(warning_count);
+  }
+};
+
 // The pre-trade gate. Runs on the core thread: no allocation, no locks, no exceptions.
 class RiskGate {
  public:
@@ -153,6 +183,13 @@ class RiskGate {
   // refused with R-LIVE-DISABLED unless the table holds every rule of the chain: a gate missing rules must
   // not approve real orders.
   [[nodiscard]] GateDecision evaluate(GateContext& ctx, const oms::OrderDetails& order) const noexcept;
+
+  // The check on a freeze-quantity parent's full size before any child is sent (D-49): every rule in chain
+  // order except R-OPS, with the same applicability, incomplete-gate refusal and pause observation as
+  // evaluate. It takes nothing (no on_approved runs: no OPS token, duplicate entry or reserved margin) and
+  // approves nothing: each child still goes through evaluate. The only change to ctx is what seeing a pause
+  // does (D-36). One rule's reason differs too: R-FREEZE-EXCEEDED is not applied (D-54).
+  [[nodiscard]] GateCheck check(GateContext& ctx, const oms::OrderDetails& order) const noexcept;
 
   // Every rule of §3 is in the table.
   [[nodiscard]] bool complete() const noexcept { return count_ == kRuleCount; }
@@ -170,6 +207,14 @@ class RiskGate {
     std::int64_t flip_close_qty{0};
   };
   [[nodiscard]] static Direction direction(const GateContext& ctx, const oms::OrderDetails& order) noexcept;
+
+  // Everything evaluate and check share, so the two cannot drift: the pause observation, the facts and the
+  // chain. `parent_check` leaves out R-OPS and tells the rules (GateFacts::sliced_parent). Fills `out` (a
+  // GateDecision or a GateCheck, in place: copying one costs tens of ns on the hot path) except
+  // stamp.eval_ns, and returns the facts. Defined and used only in risk_gate.cc.
+  template <class Out>
+  [[nodiscard]] GateFacts run_chain(GateContext& ctx, const oms::OrderDetails& order, bool parent_check,
+                                    Out& out) const noexcept;
 
   std::array<Rule, kRuleCount> rules_{};
   std::size_t count_{0};

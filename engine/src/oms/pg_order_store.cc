@@ -233,6 +233,45 @@ void record_dup_table_full(pqxx::work& tx, const std::string& id, const OrderEve
   return payload;
 }
 
+// D-48: the parent a child was cut from, in the same transaction as the child's first event and before its
+// row. Its fields are the child's, which the slicer copied from the parent, except the id, the quantity and
+// the client_order_id. The first child writes it and nothing ever updates it. A later child finds it there,
+// and it must be the same parent: a reused id with another request is refused like a unique violation, so
+// that child alone is quarantined.
+void write_slice_parent(pqxx::work& tx, const OrderDetails& d, const SliceParent& parent) {
+  const pqxx::result inserted = tx.exec(
+      R"(INSERT INTO order_slice_parent (id, client_order_id, account_id, user_id, strategy_id, source,
+           instrument_id, side, qty, order_type, product, validity, price, trigger_price, is_paper, created_at)
+         VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5::uuid, $6::order_source, $7, $8::order_side, $9,
+           $10::order_type, $11::product_type, $12::validity_type, $13::numeric, $14::numeric, $15,
+           'epoch'::timestamptz + $16::bigint * interval '1 microsecond')
+         ON CONFLICT (id) DO NOTHING RETURNING id)",
+      pqxx::params{parent.id.to_string(), std::string(parent.client_order_id.view()),
+                   d.account_id.to_string(), d.user_id.to_string(), text(d.strategy_id),
+                   std::string(name(d.source)), d.instrument_id, std::string(name(d.side)), parent.qty,
+                   std::string(name(d.order_type)), std::string(name(d.product)),
+                   std::string(name(d.validity)), text(d.price), text(d.trigger_price), d.is_paper.paper(),
+                   d.created_at / kNanosPerMicro});
+  if (!inserted.empty()) {
+    return;
+  }
+  const bool same =
+      tx.exec(R"(SELECT client_order_id = $2 AND qty = $3 AND account_id = $4::uuid AND instrument_id = $5
+                   AND side = $6::order_side AND order_type = $7::order_type AND product = $8::product_type
+                   AND price IS NOT DISTINCT FROM $9::numeric
+                   AND trigger_price IS NOT DISTINCT FROM $10::numeric AND is_paper = $11
+                 FROM order_slice_parent WHERE id = $1::uuid)",
+              pqxx::params{parent.id.to_string(), std::string(parent.client_order_id.view()), parent.qty,
+                           d.account_id.to_string(), d.instrument_id, std::string(name(d.side)),
+                           std::string(name(d.order_type)), std::string(name(d.product)), text(d.price),
+                           text(d.trigger_price), d.is_paper.paper()})
+          .one_row()[0]
+          .as<bool>();
+  if (!same) {
+    throw pqxx::sql_error("order event: slice parent id holds another request", "", kUniqueViolation);
+  }
+}
+
 void write_event(pqxx::work& tx, const OrderEventRecord& e) {
   const std::string id = e.order_id.to_string();
   const Nanos micros = e.ts / kNanosPerMicro;
@@ -241,15 +280,20 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
       throw pqxx::sql_error("order event: first event without its order", "", "22023");
     }
     const OrderDetails& d = *e.details;
+    std::optional<std::string> slice_parent_id;
+    if (d.slice_parent.has_value()) {
+      write_slice_parent(tx, d, *d.slice_parent);
+      slice_parent_id = d.slice_parent->id.to_string();
+    }
     tx.exec(
         R"(INSERT INTO "order" (id, parent_id, client_order_id, account_id, user_id, strategy_id, source,
              instrument_id, side, qty, order_type, product, validity, price, trigger_price, market_protection_pct,
-             status, tag, is_paper, created_at, updated_at)
+             status, tag, is_paper, created_at, updated_at, slice_parent_id)
            VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6::uuid, $7::order_source, $8, $9::order_side, $10,
              $11::order_type, $12::product_type, $13::validity_type, $14::numeric, $15::numeric, $16::numeric,
              $17::order_status, $18, $19,
              'epoch'::timestamptz + $20::bigint * interval '1 microsecond',
-             'epoch'::timestamptz + $21::bigint * interval '1 microsecond')
+             'epoch'::timestamptz + $21::bigint * interval '1 microsecond', $22::uuid)
            ON CONFLICT (id) DO NOTHING)",
         pqxx::params{id,
                      text(d.parent_id),
@@ -271,7 +315,8 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
                      std::string(d.tag.view()),
                      d.is_paper.paper(),
                      d.created_at / kNanosPerMicro,
-                     micros});
+                     micros,
+                     slice_parent_id});
   }
   const std::string payload = event_payload(e);
   // A retry after an unknown commit finds the row already there, so nothing is written or alerted twice.
@@ -682,8 +727,10 @@ std::expected<std::vector<RecoveredOrder>, Error> load_open_orders(const std::st
              o.strategy_id::text, o.source::text, o.instrument_id, o.side::text, o.qty, o.filled_qty,
              o.order_type::text, o.product::text, o.validity::text, o.price::text, o.trigger_price::text,
              o.market_protection_pct::text, o.status::text, o.broker_order_id, o.tag, o.is_paper,
-             (extract(epoch FROM o.created_at) * 1000000)::bigint, e.seq, e.to_status::text
+             (extract(epoch FROM o.created_at) * 1000000)::bigint, e.seq, e.to_status::text,
+             p.id::text, p.qty, p.client_order_id
            FROM "order" o
+           LEFT JOIN order_slice_parent p ON p.id = o.slice_parent_id
            LEFT JOIN LATERAL (SELECT seq, to_status FROM order_event WHERE order_id = o.id
                               ORDER BY seq DESC LIMIT 1) e ON true
            WHERE o.status NOT IN ('RISK_REJECTED', 'FILLED', 'CANCELLED', 'BROKER_REJECTED', 'EXPIRED')
@@ -711,6 +758,11 @@ std::expected<std::vector<RecoveredOrder>, Error> load_open_orders(const std::st
       const auto last_status = optional_field<std::string>(row, 23);
       const auto seq = optional_field<std::int32_t>(row, 22);
       r.broker_order_id = optional_field<std::string>(row, 18).value_or("");
+      if (const auto parent = parse_uuid(row, 24, ok); parent.has_value()) {
+        SliceParent link{.id = *parent, .qty = row[25].as<std::int32_t>()};
+        ok = ok && link.client_order_id.assign(row[26].as<std::string>());
+        d.slice_parent = link;
+      }
       if (!ok || !id || !account || !user || !source || !side || !type || !product || !validity || !status ||
           !seq || !last_status || *last_status != row[17].as<std::string>() ||
           !d.client_order_id.assign(row[2].as<std::string>()) || !d.tag.assign(row[19].as<std::string>())) {

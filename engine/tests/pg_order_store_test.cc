@@ -5,6 +5,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <thread>
@@ -19,6 +22,7 @@
 #include "require_services.h"
 #include "test_gate.h"
 #include "vyuha/core/clock.h"
+#include "vyuha/oms/freeze_slicer.h"
 #include "vyuha/oms/oms.h"
 #include "vyuha/oms/order_router.h"
 
@@ -1034,6 +1038,281 @@ TEST(PgOrderStore, ShutdownGivesUpInBoundedTimeAndErrorsDontLeakTheUrl) {
   }
   EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(30));
 }
+
+// ---- D-48: the freeze-quantity parent ----
+// NOLINTBEGIN(bugprone-unchecked-optional-access): the slicer sets the link on every child
+
+class FixedIds final : public IOrderIdSource {
+ public:
+  // NOLINTNEXTLINE(bugprone-exception-escape): the indices are in range, so at() cannot throw
+  [[nodiscard]] Uuid next() noexcept override {
+    Uuid id;
+    id.bytes.fill(0xC0);
+    id.bytes.at(15) = ++drawn_;
+    return id;
+  }
+
+ private:
+  std::uint8_t drawn_{0};
+};
+
+// Three children (10, 10, 5) of one 25-share parent, "client-1".
+std::vector<OrderDetails> sliced(const Seeded& s) {
+  const OrderDetails parent = details(s, 1, 25);
+  FixedIds ids;
+  std::vector<OrderDetails> out(3, parent);
+  EXPECT_EQ(FreezeSlicer::slice(parent, 10, ids, out), 3U);
+  return out;
+}
+
+TEST(PgOrderStore, ASlicedParentIsWrittenOnceWithItsChildrenAndComesBack) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  const std::vector<OrderDetails> children = sliced(s);
+  const std::string parent_row =
+      "SELECT id::text || '|' || client_order_id || '|' || account_id::text || '|' || user_id::text || '|' "
+      "|| "
+      "source::text || '|' || instrument_id::text || '|' || side::text || '|' || qty::text || '|' || "
+      "order_type::text || '|' || product::text || '|' || validity::text || '|' || price::text || '|' || "
+      "trigger_price::text || '|' || is_paper::text || '|' || "
+      "(extract(epoch FROM created_at) * 1000000)::bigint::text || '|' || xmin::text FROM order_slice_parent";
+  std::string first_seen;
+  {
+    PgOrderEventWriter writer(db.url(), nullptr);
+    Oms oms(writer, clock, 8);
+    ASSERT_TRUE(oms.create(children[0]).has_value());
+    wait_written(writer, 1);
+    {
+      pqxx::connection c(db.url());
+      pqxx::read_transaction tx(c);
+      first_seen = tx.query_value<std::string>(parent_row);
+      // The same transaction wrote the parent, the child and its event.
+      EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM order_slice_parent p "
+                                    "JOIN \"order\" o ON o.slice_parent_id = p.id AND o.xmin = p.xmin "
+                                    "JOIN order_event e ON e.order_id = o.id AND e.xmin = p.xmin"),
+                1);
+    }
+    ASSERT_TRUE(oms.create(children[1]).has_value());
+    ASSERT_TRUE(oms.create(children[2]).has_value());
+    wait_written(writer, 3);
+    EXPECT_TRUE(writer.healthy());
+  }
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM order_slice_parent"), 1);
+  EXPECT_EQ(tx.query_value<std::string>(parent_row), first_seen);  // xmin too: never updated
+  EXPECT_EQ(first_seen.substr(0, first_seen.rfind('|')),
+            children[0].slice_parent->id.to_string() + "|client-1|" + s.account + "|" + s.user +
+                "|strategy|" + std::to_string(s.instrument) +
+                "|SELL|25|SL|NRML|IOC|2450.0500|2460.0000|true|1767000000123456");
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM \"order\" WHERE slice_parent_id IS NOT NULL "
+                                "AND parent_id IS NULL"),
+            3);
+  for (const auto& [privilege, granted] :
+       {std::pair{"SELECT", true}, std::pair{"INSERT", true}, std::pair{"UPDATE", false},
+        std::pair{"DELETE", false}, std::pair{"TRUNCATE", false}}) {
+    const std::string asks =
+        std::string("SELECT has_table_privilege('vyuha_app', 'order_slice_parent', '") + privilege + "')";
+    EXPECT_EQ(tx.query_value<bool>(asks), granted) << privilege;
+  }
+  EXPECT_TRUE(
+      tx.query_value<bool>("SELECT has_table_privilege('vyuha_readonly', 'order_slice_parent', 'SELECT')"));
+  EXPECT_FALSE(
+      tx.query_value<bool>("SELECT has_table_privilege('vyuha_readonly', 'order_slice_parent', 'INSERT')"));
+
+  const auto loaded = load_open_orders(db.url());
+  ASSERT_TRUE(loaded.has_value());
+  ASSERT_EQ(loaded->size(), 3U);
+  for (const RecoveredOrder& r : *loaded) {
+    ASSERT_TRUE(r.details.slice_parent.has_value());
+    EXPECT_EQ(*r.details.slice_parent, *children[0].slice_parent);
+    EXPECT_FALSE(r.details.parent_id.has_value());
+    EXPECT_FALSE(r.details.slice.sliced());  // not stored: it matters only inside the duplicate window
+  }
+}
+
+// A second sliced parent under a client_order_id already used (a retry after a restart): nothing of it is
+// stored, neither row, and it is reported refused so it never goes out.
+TEST(PgOrderStore, ADuplicateSliceParentLeavesNeitherRow) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  const std::vector<OrderDetails> children = sliced(s);
+  PgOrderEventWriter writer(db.url(), nullptr);
+  Oms oms(writer, clock, 8);
+  ASSERT_TRUE(oms.create(children[0]).has_value());
+  wait_written(writer, 1);
+  OrderDetails again = children[1];
+  again.slice_parent->id = uuid_of("0190a3b4-7c2d-7e11-8f00-0000000000aa");  // client-1 once more
+  ASSERT_TRUE(oms.create(again).has_value());
+  // And a child that can't go in takes its new parent down with it: one transaction.
+  OrderDetails orphan = children[2];
+  orphan.slice_parent->id = uuid_of("0190a3b4-7c2d-7e11-8f00-0000000000bb");
+  ASSERT_TRUE(orphan.slice_parent->client_order_id.assign("another"));
+  orphan.account_id = uuid_of(s.account);
+  orphan.instrument_id = s.instrument;
+  orphan.id = uuid_of("0190a3b4-7c2d-7e11-8f00-0000000000cc");
+  ASSERT_TRUE(orphan.client_order_id.assign("clash"));
+  OrderDetails holder = details(s, 2, 1);
+  ASSERT_TRUE(holder.client_order_id.assign("clash"));
+  {
+    PgOrderEventWriter other(db.url(), nullptr);
+    Oms elsewhere(other, clock, 2);
+    ASSERT_TRUE(elsewhere.create(holder).has_value());
+    wait_written(other, 1);
+  }
+  ASSERT_TRUE(oms.create(orphan).has_value());
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  std::size_t refused = 0;
+  Uuid id;
+  while (refused < 2 && std::chrono::steady_clock::now() < deadline) {
+    refused += writer.try_pop_refused(id) ? 1U : 0U;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_EQ(refused, 2U);
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM order_slice_parent"), 1);
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM \"order\""), 2);  // the first child and the holder
+}
+
+// A parent id already stored with another request: that child is refused alone, and the row is untouched.
+TEST(PgOrderStore, AReusedParentIdWithAnotherRequestIsRefused) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  const std::vector<OrderDetails> children = sliced(s);
+  PgOrderEventWriter writer(db.url(), nullptr);
+  Oms oms(writer, clock, 16);
+  ASSERT_TRUE(oms.create(children[0]).has_value());
+  wait_written(writer, 1);
+
+  std::vector<OrderDetails> others;
+  const auto changed = [&](int n, const auto& change) {
+    OrderDetails d = children[1];
+    d.id = uuid_of("0190a3b4-7c2d-7e11-8f00-0000000001" + std::to_string(10 + n));
+    EXPECT_TRUE(d.client_order_id.assign("other-" + std::to_string(n)));
+    change(d);
+    others.push_back(d);
+  };
+  changed(0, [](OrderDetails& d) { EXPECT_TRUE(d.slice_parent->client_order_id.assign("client-9")); });
+  changed(1, [](OrderDetails& d) { d.slice_parent->qty = 26; });
+  changed(2, [](OrderDetails& d) { d.side = Side::kBuy; });
+  changed(3, [](OrderDetails& d) { d.order_type = OrderType::kLimit; });
+  changed(4, [](OrderDetails& d) { d.product = Product::kMis; });
+  changed(5, [](OrderDetails& d) { d.price = Price::from_units(24'501'000); });
+  changed(6, [](OrderDetails& d) { d.trigger_price = Price::from_units(24'601'000); });
+  changed(7, [](OrderDetails& d) { d.is_paper = kLiveOrder; });
+  for (const OrderDetails& d : others) {
+    ASSERT_TRUE(oms.create(d).has_value());
+  }
+  ASSERT_TRUE(oms.create(children[2]).has_value());  // the same parent still goes in
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  std::size_t refused = 0;
+  Uuid id;
+  while ((refused < others.size() || writer.written() < others.size() + 2) &&
+         std::chrono::steady_clock::now() < deadline) {
+    refused += writer.try_pop_refused(id) ? 1U : 0U;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_EQ(refused, others.size());
+  EXPECT_TRUE(writer.healthy());  // per order: no batch retry loop
+  pqxx::connection c(db.url());
+  pqxx::read_transaction tx(c);
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM \"order\""), 2);
+  EXPECT_EQ(tx.query_value<std::string>(
+                "SELECT client_order_id || '|' || qty::text || '|' || side::text FROM order_slice_parent"),
+            "client-1|25|SELL");
+  EXPECT_EQ(tx.query_value<int>("SELECT count(*) FROM alert_event WHERE title = 'ORDER_EVENT_REFUSED' "
+                                "AND body->>'sqlstate' = '23505'"),
+            static_cast<int>(others.size()));
+}
+
+// The writer as the application role: SELECT and INSERT on the parent are all it needs.
+TEST(PgOrderStore, TheAppRoleCanWriteAndRecoverASlicedParent) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);
+  const Seeded s = seed(db.url());
+  const TickingClock clock;
+  const std::string url =
+      db.url() + (db.url().find('?') == std::string::npos ? "?" : "&") + "options=-c%20role%3Dvyuha_app";
+  {
+    pqxx::connection c(url);
+    pqxx::read_transaction tx(c);
+    ASSERT_EQ(tx.query_value<std::string>("SELECT current_user"), "vyuha_app");
+  }
+  const std::vector<OrderDetails> children = sliced(s);
+  PgOrderEventWriter writer(url, nullptr);
+  Oms oms(writer, clock, 8);
+  for (const OrderDetails& child : children) {
+    ASSERT_TRUE(oms.create(child).has_value());
+  }
+  wait_written(writer, 3);
+  Uuid id;
+  EXPECT_FALSE(writer.try_pop_refused(id));
+  const auto loaded = load_open_orders(url);
+  ASSERT_TRUE(loaded.has_value());
+  EXPECT_EQ(loaded->size(), 3U);
+}
+
+void run_migration(const std::string& url, const std::string& file) {
+  std::ifstream in(std::filesystem::path(VYUHA_MIGRATIONS_DIR) / file);
+  ASSERT_TRUE(in.good()) << file;
+  pqxx::connection c(url);
+  pqxx::nontransaction(c).exec(std::string(std::istreambuf_iterator<char>(in), {}));
+}
+
+TEST(PgOrderStore, TheSliceParentMigrationReversesUnlessAChildExists) {
+  const std::string admin = admin_url();
+  if (admin.empty()) {
+    VYUHA_SKIP_WITHOUT_SERVICE("VYUHA_TEST_POSTGRES_URL not set");
+  }
+  const TempDb db(admin);  // a throwaway database, migrated up
+  const Seeded s = seed(db.url());
+  const std::string has_table = "SELECT to_regclass('order_slice_parent') IS NOT NULL";
+  const std::string has_column =
+      "SELECT count(*) FROM information_schema.columns WHERE table_name = 'order' AND column_name = "
+      "'slice_parent_id'";
+  const auto expect_schema = [&](bool present) {
+    pqxx::connection c(db.url());
+    pqxx::read_transaction tx(c);
+    EXPECT_EQ(tx.query_value<bool>(has_table), present);
+    EXPECT_EQ(tx.query_value<int>(has_column), present ? 1 : 0);
+  };
+  expect_schema(true);
+  run_migration(db.url(), "000014_order_slice_parent.down.sql");
+  expect_schema(false);
+  run_migration(db.url(), "000014_order_slice_parent.up.sql");
+  expect_schema(true);
+
+  const TickingClock clock;
+  {
+    PgOrderEventWriter writer(db.url(), nullptr);
+    Oms oms(writer, clock, 2);
+    ASSERT_TRUE(oms.create(sliced(s)[0]).has_value());
+    wait_written(writer, 1);
+  }
+  EXPECT_THROW(run_migration(db.url(), "000014_order_slice_parent.down.sql"), pqxx::sql_error);
+  expect_schema(true);
+}
+
+// NOLINTEND(bugprone-unchecked-optional-access)
 
 }  // namespace
 }  // namespace vyuha::oms

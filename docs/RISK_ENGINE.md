@@ -52,7 +52,7 @@ Desk defaults are **seed values for a staging desk**. The owner sets real values
 | 6 | `R-INSTR-BAN` | Instrument in F&O ban: only position-reducing orders allowed | opening |
 | 7 | `R-INSTR-RESTRICTED` | Desk restricted list | all |
 | 8 | `R-INSTR-EXPIRED` | Contract expired / invalid lot multiple | all |
-| 9 | `R-ORDER-SHAPE` | Qty multiple of lot; price on tick grid; required fields per type; MARKET allowed; a buy SL's limit at or above its trigger and a sell SL's at or below it | all |
+| 9 | `R-ORDER-SHAPE` | Qty multiple of lot; price on tick grid; required fields per type; MARKET allowed; a buy SL's limit at or above its trigger and a sell SL's at or below it. An F&O order over one lot on a contract with no freeze value is `R-FREEZE-UNKNOWN` (D-51), closing orders included. A single F&O order above the largest lot multiple strictly below the freeze value (never less than one lot) is `R-FREEZE-EXCEEDED` (D-52, D-54); the check-only evaluation of a sliced parent is exempt | all |
 | 10 | `R-FAT-FINGER` | Price within `fat_finger_pct` of a fresh LTP (at most 3 s old) and within the circuit band. A live order needs a known band (D-22). SL and SL-M: a buy stop's trigger must be above the LTP and a sell stop's below it, otherwise the reason is `R-TRIGGER-SIDE`; a trigger outside a known circuit band has the reason `R-TRIGGER-BAND`; the trigger must be within `fat_finger_pct` of the LTP; the same stale-LTP rule applies | priced orders and stops |
 | 11 | `R-ORDER-VALUE` | `max_order_value`, `max_order_qty_lots` | all |
 | 12 | `R-DUP` | Duplicate within `dup_window_ms`: same account, instrument, side, qty, price and trigger. Slices of one intent are exempt from each other (D-24). A full table rejects with `R-DUP-TABLE-FULL` and alerts | all |

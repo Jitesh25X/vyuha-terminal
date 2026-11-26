@@ -19,9 +19,9 @@ from typing import Any
 import httpx
 
 from ...db import alert_admins, audit, connect
-from . import kite, store, upstox
+from . import freeze, kite, store, upstox
 from .merge import merge
-from .model import SourceRow
+from .model import Instrument, SourceRow
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +106,24 @@ def parse(files: Files) -> tuple[list[SourceRow], list[SourceRow]]:
     return k, u
 
 
+def log_freeze_source(
+    upstox_rows: list[SourceRow], instruments: list[Instrument], found: freeze.Status
+) -> None:
+    """One summary line per sync (D-52). Counts are in the message: formatters may drop `extra=`."""
+    log.info(
+        "freeze quantity source upstox.%s: %d instruments have a value in the file, "
+        "%d F&O instruments have none in the file, %d invalid values ignored; "
+        "F&O contracts now: %d carried forward, %d inherited, %d unknown",
+        upstox.FREEZE_QTY_FIELD,
+        sum(i.freeze_qty is not None for i in instruments),
+        sum(i.segment in ("FUT", "OPT") and i.freeze_qty is None for i in instruments),
+        sum(r.freeze_qty_invalid for r in upstox_rows),
+        len(found.carried),
+        len(found.inherited),
+        len(found.unknown),
+    )
+
+
 async def run(dsn: str, day: date, fetch: Fetcher, *, allow_large_change: bool = False) -> dict[str, Any]:
     """Sync the master for `day`. Returns a report; raises after alerting admins on failure."""
     try:
@@ -128,6 +146,7 @@ async def run(dsn: str, day: date, fetch: Fetcher, *, allow_large_change: bool =
                         f"(> {MAX_CLOSE_RATIO:.0%}); re-run with --allow-large-change after checking the files"
                     )
                 ban_date, banned = await store.apply_fo_ban(conn, day)
+                freeze_status = await freeze.status(conn, day)
                 report: dict[str, Any] = {
                     "date": day.isoformat(),
                     "kite_rows": len(k),
@@ -151,6 +170,8 @@ async def run(dsn: str, day: date, fetch: Fetcher, *, allow_large_change: bool =
         raise
     for c in m.conflicts[:20]:
         log.warning("conflict: %s", c)
+    log_freeze_source(u, m.instruments, freeze_status)
+    await freeze.raise_alerts(dsn, freeze_status)
     log.info("instrument sync done", extra={"report": report})
     return report
 

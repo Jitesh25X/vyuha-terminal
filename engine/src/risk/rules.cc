@@ -8,6 +8,7 @@
 #include <optional>
 
 #include "rule_support.h"
+#include "vyuha/oms/freeze_slicer.h"
 #include "vyuha/risk/wide.h"
 
 namespace vyuha::risk {
@@ -184,6 +185,25 @@ constexpr bool on_grid(Price p, Price tick) noexcept { return p > Price{} && p.u
          (o.side == oms::Side::kBuy ? *o.price < *o.trigger_price : *o.price > *o.trigger_price);
 }
 
+// An F&O order's size against the freeze quantity, for every order: paper and live, opening and reducing.
+// Equities are never refused here. With none known, only one lot goes (D-51). Otherwise nothing above the
+// largest child the slicer would cut, but never less than one lot, so bad master data still lets a trader
+// exit (D-54). A parent about to be sliced is exempt from the second, not the first.
+Outcome freeze_size(const InstrumentRef& i, std::int32_t qty, bool sliced_parent) noexcept {
+  if (i.segment == Segment::kEq) {
+    return {};
+  }
+  const bool unknown = i.freeze_qty <= 0;
+  const std::int32_t most =
+      unknown ? i.lot_size : std::max(oms::FreezeSlicer::largest_child(i.freeze_qty, i.lot_size), i.lot_size);
+  if (qty <= most || (sliced_parent && !unknown)) {
+    return {};
+  }
+  Outcome out = reject(most, qty);
+  out.reason = unknown ? RuleReason::kFreezeUnknown : RuleReason::kFreezeExceeded;
+  return out;
+}
+
 Outcome order_shape(const GateContext& ctx, const OrderDetails& o, const GateFacts& f) noexcept {
   const InstrumentRef* i = f.instrument;
   if (i == nullptr || i->lot_size <= 0 || i->tick_size <= Price{}) {
@@ -191,6 +211,9 @@ Outcome order_shape(const GateContext& ctx, const OrderDetails& o, const GateFac
   }
   if (o.qty <= 0 || o.qty % i->lot_size != 0) {
     return reject(i->lot_size, o.qty);
+  }
+  if (const Outcome frozen = freeze_size(*i, o.qty, f.sliced_parent); frozen.verdict != Verdict::kPass) {
+    return frozen;
   }
   const bool wants_price = o.order_type == OrderType::kLimit || o.order_type == OrderType::kSl;
   const bool wants_trigger = o.order_type == OrderType::kSl || o.order_type == OrderType::kSlM;
