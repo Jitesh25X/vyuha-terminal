@@ -107,6 +107,10 @@ RiskGate::Direction RiskGate::direction(const GateContext& ctx, const oms::Order
   return out;
 }
 
+bool RiskGate::reduces(const GateContext& ctx, const oms::OrderDetails& order) noexcept {
+  return !direction(ctx, order).opening;
+}
+
 template <class Out>
 GateFacts RiskGate::run_chain(GateContext& ctx, const oms::OrderDetails& order, bool parent_check,
                               Out& out) const noexcept {

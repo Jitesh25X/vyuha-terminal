@@ -1,24 +1,62 @@
 #!/usr/bin/env bash
 # Grep-level guards for CLAUDE.md invariants. Cheap, fast, runs in CI and `make verify`.
+# Every check reads only files git tracks (`git ls-files | xargs grep`, see tg), so ignored files (local config,
+# secrets, build output, caches) are never opened. A new file counts once it is added (`git add -N` is enough).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Without a git checkout every check would find nothing and pass: refuse to run instead.
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  echo "✖ check-invariants: not inside a git checkout, so no tracked files to scan" >&2
+  exit 2
+fi
+if [ -z "$(git ls-files | head -n 1)" ]; then
+  echo "✖ check-invariants: git tracks no files, so there is nothing to scan" >&2
+  exit 2
+fi
 fail=0
+broken="$(mktemp)"
+trap 'rm -f "$broken"' EXIT
 check() { # $1 description, $2 command producing offending lines
   local out; out="$(eval "$2" || true)"
+  if [ -s "$broken" ]; then echo "✖ $1: could not scan (see above)" >&2; exit 2; fi
   if [ -n "$out" ]; then echo "✖ $1"; echo "$out" | sed 's/^/    /'; fail=1; else echo "✔ $1"; fi
+}
+# tg GREP_OPTIONS... -- PATHSPEC...: grep (the system grep, so \b etc. mean what they always did) over the tracked
+# files that match the git pathspecs, printing path:line:text.
+tg() {
+  local opts=() list rc=0
+  while [ "$1" != "--" ]; do opts+=("$1"); shift; done
+  shift
+  # A failing `git ls-files` must not look like "nothing found". tg runs inside check's command substitution,
+  # so it can't exit the script itself: it marks $broken, and check exits 2 on seeing it.
+  list="$(mktemp)"
+  if ! git ls-files -z -- "$@" >"$list" 2>/dev/null; then
+    rm -f "$list"
+    echo "✖ check-invariants: git ls-files failed for: $*" >&2
+    echo x >"$broken"
+    return 0
+  fi
+  # grep exits 1 when nothing matches (fine); xargs turns that into 123. A pathspec may match no file yet.
+  xargs -0 -r grep -H "${opts[@]}" <"$list" 2>/dev/null || rc=$?
+  rm -f "$list"
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ] && [ "$rc" -ne 123 ]; then
+    echo "✖ check-invariants: grep/xargs failed (rc $rc) for: $*" >&2
+    echo x >"$broken"
+  fi
+  return 0
 }
 
 check "no live broker order endpoints in tests/fixtures" \
-  "grep -RInE '(api\.kite\.trade|api(-hft)?\.upstox\.com).*/(orders|gtt)' --include='*' engine/tests quant/tests intel/tests gateway web/e2e 2>/dev/null | grep -v '/fixtures/vcr/'"
+  "tg -InE '(api\.kite\.trade|api(-hft)?\.upstox\.com).*/(orders|gtt)' -- engine/tests quant/tests intel/tests gateway web/e2e | grep -v '/fixtures/vcr/'"
 
 check "LIVE_TRADING_ENABLED never true in committed configs" \
-  "grep -RInE 'LIVE_TRADING_ENABLED=(1|true|TRUE|yes)' --exclude-dir=.git --exclude-dir=node_modules --exclude=check-invariants.sh --exclude=guard-bash.sh --exclude=cases.tsv --exclude='*.md' ."
+  "tg -InE 'LIVE_TRADING_ENABLED=(1|true|TRUE|yes)' -- . ':!*.md' ':!*check-invariants.sh' ':!*guard-bash.sh' ':!*cases.tsv'"
 
 check "engine: no system_clock::now outside WallClock" \
-  "grep -RIn 'system_clock::now' engine/src engine/include 2>/dev/null | grep -v 'wall_clock'"
+  "tg -In 'system_clock::now' -- engine/src engine/include | grep -v 'wall_clock'"
 
 check "engine: no double/float prices in oms/risk/broker" \
-  "grep -RInE '\b(double|float)\b[^;]*(price|Price|ltp|qty)' engine/src/oms engine/src/risk engine/src/broker 2>/dev/null"
+  "tg -InE '\b(double|float)\b[^;]*(price|Price|ltp|qty)' -- engine/src/oms engine/src/risk engine/src/broker"
 
 # Invariant 1. The type system stops a constructor call (tests/compile_fail.cc); these catch what it can't.
 check "engine: ApprovedOrder's only friend is RiskGate" \
@@ -28,26 +66,41 @@ check "engine: ApprovedOrder's only friend is RiskGate" \
 check "engine: Source's only friend is KillSwitch and SliceIntent's only friend is FreezeSlicer" \
   "grep -nE '^[[:space:]]*friend[[:space:]]' engine/include/vyuha/oms/oms.h | grep -vE 'friend class (risk::KillSwitch|FreezeSlicer);|friend bool operator=='"
 check "engine: only the kill-switch code names the kill-generated source" \
-  "grep -RIn 'Source::kKillFlatten' engine/src engine/include engine/bindings engine/bench 2>/dev/null | grep -vE '^engine/include/vyuha/(oms/oms\.h|risk/kill_switch\.h):'"
+  "tg -In 'Source::kKillFlatten' -- engine/src engine/include engine/bindings engine/bench | grep -vE '^engine/include/vyuha/(oms/oms\.h|risk/kill_switch\.h):'"
 check "engine: no cast or byte copy makes a Source or SliceIntent" \
-  "grep -RInE '(reinterpret_cast|bit_cast|const_cast|memcpy|memmove|start_lifetime_as)[^;]*(\bSource\b|SliceIntent)' engine/src engine/include engine/tests engine/bindings engine/bench 2>/dev/null"
+  "tg -InE '(reinterpret_cast|bit_cast|const_cast|memcpy|memmove|start_lifetime_as)[^;]*(\bSource\b|SliceIntent)' -- engine/src engine/include engine/tests engine/bindings engine/bench"
 
 # compile_fail.cc holds such lines on purpose (ctest compile_fail.* requires each to fail to compile). Only a line
 # in that file that also carries the marker is skipped, so a real violation elsewhere in it is still caught.
 check "engine: no cast or byte copy makes an ApprovedOrder" \
-  "grep -RInE '(reinterpret_cast|bit_cast|const_cast|memcpy|memmove|start_lifetime_as)[^;]*ApprovedOrder' engine/src engine/include engine/tests engine/bindings engine/bench 2>/dev/null | grep -vE '^engine/tests/compile_fail\.cc:[0-9]+:.*// invariant-allow: compile-fail fixture\$'"
+  "tg -InE '(reinterpret_cast|bit_cast|const_cast|memcpy|memmove|start_lifetime_as)[^;]*ApprovedOrder' -- engine/src engine/include engine/tests engine/bindings engine/bench | grep -vE '^engine/tests/compile_fail\.cc:[0-9]+:.*// invariant-allow: compile-fail fixture\$'"
 
 check "audit_event never updated/deleted/truncated" \
-  "grep -RInEi '(update|delete from|truncate)[[:space:]]+(table[[:space:]]+)?audit_event' --include='*.go' --include='*.py' --include='*.sql' --include='*.cc' gateway quant intel engine db 2>/dev/null | grep -v 'audit_no_update\|audit_immutable\|REVOKE'"
+  "tg -InEi '(update|delete from|truncate)[[:space:]]+(table[[:space:]]+)?audit_event' -- '*.go' '*.py' '*.sql' '*.cc' | grep -E '^(gateway|quant|intel|engine|db)/' | grep -v 'audit_no_update\|audit_immutable\|REVOKE'"
 
 check "MCP tool registry has no mutating tools" \
-  "grep -RInE 'def (place|modify|cancel)_order|set_limit|release_kill' intel/src 2>/dev/null"
+  "tg -InE 'def (place|modify|cancel)_order|set_limit|release_kill' -- intel/src"
 
 check "desk agents: no mutating tools in agent definitions" \
-  "grep -RInE '(place|modify|cancel)_order|set_limit|release_kill|set_kill|transition_strategy' intel/agents 2>/dev/null"
+  "tg -InE '(place|modify|cancel)_order|set_limit|release_kill|set_kill|transition_strategy' -- intel/agents"
 
 check "lean: no GPU/CUDA wheels or full Boost requested" \
-  "grep -RInE 'nvidia-|cuda|\"boost\"[[:space:]]*[,\]]' --include=pyproject.toml --include=vcpkg.json --include=uv.lock . 2>/dev/null"
+  "tg -InE 'nvidia-|cuda|\"boost\"[[:space:]]*[,\]]' -- ':(glob)**/pyproject.toml' ':(glob)**/vcpkg.json' ':(glob)**/uv.lock'"
+
+# D-57: tests never migrate or write the dev database. Only the throwaway helpers (gateway/internal/testdb and its
+# own test, quant/tests/conftest.py, engine/tests/pg_temp_db.h) read the server URL; they create a database and drop it.
+# A test may still apply one migration file to a database that one of those helpers gave it.
+test_paths=('gateway/*_test.go' 'quant/tests/*.py' 'intel/tests/*.py' 'engine/tests/*.cc' 'engine/tests/*.h'
+  'web/e2e/*.ts' 'web/src/*.test.ts' 'web/src/*.test.tsx')
+tests_run_migrations() {
+  tg -InE '\b(MigrateUp|runMigrate|newMigrate)\(|\bmigrate\.New\(|\bmigrate[^a-z]+(up|down|force)\b' -- "${test_paths[@]}"
+}
+tests_reach_the_server() {
+  tg -InE '(Getenv|LookupEnv|getenv|environ\.get)\(.(VYUHA_TEST_)?POSTGRES_URL|environ\[.(VYUHA_TEST_)?POSTGRES_URL|process\.env(\.|\[.)(VYUHA_TEST_)?POSTGRES_URL|config\.Load\(os\.Getenv\)|(localhost|127\.0\.0\.1):5432' \
+    -- "${test_paths[@]}" ':!gateway/internal/testdb/testdb.go' ':!gateway/internal/testdb/testdb_test.go' ':!quant/tests/conftest.py' ':!engine/tests/pg_temp_db.h'
+}
+check "tests: migrations run only through the throwaway helpers" tests_run_migrations
+check "tests: only the throwaway helpers reach the Postgres server named by the environment" tests_reach_the_server
 
 # The Bash guard hook must still block (and allow) every case on record, so a hook edit can't silently drop one.
 check "guard hook: every case in .claude/hooks/tests/cases.tsv" \

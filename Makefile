@@ -38,7 +38,7 @@ endef
 
 CLEAN_DIRS := engine/build gateway/bin web/dist web/test-results web/playwright-report
 
-.PHONY: clean-space bootstrap up down engine-deps web-gen proto-fresh staging-build dev-secrets dev-gateway migrate migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine lint-engine lint-gateway lint-quant lint-intel lint-web test-gateway test-quant test-intel test-web bench fuzz fuzz-kite fuzz-upstox e2e lint verify invariants
+.PHONY: clean-space bootstrap up down engine-deps web-gen proto-fresh staging-build dev-secrets dev-gateway migrate migrate-check migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine lint-engine lint-gateway lint-quant lint-intel lint-web test-gateway test-quant test-intel test-web bench fuzz fuzz-kite fuzz-upstox e2e lint verify invariants
 
 # Installs ONE component, just-in-time: make bootstrap C=cpp   (core|proto|cpp|go|py|web)
 # Add CHECK=1 to only report what is present / would be installed.
@@ -55,6 +55,14 @@ down:
 # Postgres from M0 (golang-migrate via vyuhactl); ClickHouse from M1.7 (profile md); Neo4j from M6.1 (profile graph)
 migrate:
 	cd gateway && go run ./cmd/vyuhactl migrate up
+
+# Schema drift (D-57): a throwaway database built from db/migrations vs the dev database (read only): version,
+# dirty flag, then tables, constraints, indexes, enums, functions, triggers and grants. Needs `make up`.
+# VYUHA_MIGRATE_CHECK_DB=name compares another database. Part of `make verify`, not CI (no dev database there).
+# Exit 0 no drift, 1 drift, 2 it could not run. Don't run it in parallel (make -j) with the DB test suites: its
+# migration can touch the cluster-wide roles (000001) without the advisory lock the test helpers take.
+migrate-check:
+	@scripts/migrate-check.sh
 
 migrate-ch:
 	for f in db/clickhouse/*.sql; do docker compose -f deploy/docker-compose.dev.yml exec -T clickhouse clickhouse-client --user vyuha --password vyuha --multiquery < $$f; done
@@ -228,5 +236,5 @@ invariants:
 
 # VYUHA_REQUIRE_DB=1: a test whose service is down fails rather than skips. Needs `make up PROFILES="core md"`.
 verify: export VYUHA_REQUIRE_DB = 1
-verify: lint test e2e invariants
+verify: lint test e2e migrate-check invariants
 	@echo "✔ verify complete"

@@ -266,6 +266,9 @@ inline constexpr std::string_view kDupTableFull = "R-DUP-TABLE-FULL";
 // Cancelled while it waited to be sent, so it never reached the broker. Audited, with no alert: someone
 // asked.
 inline constexpr std::string_view kCancelledInQueue = "CANCELLED_IN_QUEUE";
+// A slice child still waiting to be sent when its parent stopped (D-56), so it never reached the broker.
+// Audited, with no alert, as CANCELLED_IN_QUEUE is.
+inline constexpr std::string_view kParentStopped = "PARENT_STOPPED";
 
 struct Intake {
   OrderHandle handle{0};

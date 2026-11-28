@@ -118,7 +118,8 @@ struct GateFacts {
   const InstrumentRef* instrument{nullptr};
   const AccountState* account{nullptr};
   // RiskGate::check on a freeze-quantity parent, which is sliced next: R-FREEZE-EXCEEDED does not apply to it
-  // (D-54). Never set by evaluate.
+  // (D-54) when a whole lot fits below the freeze value, and neither it nor R-FREEZE-UNKNOWN when it only
+  // reduces (D-55). Never set by evaluate.
   bool sliced_parent{false};
 };
 
@@ -188,8 +189,14 @@ class RiskGate {
   // order except R-OPS, with the same applicability, incomplete-gate refusal and pause observation as
   // evaluate. It takes nothing (no on_approved runs: no OPS token, duplicate entry or reserved margin) and
   // approves nothing: each child still goes through evaluate. The only change to ctx is what seeing a pause
-  // does (D-36). One rule's reason differs too: R-FREEZE-EXCEEDED is not applied (D-54).
+  // does (D-36). The freeze-size refusals differ too: R-FREEZE-EXCEEDED is not applied (D-54), and for an
+  // order the check itself finds reducing, R-FREEZE-UNKNOWN is not applied either (D-55: the slicer sends it
+  // one lot at a time).
   [[nodiscard]] GateCheck check(GateContext& ctx, const oms::OrderDetails& order) const noexcept;
+
+  // Whether the order only reduces the account's position: not opening, as D-29 has it for evaluate and check
+  // (a flip is opening). False while positions aren't loaded.
+  [[nodiscard]] static bool reduces(const GateContext& ctx, const oms::OrderDetails& order) noexcept;
 
   // Every rule of §3 is in the table.
   [[nodiscard]] bool complete() const noexcept { return count_ == kRuleCount; }

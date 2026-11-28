@@ -32,6 +32,12 @@ namespace {
   return "ORDER_EXPIRED";
 }
 
+// Someone asked for a cancel, and for a stopped parent's child what is reported is the failure that stopped
+// the parent (D-56): both are audited, with no alert.
+[[nodiscard]] bool expiry_alerts(std::string_view reason) noexcept {
+  return reason != kCancelledInQueue && reason != kParentStopped;
+}
+
 [[nodiscard]] std::string_view name(Side v) noexcept { return v == Side::kBuy ? "BUY" : "SELL"; }
 [[nodiscard]] std::string_view name(OrderType v) noexcept {
   switch (v) {
@@ -389,8 +395,8 @@ void write_event(pqxx::work& tx, const OrderEventRecord& e) {
                                      'is_paper', o.is_paper)
            FROM "order" o WHERE o.id = $1::uuid)",
         pqxx::params{id, std::string(e.reason_code.view()), e.seq});
-    if (e.reason_code.view() == kCancelledInQueue) {
-      return;  // someone asked for this: audited, no alert
+    if (!expiry_alerts(e.reason_code.view())) {
+      return;
     }
     tx.exec(
         R"(INSERT INTO alert_event (user_id, severity, title, body)

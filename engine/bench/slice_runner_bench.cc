@@ -1,8 +1,9 @@
 // The freeze slicer on the core thread (F-EX-3, M2.5b): the parent check, a poll that is only waiting for an
-// OPS token (what every core loop pays while a parent is being paced), and a whole parent of ten children
-// started, gated and submitted. Rules 1 to 13, paper. Percentiles are counters; each sample includes one
-// steady_clock read pair. Compare within one machine only.
-// Run from the release preset: ./build/release/bench/vyuha_bench --benchmark_filter='SliceRunner|GateCheck'
+// OPS token (what every core loop pays while a parent is being paced), a poll watching a fully submitted
+// parent and the router's poll with slice children waiting to be sent (D-56), a one-lot close waiting (D-55),
+// and a whole parent of ten children started, gated and submitted. Rules 1 to 13, paper. Percentiles are
+// counters; each sample includes one steady_clock read pair. Compare within one machine only. Run from the
+// release preset: ./build/release/bench/vyuha_bench --benchmark_filter='SliceRunner|GateCheck|RouterPoll'
 
 #include <algorithm>
 #include <chrono>
@@ -17,6 +18,7 @@
 #include "vyuha/md/session.h"
 #include "vyuha/oms/slice_runner.h"
 #include "vyuha/risk/rules.h"
+#include "vyuha/risk/scope_book.h"
 
 namespace {
 
@@ -52,6 +54,23 @@ class NullSender final : public vyuha::oms::IOrderSender {
   [[nodiscard]] bool cancel(const vyuha::oms::Order& /*order*/) noexcept override { return true; }
 };
 
+// The gate's limits, or no send budget at all, so queued orders stay queued.
+class BenchLimits final : public vyuha::oms::ISendLimits {
+ public:
+  explicit BenchLimits(const vyuha::risk::GateContext& ctx) noexcept : real_(ctx) {}
+  [[nodiscard]] std::uint8_t ops_cap(const vyuha::oms::Uuid& account) const noexcept override {
+    return no_tokens_ ? std::uint8_t{0} : real_.ops_cap(account);
+  }
+  [[nodiscard]] std::uint8_t ops_venue(std::int64_t instrument_id) const noexcept override {
+    return real_.ops_venue(instrument_id);
+  }
+  void hold_every_order() noexcept { no_tokens_ = true; }
+
+ private:
+  bool no_tokens_{false};
+  vyuha::risk::GateSendLimits real_;
+};
+
 class CountingIds final : public vyuha::oms::IOrderIdSource {
  public:
   // NOLINTNEXTLINE(bugprone-exception-escape): the indices are in range, so at() cannot throw
@@ -79,7 +98,7 @@ struct Desk {
   NullSink sink;
   NullSender sender;
   CountingIds ids;
-  vyuha::risk::GateSendLimits limits{*ctx};
+  BenchLimits limits{*ctx};
   vyuha::oms::Oms oms{sink, clock, 16'384};
   vyuha::oms::OrderRouter router{
       oms, sink, sender, vyuha::oms::Venue::kPaper, {.tag_limit = 20, .capacity = 256}, limits};
@@ -198,6 +217,83 @@ void BM_SliceRunnerPollWaiting(benchmark::State& state) {
   report(state, samples);
 }
 BENCHMARK(BM_SliceRunnerPollWaiting)->Iterations(200'000);
+
+// A parent with all ten children submitted and still queued: the runner watches it on every poll (D-56).
+void BM_SliceRunnerPollWatching(benchmark::State& state) {
+  Desk d;
+  if (!d.runner.start(d.parent(0, 10)).has_value() || d.runner.poll() != 10) {
+    state.SkipWithError("the parent did not start");
+    return;
+  }
+  std::vector<std::int64_t> samples;
+  samples.reserve(static_cast<std::size_t>(state.max_iterations));
+  for (auto _ : state) {
+    timed(samples, [&] {
+      auto sent = d.runner.poll();
+      benchmark::DoNotOptimize(sent);
+    });
+  }
+  report(state, samples);
+}
+BENCHMARK(BM_SliceRunnerPollWatching)->Iterations(200'000);
+
+// The router's poll with ten slice children waiting for a send token: it asks about each one (D-56).
+void BM_RouterPollQueuedSlices(benchmark::State& state) {
+  Desk d;
+  d.limits.hold_every_order();
+  if (!d.runner.start(d.parent(0, 10)).has_value() || d.runner.poll() != 10) {
+    state.SkipWithError("the parent did not start");
+    return;
+  }
+  std::vector<std::int64_t> samples;
+  samples.reserve(static_cast<std::size_t>(state.max_iterations));
+  for (auto _ : state) {
+    timed(samples, [&] {
+      auto sent = d.router.poll();
+      benchmark::DoNotOptimize(sent);
+    });
+  }
+  if (d.router.pending() != 10) {
+    state.SkipWithError("the children did not stay queued");
+    return;
+  }
+  report(state, samples);
+}
+BENCHMARK(BM_RouterPollQueuedSlices)->Iterations(200'000);
+
+// A one-lot close (D-55) waiting for its eleventh token: each poll also asks whether it still only reduces.
+void BM_SliceRunnerPollWaitingClose(benchmark::State& state) {
+  Desk d;
+  vyuha::risk::ScopeBook positions(d.instruments, 64);
+  d.ctx->scopes = &positions;
+  positions.set_positions_loaded(true);
+  static_cast<void>(d.instruments.put(kInstrument, {.lot_size = kLot,
+                                                    .tick_size = Price::from_units(500),
+                                                    .exchange = vyuha::risk::Exchange::kNfo,
+                                                    .segment = vyuha::risk::Segment::kFut}));
+  static_cast<void>(positions.apply_fill({.who = {.account = d.account, .trader = d.user},
+                                          .instrument_id = kInstrument,
+                                          .side = vyuha::oms::Side::kBuy,
+                                          .qty = std::int64_t{20} * kLot,
+                                          .price = Price::from_units(1'000'000)}));
+  OrderDetails close = d.parent(0, 20);
+  close.side = vyuha::oms::Side::kSell;
+  if (!d.runner.start(close).has_value() || d.runner.poll() != 10) {
+    state.SkipWithError("the close did not start");
+    return;
+  }
+  static_cast<void>(d.router.poll());
+  std::vector<std::int64_t> samples;
+  samples.reserve(static_cast<std::size_t>(state.max_iterations));
+  for (auto _ : state) {
+    timed(samples, [&] {
+      auto sent = d.runner.poll();
+      benchmark::DoNotOptimize(sent);
+    });
+  }
+  report(state, samples);
+}
+BENCHMARK(BM_SliceRunnerPollWaitingClose)->Iterations(200'000);
 
 // start() plus the poll that gates, takes in and submits all ten children.
 void BM_SliceRunnerTenChildren(benchmark::State& state) {
