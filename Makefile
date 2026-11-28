@@ -38,7 +38,7 @@ endef
 
 CLEAN_DIRS := engine/build gateway/bin web/dist web/test-results web/playwright-report
 
-.PHONY: clean-space bootstrap up down engine-deps web-gen proto-fresh staging-build dev-secrets dev-gateway migrate migrate-check migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine lint-engine lint-gateway lint-quant lint-intel lint-web test-gateway test-quant test-intel test-web bench fuzz fuzz-kite fuzz-upstox e2e lint verify invariants
+.PHONY: clean-space bootstrap up down engine-deps web-gen proto-fresh staging-build dev-secrets dev-gateway migrate migrate-check migrate-ch migrate-neo4j proto proto-lint proto-breaking gen test test-engine lint-engine lint-gateway lint-quant lint-intel lint-web test-gateway test-quant test-intel test-web test-scripts bench fuzz fuzz-kite fuzz-upstox e2e lint verify invariants
 
 # Installs ONE component, just-in-time: make bootstrap C=cpp   (core|proto|cpp|go|py|web)
 # Add CHECK=1 to only report what is present / would be installed.
@@ -99,7 +99,10 @@ gen: proto
 proto-breaking:
 	cd proto && buf breaking --against '../.git#branch=main,subdir=proto'
 
-test: test-engine test-gateway test-quant test-intel test-web
+test: test-engine test-gateway test-quant test-intel test-web test-scripts
+
+test-scripts:
+	@bash scripts/tests/check-invariants-test.sh
 
 # ENGINE_PRESETS picks the CMake presets (CI runs debug, asan and tsan as separate jobs).
 # NATS/Postgres integration tests run when the dev stack is up (make up), like test-gateway.

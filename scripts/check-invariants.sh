@@ -16,7 +16,9 @@ fi
 fail=0
 broken="$(mktemp)"
 trap 'rm -f "$broken"' EXIT
+label=""
 check() { # $1 description, $2 command producing offending lines
+  label="$1"  # read by tg (same shell, copied into the command substitution) to name the check in errors
   local out; out="$(eval "$2" || true)"
   if [ -s "$broken" ]; then echo "✖ $1: could not scan (see above)" >&2; exit 2; fi
   if [ -n "$out" ]; then echo "✖ $1"; echo "$out" | sed 's/^/    /'; fail=1; else echo "✔ $1"; fi
@@ -24,7 +26,7 @@ check() { # $1 description, $2 command producing offending lines
 # tg GREP_OPTIONS... -- PATHSPEC...: grep (the system grep, so \b etc. mean what they always did) over the tracked
 # files that match the git pathspecs, printing path:line:text.
 tg() {
-  local opts=() list rc=0
+  local opts=() list errs rc=0
   while [ "$1" != "--" ]; do opts+=("$1"); shift; done
   shift
   # A failing `git ls-files` must not look like "nothing found". tg runs inside check's command substitution,
@@ -36,13 +38,21 @@ tg() {
     echo x >"$broken"
     return 0
   fi
-  # grep exits 1 when nothing matches (fine); xargs turns that into 123. A pathspec may match no file yet.
-  xargs -0 -r grep -H "${opts[@]}" <"$list" 2>/dev/null || rc=$?
+  # xargs can't tell grep's "no match" (1) from its errors (2+): BSD folds every child exit 1-125 into 1, GNU into 123.
+  # So the sh wrapper maps grep 0/1 to 0 and anything else to 255, which both xargs stop on and report as non-zero
+  # (BSD 1, GNU 124). Any non-zero xargs status is therefore a real error. grep's stderr goes to a file, shown on error.
+  # An empty list runs nothing (-r), which is "no match".
+  errs="$(mktemp)"
+  xargs -0 -r sh -c 'grep -H "$@"; r=$?; [ "$r" -le 1 ] || exit 255' _ "${opts[@]}" <"$list" 2>"$errs" || rc=$?
   rm -f "$list"
-  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ] && [ "$rc" -ne 123 ]; then
-    echo "✖ check-invariants: grep/xargs failed (rc $rc) for: $*" >&2
-    echo x >"$broken"
+  if [ "$rc" -ne 0 ]; then
+    {
+      echo "✖ check-invariants: grep failed (xargs rc $rc) in check \"$label\" for: $*"
+      sed 's/^/    grep: /' "$errs"
+    } >&2
+    echo "$label" >"$broken"
   fi
+  rm -f "$errs"
   return 0
 }
 
@@ -60,11 +70,11 @@ check "engine: no double/float prices in oms/risk/broker" \
 
 # Invariant 1. The type system stops a constructor call (tests/compile_fail.cc); these catch what it can't.
 check "engine: ApprovedOrder's only friend is RiskGate" \
-  "grep -nE '^[[:space:]]*friend[[:space:]]' engine/include/vyuha/risk/approved_order.h | grep -v 'friend class RiskGate;'"
+  "tg -nE '^[[:space:]]*friend[[:space:]]' -- engine/include/vyuha/risk/approved_order.h | grep -v 'friend class RiskGate;'"
 
 # D-23 and D-24: the kill-generated source only from the kill-switch code, a slice intent only from the slicer.
 check "engine: Source's only friend is KillSwitch and SliceIntent's only friend is FreezeSlicer" \
-  "grep -nE '^[[:space:]]*friend[[:space:]]' engine/include/vyuha/oms/oms.h | grep -vE 'friend class (risk::KillSwitch|FreezeSlicer);|friend bool operator=='"
+  "tg -nE '^[[:space:]]*friend[[:space:]]' -- engine/include/vyuha/oms/oms.h | grep -vE 'friend class (risk::KillSwitch|FreezeSlicer);|friend bool operator=='"
 check "engine: only the kill-switch code names the kill-generated source" \
   "tg -In 'Source::kKillFlatten' -- engine/src engine/include engine/bindings engine/bench | grep -vE '^engine/include/vyuha/(oms/oms\.h|risk/kill_switch\.h):'"
 check "engine: no cast or byte copy makes a Source or SliceIntent" \
@@ -105,5 +115,11 @@ check "tests: only the throwaway helpers reach the Postgres server named by the 
 # The Bash guard hook must still block (and allow) every case on record, so a hook edit can't silently drop one.
 check "guard hook: every case in .claude/hooks/tests/cases.tsv" \
   "out=\$(.claude/hooks/tests/run_cases.sh 2>&1) || echo \"\$out\""
+
+# TEST-ONLY seam, used by scripts/tests/check-invariants-test.sh and nothing else: when set, it ADDS one more check
+# that greps every tracked file for this pattern. It can't remove, skip or loosen any check above (they have run).
+if [ -n "${VYUHA_INVARIANTS_TEST_EXTRA_PATTERN:-}" ]; then
+  check "test-only extra pattern" "tg -InE \"\$VYUHA_INVARIANTS_TEST_EXTRA_PATTERN\" -- ."
+fi
 
 exit $fail
