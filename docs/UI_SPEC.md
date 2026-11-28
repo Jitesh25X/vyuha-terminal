@@ -106,6 +106,8 @@ Monaco editor in `STRAT` uses `@monaco-editor/react`, with Python language suppo
 - A flip refused by a limit offers "split into close 10 + open 4" from the rejection's `flip_close_qty`: two orders the trader confirms, the close first (D-38).
 - An order refused with `R-FREEZE-UNKNOWN` offers "close 1 lot" pre-filled: one keypress per lot (D-51).
 - A sliced order shows as one parent; a child the slicer took in and then dropped carries the reason `SLICE_DROPPED` (not a risk rejection: show it as "not sent"). `R-FREEZE-EXCEEDED` says the order is above the exchange freeze size and should be sliced.
+- The blotter shows why next to every `EXPIRED` order: "expired: parent stopped" (`PARENT_STOPPED`), "expired: queue age" (`EXPIRED_IN_QUEUE`), "expired: restart" (`EXPIRED_ON_RESTART`), "expired: engine paused" (`EXPIRED_AFTER_PAUSE`), "expired: cancelled before sending" (`CANCELLED_IN_QUEUE`); an unknown reason shows its code.
+- In the blotter, cancelling one working child of a sliced order asks "Cancel the remaining slices of this order too?", default yes. A child that was never sent because its parent stopped shows `PARENT_STOPPED`.
 - AI-drafted tickets show an `AI DRAFT` badge and the copilot's rationale (collapsible). The human must review and submit.
 
 ## 6. Visual design tokens

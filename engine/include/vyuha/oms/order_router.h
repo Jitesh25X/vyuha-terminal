@@ -65,6 +65,29 @@ class IBrokerOrderBook {
       std::string_view broker_tag) = 0;
 };
 
+// Whoever queues a slice child, so the router can ask it before sending (D-56). Core thread.
+class ISliceHold {
+ public:
+  ISliceHold() = default;
+  ISliceHold(const ISliceHold&) = delete;
+  ISliceHold& operator=(const ISliceHold&) = delete;
+  ISliceHold(ISliceHold&&) = delete;
+  ISliceHold& operator=(ISliceHold&&) = delete;
+  virtual ~ISliceHold() = default;
+  enum class Answer : std::uint8_t {
+    kGo,         // nothing is wrong
+    kStopped,    // the parent stopped: the system's doing (a failure, a pause, no longer reducing)
+    kCancelled,  // the parent was cancelled or dropped by a person or the kill switch
+  };
+  // Whether this queued order may still be sent. Asked immediately before every send, so the answer must
+  // come from the OMS as it is now, not from what an earlier poll saw. Once it is not kGo it stays so. Must
+  // not call the router.
+  [[nodiscard]] virtual Answer held_back(const OrderDetails& queued) noexcept = 0;
+  // OrderRouter::cancel or cancel_all is ending this queued order whose parent was still live. The parent
+  // must stop now, as the recorded expiry would stop it, whether or not the sink can take that record yet.
+  virtual void child_cancelled(const OrderDetails& queued) noexcept = 0;
+};
+
 // client_order_id in the broker's tag field (ADR-025): its letters and digits, keeping the last `limit`. The
 // tail, because the start of a UUIDv7 is a timestamp shared by orders made together.
 [[nodiscard]] std::string broker_tag(std::string_view client_order_id, std::size_t limit);
@@ -139,7 +162,19 @@ class OrderRouter {
   //
   // A full sink is kCapacityExceeded and the order stays NEW. Only this queue reaches the adapter, so an
   // order marked APPROVED some other way (Oms::apply, recovery) is never sent.
-  [[nodiscard]] std::expected<void, Error> submit(OrderHandle handle, risk::ApprovedOrder approved) noexcept;
+  //
+  // `hold`, for a slice child, is borrowed until the order leaves the queue or release() is called. Once it
+  // answers held_back other than kGo the order is never sent: it ends EXPIRED, audited with no alert, with
+  // PARENT_STOPPED (kStopped) or CANCELLED_IN_QUEUE (kCancelled: a person asked). A cancel or cancel_all of
+  // such an order whose parent was live holds it the same way (child_cancelled), so with a full or unhealthy
+  // sink it stays queued and unsendable until that can be recorded: poll retries it. For a slice child,
+  // queue age and a pause win over all of these on every path, cancel and cancel_all included: it ends
+  // EXPIRED_IN_QUEUE or EXPIRED_AFTER_PAUSE, with their alerts. An ordinary order, with no hold, is as it was
+  // (D-20): cancelled, even when old, it ends CANCELLED_IN_QUEUE with no alert. No OPS token is used.
+  [[nodiscard]] std::expected<void, Error> submit(OrderHandle handle, risk::ApprovedOrder approved,
+                                                  ISliceHold* hold = nullptr) noexcept;
+  // The hold is going away: nothing still queued under it is ever sent.
+  void release(const ISliceHold& hold) noexcept;
   // Sends queued cancels first, then what's durable, in order; returns how many new orders it handed to the
   // adapter. Never blocks. Everything sent uses the account's per-exchange budget, so at most its cap go in
   // any rolling second (D-20). An order with no token waits, and orders of other accounts or exchanges go
@@ -157,6 +192,8 @@ class OrderRouter {
   [[nodiscard]] std::uint64_t stale_approvals() const noexcept { return stale_approvals_; }
   [[nodiscard]] std::uint64_t expired_in_queue() const noexcept { return expired_in_queue_; }
   [[nodiscard]] std::uint64_t expired_after_pause() const noexcept { return expired_after_pause_; }
+  // Slice children ended PARENT_STOPPED (D-56).
+  [[nodiscard]] std::uint64_t pulled_back() const noexcept { return pulled_back_; }
 
   // Cancels everything the broker may hold, for the kill switch (M2.7). Nothing here waits on or is refused
   // by the order log: a cancel only reduces risk, so an outage, a full ring or a refused order can't stop
@@ -191,6 +228,9 @@ class OrderRouter {
     bool done{false};                // nothing left to do: poll removes it
     bool expire_after_pause{false};  // a pause was seen while it waited (D-36): expire it, never send it
     risk::ApprovedOrder approved;
+    ISliceHold* hold{nullptr};  // a slice child's: asked before it is sent
+    // Its parent stopped (D-56): never sent, only the expiry is left to record.
+    ISliceHold::Answer pulled{ISliceHold::Answer::kGo};
   };
   struct SendBucket {
     Uuid account{};
@@ -210,6 +250,15 @@ class OrderRouter {
   [[nodiscard]] Step advance(Pending& next, Nanos now, std::size_t& sent) noexcept;
   [[nodiscard]] bool paused_since(const risk::GateStamp& stamp) const noexcept;
   bool drop_unsent(Pending& pending) noexcept;  // false if the order had nothing left to end
+  static void ask_hold(Pending& pending) noexcept;
+  // After ask_hold, for a child of a live parent: the cancel holds it back as cancelled, and the parent
+  // stops.
+  static void hold_as_cancelled(Pending& pending) noexcept;
+  [[nodiscard]] static std::string_view pulled_reason(const Pending& pending) noexcept;
+  // Why a queued order is too old to send (a pause or the queue age limit), or empty.
+  [[nodiscard]] std::string_view overdue(const Pending& pending, Nanos now) const noexcept;
+  // Records EXPIRED and takes the order out of the queue. False, changing nothing, if the sink can't take it.
+  [[nodiscard]] bool expire(Pending& pending, std::string_view reason) noexcept;
   [[nodiscard]] OpsWindow& bucket(const Uuid& account, std::uint8_t venue) noexcept;
   [[nodiscard]] bool has_token(const OrderDetails& details, Nanos now, std::uint8_t cap) noexcept;
   void take_token(const OrderDetails& details, Nanos now) noexcept;
@@ -233,6 +282,7 @@ class OrderRouter {
   std::uint64_t stale_approvals_{0};
   std::uint64_t expired_in_queue_{0};
   std::uint64_t expired_after_pause_{0};
+  std::uint64_t pulled_back_{0};
   PauseWatch pause_;
 };
 

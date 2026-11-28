@@ -34,13 +34,15 @@ enum class SliceStop : std::uint8_t {
   kChildBrokerRejected,  // BROKER_REJECTED
   kChildExpired,         // EXPIRED: it waited too long in the send queue, or was dropped from it
   kChildUnknown,         // UNKNOWN, even if it has been reconciled since
+  // D-55: the next child of a one-lot close would no longer only reduce (or positions aren't loaded).
+  kNotReducing,
 };
 
 struct SliceView {
   Uuid parent_id{};
   std::int32_t requested{0};     // the parent's quantity
   std::size_t children{0};       // how many it was cut into
-  std::size_t children_sent{0};  // approved and handed to the router's queue
+  std::size_t children_sent{0};  // approved and handed to the router's queue (D-56 may still pull one back)
   std::int32_t unsent_qty{0};    // requested less what those carry; dropped for good once stopped
   SliceStop stopped{SliceStop::kNone};
   std::optional<risk::RuleResult> rejection{};  // NOLINT(readability-redundant-member-init): with kRefused
@@ -69,6 +71,9 @@ struct SliceRunnerConfig {
 // refused for a freeze value, whatever the instrument master says, until equity slicing is confirmed against
 // the broker docs (M3). An F&O parent is sliced when the quantity is above the largest child,
 // FreezeSlicer::largest_child: the largest whole number of lots strictly below the freeze quantity (D-52).
+// With no usable freeze quantity (none, or no whole lot below it) a parent of more than one lot that only
+// reduces the account's position (RiskGate::reduces) is cut into one-lot children (D-55), and every one of
+// them must still only reduce when it is gated; an opening or flipping one is refused.
 // Core thread only. Everything is allocated at construction, and start, poll, cancel and drop_all allocate
 // nothing.
 //
@@ -115,18 +120,39 @@ struct SliceRunnerConfig {
 //
 // A child taken into the OMS (NEW) whose parent is then dropped before it could be submitted is ended
 // RISK_REJECTED with reason SLICE_DROPPED: it never reached the router or the broker, and no rule refused it.
-class SliceRunner {
+//
+// D-56: once a parent has stopped, for any reason, none of its children still in the router's queue is sent:
+// each ends EXPIRED (PARENT_STOPPED; CANCELLED_IN_QUEUE after cancel() or drop_all(), which a person or the
+// kill switch asked for), or with the queue's own reason if it was also too old to send. The
+// router asks held_back immediately before every send, which looks at the OMS then, so it doesn't matter in
+// which order the core loop calls apply_events, poll and OrderRouter::poll. A parent is watched until none of
+// its children is queued, also after the last was submitted: a child's failure, a pause, the order log's
+// outage, cancel and drop_all stop it until then. Destroying the runner pulls back what it still has queued.
+class SliceRunner final : public ISliceHold {
  public:
   // Everything is borrowed and must outlive the runner. `gate` and `oms` must share one clock, and `sink`
   // must be the one `oms` and `router` use.
   SliceRunner(const risk::RiskGate& gate, risk::GateContext& ctx, Oms& oms, OrderRouter& router,
               IOrderEventSink& sink, IOrderIdSource& ids, const SliceRunnerConfig& config = {});
+  SliceRunner(const SliceRunner&) = delete;
+  SliceRunner& operator=(const SliceRunner&) = delete;
+  SliceRunner(SliceRunner&&) = delete;
+  SliceRunner& operator=(SliceRunner&&) = delete;
+  ~SliceRunner() override;
+
+  // For the router: whether this child's parent has stopped, looking at its children now, and stopping it if
+  // one has failed or, for a one-lot close, the child would no longer only reduce. kCancelled for a parent
+  // cancel() or drop_all() stopped (a person or the kill switch asked), kStopped for any other stop and for a
+  // child of no parent held here (fail closed).
+  [[nodiscard]] Answer held_back(const OrderDetails& queued) noexcept override;
+  void child_cancelled(const OrderDetails& queued) noexcept override;
 
   // Idempotent on parent.client_order_id among the parents held: the same request (same_request) returns
   // kExisting, a different one is kOrderDup.
   //
-  // An F&O instrument with no freeze quantity (0 or less) is never sliced: more than one lot of it goes to
-  // the parent check, which refuses it (kRefused, R-FREEZE-UNKNOWN, D-51).
+  // An F&O instrument with no usable freeze quantity: more than one lot that only reduces is sliced into
+  // one-lot children (D-55). Otherwise, with none (0 or less) it goes to the parent check, which refuses it
+  // (kRefused, R-FREEZE-UNKNOWN, D-51).
   //
   // kNotSliced when there is nothing to slice: the instrument is unknown or isn't F&O, the order is at most
   // one lot (whatever the freeze value, bad or unknown included, so a trader can always exit, D-54), the
@@ -134,10 +160,11 @@ class SliceRunner {
   // under this client_order_id (its intake decides whether that is a retry or a duplicate). Nothing is
   // recorded: the caller runs its normal intake, gate and submit.
   //
-  // Errors, with nothing recorded or sent: kInvalidArgument (more than one lot and no whole lot below the
-  // freeze quantity, which is bad master data; a parent already marked as a slice; a client_order_id too long
-  // to suffix), kOrderDup (this parent was sliced before, or its id is taken), kCapacityExceeded (more than
-  // max_children, or no room for another parent), kOrderLogUnavailable (ADR-027).
+  // Errors, with nothing recorded or sent: kInvalidArgument (more than one lot, opening, and no whole lot
+  // below the freeze quantity, which is bad master data; a parent already marked as a slice; a
+  // client_order_id too long to suffix), kOrderDup (this parent was sliced before, or its id is taken),
+  // kCapacityExceeded (more than max_children, or no room for another parent), kOrderLogUnavailable
+  // (ADR-027).
   //
   // A parent stays held, for idempotency and cancel, until its slot is needed: only one with nothing left to
   // send and no child still working is ever given up, the oldest first.
@@ -148,11 +175,12 @@ class SliceRunner {
   // polls the router separately.
   std::size_t poll() noexcept;
 
-  // Drops the unsent remainder and asks the router to cancel every child still working. False if no parent
-  // with this id is held. Safe to repeat.
+  // Drops the unsent remainder, pulls back the queued children (CANCELLED_IN_QUEUE) and asks the router to
+  // cancel every other child still working. False if no parent with this id is held. Safe to repeat.
   bool cancel(const Uuid& parent_id) noexcept;
-  // Drops every unsent remainder, and cancels nothing: for the kill switch and shutdown, with
-  // OrderRouter::cancel_all (M2.7).
+  // Drops every unsent remainder and holds back every queued child (the router's next poll or cancel_all
+  // records them as CANCELLED_IN_QUEUE), and cancels nothing at the broker: for the kill switch and shutdown,
+  // with OrderRouter::cancel_all (M2.7).
   void drop_all() noexcept;
 
   [[nodiscard]] std::optional<SliceView> view(const Uuid& parent_id) const noexcept;
@@ -181,8 +209,14 @@ class SliceRunner {
     Record record{Record::kNone};
     bool taken_in{false};  // the child at `next` is in the OMS (NEW) under `handle`
     OrderHandle handle{0};
+    bool closing{false};  // D-55: one-lot children of a close, each of which must still only reduce
+    bool settled{false};  // all submitted and none still queued: there is nothing left to stop
   };
 
+  // Still to be watched: not stopped, and with children to send or still queued.
+  [[nodiscard]] static bool open(const Parent& p) noexcept {
+    return p.stopped == SliceStop::kNone && !p.settled;
+  }
   [[nodiscard]] static bool sending(const Parent& p) noexcept {
     return p.stopped == SliceStop::kNone && p.next < p.count;
   }
@@ -194,9 +228,17 @@ class SliceRunner {
   void observe_pause() noexcept;
   [[nodiscard]] bool paused_since(const risk::GateStamp& stamp) const noexcept;
   // The largest child to cut `parent` into, or 0 when it isn't to be sliced, with `answer` set to what
-  // start() then returns.
-  [[nodiscard]] std::expected<std::int32_t, Error> child_size(const OrderDetails& parent,
-                                                              SliceStart& answer) noexcept;
+  // start() then returns. `closing` is set when they are the one-lot children of a close (D-55).
+  [[nodiscard]] std::expected<std::int32_t, Error> child_size(const OrderDetails& parent, SliceStart& answer,
+                                                              bool& closing) noexcept;
+  // A child submitted that may still be in the router's queue (APPROVED).
+  [[nodiscard]] bool has_queued(std::size_t slot) noexcept;
+  // Stops the parent for a pause or failed child the OMS already shows.
+  void notice(std::size_t slot) noexcept;
+  // stop(), only if there is something it would keep from being sent.
+  void stop_unsent(std::size_t slot, SliceStop why) noexcept;
+  // A parent with every child submitted, until none is queued.
+  void watch(std::size_t slot) noexcept;
   // Why a child already handed on, or taken in, ends the parent (D-53, and the order log's refusal).
   [[nodiscard]] std::optional<SliceStop> child_failure(std::size_t slot) noexcept;
   [[nodiscard]] Step advance(std::size_t slot) noexcept;

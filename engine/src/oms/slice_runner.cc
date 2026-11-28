@@ -29,6 +29,91 @@ SliceRunner::SliceRunner(const risk::RiskGate& gate, risk::GateContext& ctx, Oms
   order_.reserve(config.max_parents);
 }
 
+SliceRunner::~SliceRunner() { router_->release(*this); }
+
+bool SliceRunner::has_queued(std::size_t slot) noexcept {
+  for (std::size_t i = 0; i < parents_[slot].next; ++i) {
+    if (oms_->order(handle_of(slot, i)).status == OrderStatus::kApproved) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// What the OMS shows now stops a parent before anything else does, so a failure that was already there is the
+// reason, not the cancel that came after it.
+void SliceRunner::notice(std::size_t slot) noexcept {
+  if (!open(parents_[slot])) {
+    return;
+  }
+  if (paused_since(parents_[slot].checked)) {
+    stop(slot, SliceStop::kPaused);
+  } else if (const std::optional<SliceStop> failed = child_failure(slot); failed.has_value()) {
+    stop(slot, *failed);
+  }
+}
+
+void SliceRunner::stop_unsent(std::size_t slot, SliceStop why) noexcept {
+  if (sending(parents_[slot]) || has_queued(slot)) {
+    stop(slot, why);
+  }
+}
+
+ISliceHold::Answer SliceRunner::held_back(const OrderDetails& queued) noexcept {
+  for (const std::size_t slot : order_) {
+    if (child(slot, 0).slice != queued.slice) {
+      continue;
+    }
+    const Parent& p = parents_[slot];
+    if (open(p)) {
+      if (paused_since(p.checked)) {
+        stop(slot, SliceStop::kPaused);
+      } else if (const std::optional<SliceStop> failed = child_failure(slot); failed.has_value()) {
+        stop(slot, *failed);
+      } else if (p.closing && !risk::RiskGate::reduces(*ctx_, queued)) {
+        // D-55 at send time, so it doesn't depend on which of the router and the runner polls first.
+        // M2.6: when the book counts our own working orders, leave this queued child's own working
+        // quantity out here, as it is in the book already and must not count against itself.
+        stop(slot, SliceStop::kNotReducing);
+      }
+    }
+    switch (p.stopped) {
+      case SliceStop::kNone:
+        return Answer::kGo;
+      case SliceStop::kCancelled:
+      case SliceStop::kDropped:
+        return Answer::kCancelled;
+      default:
+        return Answer::kStopped;
+    }
+  }
+  return Answer::kStopped;  // no parent of it is held here, so nothing says it may still go
+}
+
+void SliceRunner::child_cancelled(const OrderDetails& queued) noexcept {
+  for (const std::size_t slot : order_) {
+    if (child(slot, 0).slice == queued.slice) {
+      stop(slot, SliceStop::kChildExpired);  // as its recorded expiry would, so no sibling is gated meanwhile
+      return;
+    }
+  }
+}
+
+void SliceRunner::watch(std::size_t slot) noexcept {
+  Parent& p = parents_[slot];
+  if (!open(p) || p.next < p.count) {
+    return;  // stopped or done with; one still sending is advance()'s to watch
+  }
+  // Failures first: the last queued child may have just failed or expired.
+  if (const std::optional<SliceStop> failed = child_failure(slot); failed.has_value()) {
+    stop(slot, *failed);
+  } else if (!has_queued(slot)) {
+    p.settled = true;
+  } else if (!sink_->healthy()) {
+    stop(slot, SliceStop::kOrderLog);
+  }
+}
+
 OrderDetails& SliceRunner::child(std::size_t slot, std::size_t i) noexcept {
   return children_[(slot * max_children_) + i];
 }
@@ -87,15 +172,15 @@ bool SliceRunner::paused_since(const risk::GateStamp& stamp) const noexcept {
 void SliceRunner::observe_pause() noexcept {
   const bool paused = pause_.observe(oms_->clock());
   for (const std::size_t slot : order_) {
-    if (sending(parents_[slot]) && (paused || paused_since(parents_[slot].checked))) {
-      stop(slot, SliceStop::kPaused);
+    if (open(parents_[slot]) && (paused || paused_since(parents_[slot].checked))) {
+      stop_unsent(slot, SliceStop::kPaused);
     }
   }
 }
 
 // The one place that decides whether, and into what size, an order is sliced.
-std::expected<std::int32_t, Error> SliceRunner::child_size(const OrderDetails& parent,
-                                                           SliceStart& answer) noexcept {
+std::expected<std::int32_t, Error> SliceRunner::child_size(const OrderDetails& parent, SliceStart& answer,
+                                                           bool& closing) noexcept {
   answer = SliceStart{.kind = SliceStart::Kind::kNotSliced};
   const risk::InstrumentRef* instrument =
       ctx_->instruments != nullptr ? ctx_->instruments->find(parent.instrument_id) : nullptr;
@@ -110,6 +195,16 @@ std::expected<std::int32_t, Error> SliceRunner::child_size(const OrderDetails& p
   if (parent.qty <= instrument->lot_size) {
     return 0;
   }
+  const std::int32_t largest = FreezeSlicer::largest_child(instrument->freeze_qty, instrument->lot_size);
+  if (largest != 0) {
+    return parent.qty <= largest ? 0 : largest;
+  }
+  // No usable freeze quantity, so it can only go a lot at a time (D-51, D-54). A pure close is cut into
+  // one-lot children (D-55).
+  if (instrument->lot_size > 0 && risk::RiskGate::reduces(*ctx_, parent)) {
+    closing = true;
+    return instrument->lot_size;
+  }
   if (instrument->freeze_qty <= 0) {
     // D-51: more than one lot with no freeze quantity is the gate's to refuse (R-FREEZE-UNKNOWN).
     const risk::GateCheck check = gate_->check(*ctx_, parent);
@@ -118,12 +213,8 @@ std::expected<std::int32_t, Error> SliceRunner::child_size(const OrderDetails& p
     }
     return 0;
   }
-  const std::int32_t largest = FreezeSlicer::largest_child(instrument->freeze_qty, instrument->lot_size);
-  if (largest == 0) {
-    return std::unexpected(
-        Error{ErrorCode::kInvalidArgument, "slicer: no whole lot below the freeze quantity"});
-  }
-  return parent.qty <= largest ? 0 : largest;
+  return std::unexpected(
+      Error{ErrorCode::kInvalidArgument, "slicer: no whole lot below the freeze quantity"});
 }
 
 // NOLINTNEXTLINE(bugprone-exception-escape): push_back is within the reserved capacity
@@ -146,7 +237,8 @@ std::expected<SliceStart, Error> SliceRunner::start(const OrderDetails& parent) 
     return SliceStart{.kind = SliceStart::Kind::kNotSliced};
   }
   SliceStart not_sliced;
-  const auto sized = child_size(parent, not_sliced);
+  bool closing = false;
+  const auto sized = child_size(parent, not_sliced, closing);
   if (!sized.has_value()) {
     return std::unexpected(sized.error());
   }
@@ -188,7 +280,8 @@ std::expected<SliceStart, Error> SliceRunner::start(const OrderDetails& parent) 
   std::erase(order_, *slot);  // if it held a finished parent
   order_.push_back(*slot);
   originals_[*slot] = parent;
-  parents_[*slot] = Parent{.used = true, .requested = parent.qty, .count = made, .checked = out.check.stamp};
+  parents_[*slot] = Parent{
+      .used = true, .requested = parent.qty, .count = made, .checked = out.check.stamp, .closing = closing};
   out.kind = SliceStart::Kind::kStarted;
   return out;
 }
@@ -204,6 +297,7 @@ std::size_t SliceRunner::poll() noexcept {
       }
       ++sent;
     }
+    watch(slot);
   }
   return sent;
 }
@@ -260,6 +354,11 @@ SliceRunner::Step SliceRunner::advance(std::size_t slot) noexcept {
     return Step::kDone;
   }
   const OrderDetails& order = child(slot, p.next);
+  // D-55: before anything is waited for or used up. Someone else may have closed the position.
+  if (p.closing && !risk::RiskGate::reduces(*ctx_, order)) {
+    stop(slot, SliceStop::kNotReducing);
+    return Step::kDone;
+  }
   // Checked before the gate, so that nothing is used up for a child that can't be taken further.
   if (router_->pending() >= router_->capacity()) {
     return Step::kWait;
@@ -323,7 +422,7 @@ SliceRunner::Step SliceRunner::hand_over(std::size_t slot, risk::ApprovedOrder a
     p.handle = taken->handle;
   }
 
-  const auto submitted = router_->submit(p.handle, std::move(approved));
+  const auto submitted = router_->submit(p.handle, std::move(approved), this);
   if (!submitted.has_value()) {
     switch (submitted.error().code) {
       case ErrorCode::kCapacityExceeded:  // not queued, and the order is still NEW
@@ -346,8 +445,8 @@ SliceRunner::Step SliceRunner::hand_over(std::size_t slot, risk::ApprovedOrder a
 
 void SliceRunner::stop(std::size_t slot, SliceStop why) noexcept {
   Parent& p = parents_[slot];
-  if (!sending(p)) {
-    return;  // the first reason stands
+  if (!open(p)) {
+    return;  // the first reason stands, or there is nothing left to stop
   }
   p.stopped = why;
   if (p.taken_in) {
@@ -414,7 +513,9 @@ bool SliceRunner::cancel(const Uuid& parent_id) noexcept {
   if (!slot.has_value()) {
     return false;
   }
-  stop(*slot, SliceStop::kCancelled);
+  // Stopped first, so the cancels below pull back the queued children (D-56).
+  notice(*slot);
+  stop_unsent(*slot, SliceStop::kCancelled);
   for (std::size_t i = 0; i < parents_[*slot].next; ++i) {
     static_cast<void>(router_->cancel(handle_of(*slot, i)));  // false: that child has nothing left to cancel
   }
@@ -423,7 +524,8 @@ bool SliceRunner::cancel(const Uuid& parent_id) noexcept {
 
 void SliceRunner::drop_all() noexcept {
   for (const std::size_t slot : order_) {
-    stop(slot, SliceStop::kDropped);
+    notice(slot);
+    stop_unsent(slot, SliceStop::kDropped);
   }
 }
 

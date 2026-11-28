@@ -75,7 +75,8 @@ OrderRouter::OrderRouter(Oms& oms, IOrderEventSink& sink, IOrderSender& sender, 
 }
 
 // NOLINTNEXTLINE(bugprone-exception-escape): within the reserved capacity, so push_back can't allocate
-std::expected<void, Error> OrderRouter::submit(OrderHandle handle, risk::ApprovedOrder approved) noexcept {
+std::expected<void, Error> OrderRouter::submit(OrderHandle handle, risk::ApprovedOrder approved,
+                                               ISliceHold* hold) noexcept {
   if (pending_.size() >= capacity_) {
     return std::unexpected(Error{ErrorCode::kCapacityExceeded, "router: queue full"});
   }
@@ -107,7 +108,8 @@ std::expected<void, Error> OrderRouter::submit(OrderHandle handle, risk::Approve
   if (!recorded.has_value()) {
     return std::unexpected(recorded.error());
   }
-  pending_.push_back(Pending{.handle = handle, .ticket = sink_->pushed(), .approved = std::move(approved)});
+  pending_.push_back(
+      Pending{.handle = handle, .ticket = sink_->pushed(), .approved = std::move(approved), .hold = hold});
   return {};
 }
 
@@ -144,23 +146,18 @@ OrderRouter::Step OrderRouter::advance(Pending& next, Nanos now, std::size_t& se
       next.done = true;
       return Step::kNext;
     }
-    if (next.expire_after_pause || paused_since(next.approved.stamp())) {
-      if (!oms_->apply(next.handle, OrderEvent::kExpire, {.reason_code = kExpiredAfterPause}).has_value()) {
-        return Step::kStop;  // the sink is full: the next poll tries again, and it is never sent
+    std::string_view ends = overdue(next, now);
+    if (ends.empty()) {
+      // D-56: asked now, after the OMS has everything the sink refused, so no order of the core loop's calls
+      // can let a stopped parent's child out. Before the token: pulling back takes none.
+      ask_hold(next);
+      if (next.pulled != ISliceHold::Answer::kGo) {
+        ends = pulled_reason(next);
       }
-      ++expired_after_pause_;
-      next.done = true;
-      return Step::kNext;
     }
-    // ADR-027, on the monotonic clock (D-26). A negative age can't happen, and would expire: fail closed.
-    const Nanos queued_for = now - next.approved.stamp().monotonic;
-    if (queued_for > queue_max_age_ || queued_for < 0) {
-      if (!oms_->apply(next.handle, OrderEvent::kExpire, {.reason_code = kExpiredInQueue}).has_value()) {
-        return Step::kStop;  // the sink is full: the next poll tries again, and it is never sent
-      }
-      ++expired_in_queue_;
-      next.done = true;
-      return Step::kNext;
+    if (!ends.empty()) {
+      // A full sink: the next poll tries again, and it is never sent.
+      return expire(next, ends) ? Step::kNext : Step::kStop;
     }
     const OrderDetails& details = next.approved.order();
     if (!has_token(details, oms_->clock().monotonic(), limits_->ops_cap(details.account_id))) {
@@ -226,18 +223,80 @@ bool OrderRouter::paused_since(const risk::GateStamp& stamp) const noexcept {
   return (clock.now() - stamp.ts) - (clock.monotonic() - stamp.monotonic) > kPauseGap;
 }
 
+std::string_view OrderRouter::overdue(const Pending& pending, Nanos now) const noexcept {
+  if (pending.expire_after_pause || paused_since(pending.approved.stamp())) {
+    return kExpiredAfterPause;
+  }
+  // ADR-027, on the monotonic clock (D-26). A negative age can't happen, and would expire: fail closed.
+  const Nanos queued_for = now - pending.approved.stamp().monotonic;
+  return queued_for > queue_max_age_ || queued_for < 0 ? kExpiredInQueue : std::string_view{};
+}
+
+bool OrderRouter::expire(Pending& pending, std::string_view reason) noexcept {
+  if (!oms_->apply(pending.handle, OrderEvent::kExpire, {.reason_code = reason}).has_value()) {
+    return false;
+  }
+  expired_after_pause_ += reason == kExpiredAfterPause ? 1U : 0U;
+  expired_in_queue_ += reason == kExpiredInQueue ? 1U : 0U;
+  pulled_back_ += reason == kParentStopped ? 1U : 0U;
+  pending.done = true;
+  return true;
+}
+
+std::string_view OrderRouter::pulled_reason(const Pending& pending) noexcept {
+  return pending.pulled == ISliceHold::Answer::kCancelled ? kCancelledInQueue : kParentStopped;
+}
+
+void OrderRouter::ask_hold(Pending& pending) noexcept {
+  if (pending.pulled == ISliceHold::Answer::kGo && pending.hold != nullptr) {
+    pending.pulled = pending.hold->held_back(pending.approved.order());  // then it stays as it is
+  }
+}
+
+void OrderRouter::hold_as_cancelled(Pending& pending) noexcept {
+  if (pending.pulled == ISliceHold::Answer::kGo && pending.hold != nullptr) {
+    pending.pulled = ISliceHold::Answer::kCancelled;
+    pending.hold->child_cancelled(pending.approved.order());
+  }
+}
+
+void OrderRouter::release(const ISliceHold& hold) noexcept {
+  for (Pending& p : pending_) {
+    if (p.hold == &hold) {
+      if (p.pulled == ISliceHold::Answer::kGo) {  // a cancel already latched stays what it was
+        p.pulled = ISliceHold::Answer::kStopped;
+      }
+      p.hold = nullptr;
+    }
+  }
+}
+
 // NOLINTNEXTLINE(bugprone-exception-escape): a failure here only logs static text
 bool OrderRouter::drop_unsent(Pending& pending) noexcept {
-  pending.done = true;
   const Order& order = oms_->order(pending.handle);
   if (order.status != OrderStatus::kApproved || order.needs_reconcile) {
+    pending.done = true;
     return false;  // storage refused it, or it has moved on: nothing to end
   }
+  std::string_view reason = kCancelledInQueue;
+  const bool pulled = pending.pulled != ISliceHold::Answer::kGo;
+  if (pulled) {  // D-56
+    reason = pulled_reason(pending);
+    // A slice child (every one is latched by now): queue age and a pause win on every path, so a cancel gives
+    // the same reason as a poll. An ordinary queued order is as it was.
+    const std::string_view late = overdue(pending, oms_->clock().monotonic());
+    reason = late.empty() ? reason : late;
+  }
+  if (expire(pending, reason)) {
+    return true;
+  }
+  if (pulled) {
+    return true;  // stays queued and unsendable until poll can record it
+  }
   // A full sink leaves the order APPROVED until the restart rule expires it. Either way it never goes out.
-  if (!oms_->apply(pending.handle, OrderEvent::kExpire, {.reason_code = kCancelledInQueue}).has_value()) {
-    if (quill::Logger* logger = log::engine(); logger != nullptr) {
-      LOG_ERROR(logger, "a cancelled order's expiry couldn't be recorded: the event sink is full");
-    }
+  pending.done = true;
+  if (quill::Logger* logger = log::engine(); logger != nullptr) {
+    LOG_ERROR(logger, "a cancelled order's expiry couldn't be recorded: the event sink is full");
   }
   return true;
 }
@@ -297,6 +356,18 @@ void OrderRouter::drain_refused() noexcept {
 // NOLINTNEXTLINE(bugprone-exception-escape): both vectors are reserved, so nothing here allocates
 OrderRouter::CancelAll OrderRouter::cancel_all() noexcept {
   drain_refused();  // a refusal still in the sink would make a refused order look cancellable
+  // Which parents had already stopped, before this call ends any sibling: the rest were cancelled by it, and
+  // held as such even if the sink can't record it yet.
+  for (Pending& p : pending_) {
+    if (!p.done && !p.sent) {
+      ask_hold(p);
+    }
+  }
+  for (Pending& p : pending_) {
+    if (!p.done && !p.sent) {
+      hold_as_cancelled(p);  // not asked again: the first of them may have stopped the parent by now
+    }
+  }
   for (Pending& p : pending_) {
     if (!p.done && !p.sent) {
       drop_unsent(p);
@@ -321,6 +392,8 @@ bool OrderRouter::cancel(OrderHandle handle) noexcept {
   drain_refused();  // a refusal still in the sink would make a refused order look cancellable
   for (Pending& p : pending_) {
     if (p.handle == handle && !p.done && !p.sent) {
+      ask_hold(p);
+      hold_as_cancelled(p);
       return drop_unsent(p);
     }
   }
